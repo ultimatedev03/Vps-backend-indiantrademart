@@ -1834,15 +1834,29 @@ router.get("/dashboard/recent-lead-purchases", async (req, res) => {
     const limit = Math.min(Number(req.query?.limit || 10), 50);
     const { data, error } = await supabase
       .from("lead_purchases")
-      .select("id, vendor_id, amount, payment_status, purchase_date, created_at, vendor:vendors(company_name)")
-      .order("purchase_date", { ascending: false })
+      .select("id, vendor_id, lead_id, amount, payment_status, purchase_date, purchase_datetime, updated_at, vendor:vendors(company_name)")
+      .order("purchase_datetime", { ascending: false, nullsFirst: false })
+      .order("purchase_date", { ascending: false, nullsFirst: false })
       .limit(limit);
 
     if (error) {
       return res.status(500).json({ success: false, error: error.message });
     }
 
-    return res.json({ success: true, orders: data || [] });
+    const orders = (data || []).map((purchase) => {
+      const purchaseDate =
+        purchase.purchase_date ||
+        purchase.purchase_datetime ||
+        purchase.updated_at ||
+        null;
+
+      return {
+        ...purchase,
+        purchase_date: purchaseDate,
+      };
+    });
+
+    return res.json({ success: true, orders });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });
   }
