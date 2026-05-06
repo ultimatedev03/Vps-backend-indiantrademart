@@ -147,6 +147,64 @@ const sanitizeVendorUpdates = (updates = {}) => {
   return cleaned;
 };
 
+const hasMeaningfulVendorField = (...values) =>
+  values.some((value) => {
+    if (value === undefined || value === null) return false;
+    if (typeof value === 'number') return Number.isFinite(value);
+    return String(value).trim() !== '';
+  });
+
+const calculateVendorProfileCompletion = (vendor = {}) => {
+  const fieldGroups = [
+    ['company_name'],
+    ['owner_name'],
+    ['phone'],
+    ['email'],
+    ['address', 'registered_address'],
+    ['gst_number'],
+    ['state', 'state_id'],
+    ['city', 'city_id'],
+    ['website_url'],
+    ['profile_image', 'avatar_url'],
+    ['primary_business_type'],
+    ['year_of_establishment'],
+  ];
+
+  const filledFields = fieldGroups.filter((group) =>
+    hasMeaningfulVendorField(...group.map((field) => vendor?.[field]))
+  ).length;
+
+  return Math.round((filledFields / fieldGroups.length) * 100);
+};
+
+const buildVendorResponse = (vendor = null) => {
+  if (!vendor) return null;
+
+  const storedProfileCompletion = Number(vendor?.profile_completion);
+  const derivedProfileCompletion = calculateVendorProfileCompletion(vendor);
+
+  return {
+    ...vendor,
+    vendor_id: String(vendor?.vendor_id || '').trim() || String(vendor?.id || '').trim() || null,
+    profile_completion: Number.isFinite(storedProfileCompletion)
+      ? Math.max(storedProfileCompletion, derivedProfileCompletion)
+      : derivedProfileCompletion,
+  };
+};
+
+const clearVendorCacheEntries = (vendorId = '') => {
+  const normalizedVendorId = String(vendorId || '').trim();
+  if (!normalizedVendorId) return;
+
+  [_cacheDash, _cacheLead, _cacheRecent, _cacheSupport, _cacheVendorMe, _cacheRecentLeads].forEach((cacheMap) => {
+    for (const key of cacheMap.keys()) {
+      if (String(key || '').includes(normalizedVendorId)) {
+        cacheMap.delete(key);
+      }
+    }
+  });
+};
+
 const PAN_NUMBER_RE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
 const AADHAR_NUMBER_RE = /^\d{12}$/;
 const IFSC_CODE_RE = /^[A-Z]{4}0[A-Z0-9]{6}$/;
@@ -1730,7 +1788,7 @@ async function consumeLeadForVendor({ vendorId, leadId, mode = 'AUTO', purchaseP
 // ✅ Current vendor profile (auth-required)
 router.get('/me', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
   try {
-    const vendor = await resolveVendorForUser(req.user);
+    const vendor = buildVendorResponse(await resolveVendorForUser(req.user));
     if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
     const ck = `me:${vendor.id}`;
     const hit = _getCached(_cacheVendorMe, ck);
@@ -1746,7 +1804,7 @@ router.get('/me', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
 // ✅ Update vendor profile (auth-required, bypasses RLS)
 router.put('/me', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
   try {
-    const vendor = await resolveVendorForUser(req.user);
+    const vendor = buildVendorResponse(await resolveVendorForUser(req.user));
     if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
 
     let payload;
@@ -1755,6 +1813,7 @@ router.put('/me', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
     } catch (validationError) {
       return res.status(400).json({ success: false, error: validationError.message });
     }
+    payload.profile_completion = calculateVendorProfileCompletion({ ...vendor, ...payload });
     payload.updated_at = new Date().toISOString();
 
     const { data, error } = await supabase
@@ -1765,7 +1824,9 @@ router.put('/me', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
       .maybeSingle();
 
     if (error) return res.status(500).json({ success: false, error: error.message });
-    return res.json({ success: true, vendor: data || { ...vendor, ...payload } });
+
+    clearVendorCacheEntries(vendor.id);
+    return res.json({ success: true, vendor: buildVendorResponse(data || { ...vendor, ...payload }) });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });
   }
@@ -1979,7 +2040,7 @@ router.delete('/me/banks/:bankId', requireAuth({ roles: ['VENDOR'] }), async (re
 // ✅ Upload image/media to Cloudinary when configured (auth-required, keeps Supabase fallback for dev)
 router.post('/me/upload', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
   try {
-    const vendor = await resolveVendorForUser(req.user);
+    const vendor = buildVendorResponse(await resolveVendorForUser(req.user));
     if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
 
     const bucket = String(req.body?.bucket || 'avatars').trim() || 'avatars';
@@ -2058,7 +2119,7 @@ router.post('/me/upload', requireAuth({ roles: ['VENDOR'] }), async (req, res) =
       if (buffer.length > KYC_DOC_MAX_BYTES) {
         return res.status(413).json({
           success: false,
-          error: 'KYC image too large (maximum 2MB)',
+          error: 'KYC image too large (maximum 5MB)',
         });
       }
     }
@@ -2144,7 +2205,7 @@ router.post('/me/upload', requireAuth({ roles: ['VENDOR'] }), async (req, res) =
 // ✅ Submit KYC for verification (auth-required)
 router.post('/me/kyc/submit', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
   try {
-    const vendor = await resolveVendorForUser(req.user);
+    const vendor = buildVendorResponse(await resolveVendorForUser(req.user));
     if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
     if (kycDocumentsAreLocked(vendor)) {
       return sendLockedKycResponse(res);
@@ -2158,6 +2219,8 @@ router.post('/me/kyc/submit', requireAuth({ roles: ['VENDOR'] }), async (req, re
       .maybeSingle();
 
     if (error) return res.status(500).json({ success: false, error: error.message });
+
+    clearVendorCacheEntries(vendor.id);
 
     await notifyRole('ADMIN', {
       type: 'KYC_SUBMITTED',
@@ -2192,7 +2255,7 @@ router.post('/me/kyc/submit', requireAuth({ roles: ['VENDOR'] }), async (req, re
       link: '/vendor/profile?tab=kyc',
     });
 
-    return res.json({ success: true, vendor: data || { ...vendor, kyc_status: 'SUBMITTED' } });
+    return res.json({ success: true, vendor: buildVendorResponse(data || { ...vendor, kyc_status: 'SUBMITTED' }) });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });
   }
@@ -2247,7 +2310,7 @@ router.get('/me/documents/:docId', requireAuth({ roles: ['VENDOR'] }), async (re
 
 router.post('/me/documents', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
   try {
-    const vendor = await resolveVendorForUser(req.user);
+    const vendor = buildVendorResponse(await resolveVendorForUser(req.user));
     if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
     if (kycDocumentsAreLocked(vendor)) {
       return sendLockedKycResponse(res);
@@ -2350,6 +2413,7 @@ router.post('/me/documents', requireAuth({ roles: ['VENDOR'] }), async (req, res
       link: '/employee/dataentry/kyc-review',
     });
 
+    clearVendorCacheEntries(vendor.id);
     return res.json({ success: true, document: data });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });
@@ -2358,7 +2422,7 @@ router.post('/me/documents', requireAuth({ roles: ['VENDOR'] }), async (req, res
 
 router.delete('/me/documents/:docId', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
   try {
-    const vendor = await resolveVendorForUser(req.user);
+    const vendor = buildVendorResponse(await resolveVendorForUser(req.user));
     if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
     if (kycDocumentsAreLocked(vendor)) {
       return sendLockedKycResponse(res);
@@ -2376,6 +2440,7 @@ router.delete('/me/documents/:docId', requireAuth({ roles: ['VENDOR'] }), async 
       .eq('vendor_id', vendor.id);
 
     if (error) return res.status(500).json({ success: false, error: error.message });
+    clearVendorCacheEntries(vendor.id);
     return res.json({ success: true });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });
@@ -2384,7 +2449,7 @@ router.delete('/me/documents/:docId', requireAuth({ roles: ['VENDOR'] }), async 
 
 router.delete('/me/documents', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
   try {
-    const vendor = await resolveVendorForUser(req.user);
+    const vendor = buildVendorResponse(await resolveVendorForUser(req.user));
     if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
     if (kycDocumentsAreLocked(vendor)) {
       return sendLockedKycResponse(res);
@@ -2402,6 +2467,7 @@ router.delete('/me/documents', requireAuth({ roles: ['VENDOR'] }), async (req, r
       .eq('document_type', docType);
 
     if (error) return res.status(500).json({ success: false, error: error.message });
+    clearVendorCacheEntries(vendor.id);
     return res.json({ success: true });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });
@@ -4140,7 +4206,7 @@ router.get('/me/lead-stats', requireAuth({ roles: ['VENDOR'] }), async (req, res
 // ✅ Dashboard stats (products, leads, proposals, messages count)
 router.get('/me/dashboard-stats', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
   try {
-    const vendor = await resolveVendorForUser(req.user);
+    const vendor = buildVendorResponse(await resolveVendorForUser(req.user));
     if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
 
     const ck = `dash:${vendor.id}`;
@@ -4160,7 +4226,7 @@ router.get('/me/dashboard-stats', requireAuth({ roles: ['VENDOR'] }), async (req
       totalProducts: products.count || 0,
       totalLeads: (leads.count || 0) + (proposals.count || 0),
       totalMessages: messages.count || 0,
-      profileCompletion: vendor.profile_completion || 0,
+      profileCompletion: vendor.profile_completion || calculateVendorProfileCompletion(vendor),
       kycStatus: vendor.kyc_status || 'PENDING',
       trustScore: 0,
       rating: 0,

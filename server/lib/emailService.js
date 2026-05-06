@@ -29,7 +29,8 @@ const parseBoolean = (value, fallback = false) => {
 };
 
 const APP_NAME = readEnv('APP_NAME') || 'IndianTradeMart';
-const DEFAULT_FRONTEND_URL = readEnv('VITE_FRONTEND_URL', 'FRONTEND_URL') || 'https://indiantrademart.netlify.app';
+const DEFAULT_FRONTEND_URL =
+  readEnv('FRONTEND_URL', 'VITE_FRONTEND_URL', 'VITE_SITE_URL') || 'https://indiantrademart.com';
 const SMTP_CONFIG = Object.freeze({
   host: readEnv('SMTP_HOST', 'MAIL_HOST'),
   port: Number.parseInt(readEnv('SMTP_PORT', 'MAIL_PORT') || '587', 10),

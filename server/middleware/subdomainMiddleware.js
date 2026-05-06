@@ -13,12 +13,70 @@
  * NOT path-based routing like /vendor/* on main domain
  */
 
-const MAIN_DOMAIN = process.env.MAIN_DOMAIN || 'company.com';
+const DEFAULT_MAIN_DOMAIN = 'indiantrademart.com';
+const PRODUCTION_SUBDOMAINS = [
+  'vendor',
+  'buyer',
+  'dir',
+  'directory',
+  'admin',
+  'career',
+  'man',
+  'management',
+  'emp',
+  'employee',
+];
+
+const normalizeDomain = (value = '') =>
+  String(value || '')
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/.*$/, '')
+    .replace(/:\d+$/, '')
+    .replace(/^www\./i, '')
+    .toLowerCase();
+
+const deriveMainDomain = () => {
+  const explicit = normalizeDomain(process.env.MAIN_DOMAIN);
+  if (explicit) return explicit;
+
+  const fallbackUrl =
+    process.env.FRONTEND_URL ||
+    process.env.VITE_FRONTEND_URL ||
+    process.env.VITE_SITE_URL ||
+    '';
+
+  try {
+    const hostname = new URL(String(fallbackUrl || '').trim()).hostname;
+    const normalized = normalizeDomain(hostname);
+    if (normalized) return normalized;
+  } catch {
+    // Ignore malformed fallback URLs and use the default domain.
+  }
+
+  return DEFAULT_MAIN_DOMAIN;
+};
+
+const MAIN_DOMAIN = deriveMainDomain();
 const getExtraOrigins = () =>
   (process.env.CORS_EXTRA_ORIGINS || '')
     .split(',')
     .map((value) => value.trim())
     .filter(Boolean);
+
+const getProductionOrigins = () => {
+  const origins = new Set([
+    `https://${MAIN_DOMAIN}`,
+    `https://www.${MAIN_DOMAIN}`,
+  ]);
+
+  PRODUCTION_SUBDOMAINS.forEach((subdomain) => {
+    origins.add(`https://${subdomain}.${MAIN_DOMAIN}`);
+  });
+
+  getExtraOrigins().forEach((origin) => origins.add(origin));
+  return Array.from(origins);
+};
 
 // Subdomain -> App Type mapping
 // These are COMPLETE INDEPENDENT APPLICATIONS, not just path prefixes
@@ -150,22 +208,7 @@ export function getSubdomainAwareCORS() {
 
   if (isProduction) {
     // Production: Only allow specific subdomains
-    const allowedOrigins = [
-      'https://indiantrademart.com',
-      'https://www.indiantrademart.com',
-      'https://vendor.indiantrademart.com',
-      'https://buyer.indiantrademart.com',
-      'https://dir.indiantrademart.com',
-      'https://directory.indiantrademart.com',
-      'https://admin.indiantrademart.com',
-      'https://career.indiantrademart.com',
-    ];
-
-    // Allow extra origins via env (comma-separated), e.g. Netlify or staging domains
-    const extra = getExtraOrigins();
-    if (extra.length) {
-      allowedOrigins.push(...extra);
-    }
+    const allowedOrigins = getProductionOrigins();
 
     return {
       origin: function (origin, callback) {
