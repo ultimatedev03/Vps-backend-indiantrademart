@@ -77,6 +77,32 @@ function buildVendorFilter(userId, employeeId) {
   return parts.join(',');
 }
 
+function sanitizeProductPayload(payload = {}) {
+  const next = { ...(payload || {}) };
+  delete next.created_by;
+  delete next.created_by_user_id;
+  delete next.created_by_email;
+  return next;
+}
+
+function isMissingSchemaColumnError(error, columnName = '') {
+  const code = String(error?.code || '').trim().toUpperCase();
+  const message = String(error?.message || '').toLowerCase();
+  const normalizedColumn = String(columnName || '').trim().toLowerCase();
+
+  if (code === '42703' || code === 'PGRST204') return true;
+  if (!message) return false;
+  if (message.includes('does not exist') && message.includes('column')) return true;
+  if (
+    normalizedColumn &&
+    message.includes(`'${normalizedColumn}'`) &&
+    message.includes('schema cache')
+  ) {
+    return true;
+  }
+  return false;
+}
+
 // ─── DASHBOARD ───────────────────────────────────────────────────────────────
 
 // GET /api/data-entry/dashboard/stats
@@ -373,21 +399,26 @@ router.post('/products', requireAuth(), async (req, res) => {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
     const actorId = emp.user_id;
-    const productData = { ...req.body, status: 'ACTIVE', created_at: new Date().toISOString() };
+    const productData = {
+      ...sanitizeProductPayload(req.body),
+      status: 'ACTIVE',
+      created_at: new Date().toISOString(),
+    };
 
-    // Try created_by variants for schema compat
+    // Try actor audit column variants for schema compatibility across DB versions.
     const candidates = [
-      { ...productData, created_by: actorId },
       { ...productData, created_by_user_id: actorId },
       productData,
+      { ...productData, created_by: actorId },
     ];
 
     let data = null, lastError = null;
     for (const payload of candidates) {
       const { data: d, error: e } = await supabase.from('products').insert([payload]).select().single();
       if (!e) { data = d; break; }
-      const msg = String(e.message || '').toLowerCase();
-      const isColMissing = e.code === '42703' || msg.includes('column') && msg.includes('does not exist');
+      const isColMissing =
+        isMissingSchemaColumnError(e, 'created_by') ||
+        isMissingSchemaColumnError(e, 'created_by_user_id');
       if (!isColMissing) return res.status(500).json({ success: false, error: e.message });
       lastError = e;
     }
@@ -404,10 +435,11 @@ router.put('/products/:productId', requireAuth(), async (req, res) => {
   try {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
-    const { error } = await supabase.from('products').update(req.body).eq('id', req.params.productId);
+    const updatePayload = sanitizeProductPayload(req.body);
+    const { error } = await supabase.from('products').update(updatePayload).eq('id', req.params.productId);
     if (error) return res.status(500).json({ success: false, error: error.message });
     invalidateDirCache();
-    return res.json({ success: true, product: { id: req.params.productId, ...req.body } });
+    return res.json({ success: true, product: { id: req.params.productId, ...updatePayload } });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });
   }
