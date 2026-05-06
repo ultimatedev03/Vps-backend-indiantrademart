@@ -14,6 +14,11 @@
  */
 
 const MAIN_DOMAIN = process.env.MAIN_DOMAIN || 'company.com';
+const getExtraOrigins = () =>
+  (process.env.CORS_EXTRA_ORIGINS || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
 
 // Subdomain -> App Type mapping
 // These are COMPLETE INDEPENDENT APPLICATIONS, not just path prefixes
@@ -157,9 +162,7 @@ export function getSubdomainAwareCORS() {
     ];
 
     // Allow extra origins via env (comma-separated), e.g. Netlify or staging domains
-    const extra = (process.env.CORS_EXTRA_ORIGINS || '').split(',')
-      .map(s => s.trim())
-      .filter(Boolean);
+    const extra = getExtraOrigins();
     if (extra.length) {
       allowedOrigins.push(...extra);
     }
@@ -197,10 +200,18 @@ export function getSubdomainAwareCORS() {
         'http://127.0.0.1:8888',
         'http://127.0.0.1:62128', // Cascade preview proxy
       ];
+      const extraOrigins = getExtraOrigins();
+      const allowedOrigins = [...devOrigins, ...extraOrigins];
 
       const localhostRegex = /^http:\/\/(localhost|127\.0\.0\.1)(:\\d+)?$/i;
+      const ipv4HttpRegex = /^http:\/\/(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?$/i;
 
-      if (!origin || devOrigins.includes(origin) || localhostRegex.test(origin)) {
+      if (
+        !origin ||
+        allowedOrigins.includes(origin) ||
+        localhostRegex.test(origin) ||
+        ipv4HttpRegex.test(origin)
+      ) {
         return callback(null, true);
       }
 
