@@ -7,6 +7,23 @@ import { requireEmployeeRoles } from '../middleware/requireEmployeeRoles.js';
 
 const router = express.Router();
 
+const isOptionalSchemaError = (error, relationName = '') => {
+  const code = String(error?.code || '').trim().toUpperCase();
+  const message = String(error?.message || '').toLowerCase();
+  const normalizedRelation = String(relationName || '').trim().toLowerCase();
+
+  if (['42P01', '42703', 'PGRST200', 'PGRST204', 'PGRST205'].includes(code)) {
+    return true;
+  }
+  if (!message) return false;
+  if (message.includes('does not exist')) return true;
+  if (message.includes('schema cache')) return true;
+  if (normalizedRelation && message.includes(normalizedRelation) && message.includes('could not find')) {
+    return true;
+  }
+  return false;
+};
+
 const isHttpUrl = (v) => typeof v === 'string' && /^https?:\/\//i.test(v);
 const looksLikePdf = (v = '') => String(v || '').toLowerCase().includes('.pdf');
 const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
@@ -227,26 +244,37 @@ router.post(
         bumpCount(key);
       };
 
-      const { data: vDocs, error: vDocsError } = await supabase
-        .from('vendor_documents')
-        .select('vendor_id, document_type, document_url, original_name, uploaded_at, created_at')
-        .in('vendor_id', vendorIds);
-      if (vDocsError) {
-        return res.status(500).json({ success: false, error: vDocsError.message || 'Failed to fetch vendor documents' });
+      try {
+        const { data: vDocs, error: vDocsError } = await supabase
+          .from('vendor_documents')
+          .select('*')
+          .in('vendor_id', vendorIds);
+        if (vDocsError) {
+          if (!isOptionalSchemaError(vDocsError, 'vendor_documents')) {
+            return res.status(500).json({ success: false, error: vDocsError.message || 'Failed to fetch vendor documents' });
+          }
+        } else {
+          (vDocs || []).forEach((row) => {
+            const signature =
+              row?.document_url ||
+              row?.url ||
+              row?.public_url ||
+              row?.file_path ||
+              row?.path ||
+              row?.original_name ||
+              row?.file_name ||
+              `${row?.document_type || row?.type || ''}:${row?.uploaded_at || row?.created_at || row?.updated_at || ''}`;
+            markAndCount(row?.vendor_id, signature);
+          });
+        }
+      } catch {
+        // ignore optional schema/table failures
       }
-
-      (vDocs || []).forEach((row) => {
-        const signature =
-          row?.document_url ||
-          row?.original_name ||
-          `${row?.document_type || ''}:${row?.uploaded_at || row?.created_at || ''}`;
-        markAndCount(row?.vendor_id, signature);
-      });
 
       try {
         const { data: legacyDocs, error: legacyError } = await supabase
           .from('kyc_documents')
-          .select('vendor_id, document_type, document_url, url, file_path, path, created_at')
+          .select('*')
           .in('vendor_id', vendorIds);
 
         if (!legacyError) {
@@ -254,11 +282,16 @@ router.post(
             const signature =
               row?.document_url ||
               row?.url ||
+              row?.public_url ||
               row?.file_path ||
               row?.path ||
-              `${row?.document_type || ''}:${row?.created_at || ''}`;
+              row?.original_name ||
+              row?.file_name ||
+              `${row?.document_type || row?.type || ''}:${row?.created_at || row?.updated_at || ''}`;
             markAndCount(row?.vendor_id, signature);
           });
+        } else if (!isOptionalSchemaError(legacyError, 'kyc_documents')) {
+          return res.status(500).json({ success: false, error: legacyError.message || 'Failed to fetch legacy KYC documents' });
         }
       } catch {
         // ignore optional legacy table failures
