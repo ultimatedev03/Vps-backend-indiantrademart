@@ -31,6 +31,34 @@ export function requireEmployeeRoles(allowedRoles = []) {
           return res.status(500).json({ success: false, error: empError.message });
         }
 
+        const authRole = normalizeRole(authUser.role || '');
+        const authRoleAllowed =
+          allowed.length === 0 ||
+          allowed.includes(authRole) ||
+          (allowed.includes('ADMIN') && authRole === 'SUPERADMIN');
+
+        if (!employee && authRoleAllowed) {
+          const fallbackEmployee = {
+            id: authUser.id,
+            user_id: authUser.id,
+            email: authUser.email || null,
+            full_name: authUser.email || 'Internal User',
+            role: authRole || (allowed.includes('ADMIN') ? 'ADMIN' : allowed[0] || 'ADMIN'),
+            status: 'ACTIVE',
+            states_scope: [],
+          };
+
+          req.employee = fallbackEmployee;
+          req.actor = {
+            id: authUser.id,
+            type: 'EMPLOYEE',
+            role: fallbackEmployee.role,
+            email: authUser.email || null,
+          };
+
+          return next();
+        }
+
         if (!employee) {
           return res.status(403).json({ success: false, error: 'Employee profile not found' });
         }
@@ -42,7 +70,7 @@ export function requireEmployeeRoles(allowedRoles = []) {
           return res.status(403).json({ success: false, error: 'Employee account is not active' });
         }
 
-        if (allowed.length > 0 && !allowed.includes(role)) {
+        if (allowed.length > 0 && !allowed.includes(role) && !(allowed.includes('ADMIN') && role === 'SUPERADMIN')) {
           return res.status(403).json({ success: false, error: 'Insufficient role permissions' });
         }
 

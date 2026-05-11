@@ -40,6 +40,7 @@ export function normalizeRole(role) {
   if (!raw) return '';
   if (raw === 'DATAENTRY') return 'DATA_ENTRY';
   if (raw === 'FINACE') return 'FINANCE';
+  if (raw === 'SUPER_ADMIN') return 'SUPERADMIN';
   return raw;
 }
 

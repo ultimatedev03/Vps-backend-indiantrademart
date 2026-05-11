@@ -364,8 +364,27 @@ async function resolveEmployeeProfile(authUser) {
   return employee || null;
 }
 
+function buildAuthEmployeeFallback(authUser) {
+  const role = normalizeRole(authUser?.role || '');
+  if (!['ADMIN', 'SUPERADMIN', 'HR', 'FINANCE', 'SUPPORT', 'SALES', 'DATA_ENTRY', 'MANAGER', 'VP'].includes(role)) {
+    return null;
+  }
+
+  return {
+    id: String(authUser?.id || '').trim(),
+    user_id: String(authUser?.id || '').trim() || null,
+    email: String(authUser?.email || '').trim() || null,
+    full_name: String(authUser?.email || '').trim() || 'Internal User',
+    role,
+    status: 'ACTIVE',
+    department: roleToDepartment(role) || null,
+    states_scope: [],
+    fallback_profile: true,
+  };
+}
+
 async function resolveStaffManager(req, res) {
-  const employee = await resolveEmployeeProfile(req.user);
+  const employee = (await resolveEmployeeProfile(req.user)) || buildAuthEmployeeFallback(req.user);
   if (!employee) {
     res.status(404).json({ success: false, error: 'Employee profile not found' });
     return null;
@@ -698,7 +717,7 @@ async function sumRevenueByPeriod({ startIso, endIso, endInclusive = true }) {
 router.get('/me', requireAuth(), async (req, res) => {
   try {
     const authUser = req.user;
-    const employee = await resolveEmployeeProfile(authUser);
+    const employee = (await resolveEmployeeProfile(authUser)) || buildAuthEmployeeFallback(authUser);
 
     if (!employee) {
       return res.status(404).json({ success: false, error: 'Employee profile not found' });
