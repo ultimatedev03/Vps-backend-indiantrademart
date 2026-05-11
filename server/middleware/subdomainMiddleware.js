@@ -15,6 +15,7 @@
 
 const DEFAULT_MAIN_DOMAIN = 'indiantrademart.com';
 const PRODUCTION_SUBDOMAINS = [
+  'api',
   'vendor',
   'buyer',
   'dir',
@@ -63,6 +64,25 @@ const getExtraOrigins = () =>
     .split(',')
     .map((value) => value.trim())
     .filter(Boolean);
+
+const DEFAULT_ALLOWED_HEADERS = [
+  'Accept',
+  'Content-Type',
+  'Authorization',
+  'X-CSRF-Token',
+  'X-Requested-With',
+  'Cache-Control',
+  'Pragma',
+];
+
+const getAllowedHeaders = () => {
+  const configuredHeaders = (process.env.CORS_ALLOWED_HEADERS || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  return Array.from(new Set([...DEFAULT_ALLOWED_HEADERS, ...configuredHeaders]));
+};
 
 const getProductionOrigins = () => {
   const origins = new Set([
@@ -225,7 +245,7 @@ export function getSubdomainAwareCORS() {
       },
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
+      allowedHeaders: getAllowedHeaders(),
     };
   }
 
@@ -263,7 +283,7 @@ export function getSubdomainAwareCORS() {
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'x-requested-with'],
+    allowedHeaders: getAllowedHeaders(),
   };
 }
 
