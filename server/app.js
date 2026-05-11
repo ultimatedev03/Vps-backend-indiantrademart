@@ -82,11 +82,17 @@ app.use((req, res, next) => {
 
 // 7. Rate limiting
 const otpLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 5,
-  message: 'Too many OTP attempts, try again later',
+  windowMs: runtimeConfig.otpRateWindowMs,
+  max: runtimeConfig.otpRateMax,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: () => runtimeConfig.disableApiRateLimit,
+  handler: (_req, res) => {
+    res.status(429).json({
+      success: false,
+      error: 'Too many OTP attempts. Please wait a few minutes and try again.',
+    });
+  },
 });
 
 const apiLimiter = rateLimit({
