@@ -1614,9 +1614,12 @@ router.post('/send', validateQuotationRequest, async (req, res) => {
 
     const extractMissingOptionalField = (error) => {
       const code = String(error?.code || '').trim();
-      const message = String(error?.message || '');
-      if (code !== '42703' && !/column.+does not exist/i.test(message)) return '';
-      const match = message.match(/column\s+"?([a-zA-Z0-9_]+)"?/i);
+      const message = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`;
+      if (code !== '42703' && code !== 'PGRST204' && !/column/i.test(message)) return '';
+      const match =
+        message.match(/column\s+"?([a-zA-Z0-9_]+)"?/i) ||
+        message.match(/['"]([a-zA-Z0-9_]+)['"]\s+column/i) ||
+        message.match(/could not find the ['"]([a-zA-Z0-9_]+)['"] column/i);
       const field = String(match?.[1] || '').trim();
       return optionalProposalFieldNames.includes(field) ? field : '';
     };

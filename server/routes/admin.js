@@ -220,7 +220,8 @@ function buildBuyerStatusUpdates(current, { isActive, reason = "" }) {
 }
 
 function buildVendorStatusUpdates(current, { isActive, reason = "" }) {
-  const updates = { updated_at: new Date().toISOString() };
+  const now = new Date().toISOString();
+  const updates = { updated_at: now };
 
   if (typeof current?.is_active === "boolean" || "is_active" in (current || {})) {
     updates.is_active = !!isActive;
@@ -231,11 +232,23 @@ function buildVendorStatusUpdates(current, { isActive, reason = "" }) {
   }
 
   if ("terminated_at" in (current || {})) {
-    updates.terminated_at = isActive ? null : new Date().toISOString();
+    updates.terminated_at = isActive ? null : now;
   }
 
   if ("terminated_reason" in (current || {})) {
     updates.terminated_reason = isActive ? null : (String(reason || "").trim() || null);
+  }
+
+  if ("suspension_at" in (current || {})) {
+    updates.suspension_at = isActive ? null : now;
+  }
+
+  if ("suspended_at" in (current || {})) {
+    updates.suspended_at = isActive ? null : now;
+  }
+
+  if ("suspension_reason" in (current || {})) {
+    updates.suspension_reason = isActive ? null : (String(reason || "").trim() || null);
   }
 
   return updates;

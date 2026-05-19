@@ -135,6 +135,12 @@ const VENDOR_UPDATE_BLOCK = new Set([
   'identities',
   'factors',
   'is_anonymous',
+  'status',
+  'suspension_at',
+  'suspended_at',
+  'suspension_reason',
+  'terminated_at',
+  'terminated_reason',
 ]);
 
 const sanitizeVendorUpdates = (updates = {}) => {
@@ -1830,6 +1836,150 @@ router.put('/me', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });
   }
+});
+
+const normalizePreferenceIds = (value) =>
+  Array.isArray(value)
+    ? value.map((item) => String(item ?? '').trim()).filter(Boolean)
+    : [];
+
+const buildDefaultVendorPreferences = (vendorId) => ({
+  vendor_id: vendorId,
+  preferred_micro_categories: [],
+  preferred_states: [],
+  preferred_cities: [],
+  min_budget: 0,
+  max_budget: 999999,
+  auto_lead_filter: true,
+});
+
+async function resolveActivePlanLimits(vendorId) {
+  const defaults = { states: 2, cities: 20, categories: 5 };
+  const { data } = await supabase
+    .from('vendor_plan_subscriptions')
+    .select('plan:vendor_plans(name, features)')
+    .eq('vendor_id', vendorId)
+    .eq('status', 'ACTIVE')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  let features = data?.plan?.features || {};
+  if (typeof features === 'string') {
+    try {
+      features = JSON.parse(features);
+    } catch {
+      features = {};
+    }
+  }
+
+  const coverage = features?.coverage && typeof features.coverage === 'object' ? features.coverage : {};
+  return {
+    plan_name: data?.plan?.name || 'Trial',
+    coverage: {
+      states_limit: Number(coverage.states_limit ?? features.states_limit ?? defaults.states),
+      cities_limit: Number(coverage.cities_limit ?? features.cities_limit ?? defaults.cities),
+    },
+    categories_limit: Number(features.categories_limit ?? defaults.categories),
+  };
+}
+
+// ✅ Vendor coverage/category preferences for website/app sync.
+router.get('/me/preferences', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
+  try {
+    const vendor = await resolveVendorForUser(req.user);
+    if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
+
+    const [{ data: prefs, error }, limits] = await Promise.all([
+      supabase.from('vendor_preferences').select('*').eq('vendor_id', vendor.id).maybeSingle(),
+      resolveActivePlanLimits(vendor.id),
+    ]);
+
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    const preferences = prefs || buildDefaultVendorPreferences(vendor.id);
+    return res.json({
+      success: true,
+      preferences,
+      coverage: {
+        states: preferences.preferred_states || [],
+        cities: preferences.preferred_cities || [],
+        categories: preferences.preferred_micro_categories || [],
+        ...limits.coverage,
+      },
+      categories: preferences.preferred_micro_categories || [],
+      ...limits,
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.put('/me/preferences', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
+  try {
+    const vendor = await resolveVendorForUser(req.user);
+    if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
+
+    const body = req.body || {};
+    const updates = {
+      updated_at: new Date().toISOString(),
+    };
+
+    if (body.preferred_states !== undefined || body.coverage_states !== undefined) {
+      updates.preferred_states = normalizePreferenceIds(body.preferred_states ?? body.coverage_states);
+    }
+    if (body.preferred_cities !== undefined || body.coverage_cities !== undefined) {
+      updates.preferred_cities = normalizePreferenceIds(body.preferred_cities ?? body.coverage_cities);
+    }
+    if (body.preferred_micro_categories !== undefined || body.service_categories !== undefined) {
+      updates.preferred_micro_categories = normalizePreferenceIds(body.preferred_micro_categories ?? body.service_categories);
+    }
+    if (body.auto_lead_filter !== undefined) updates.auto_lead_filter = body.auto_lead_filter !== false;
+    if (body.min_budget !== undefined) updates.min_budget = parseBudget(body.min_budget);
+    if (body.max_budget !== undefined) updates.max_budget = parseBudget(body.max_budget);
+
+    const { data: existing, error: existingError } = await supabase
+      .from('vendor_preferences')
+      .select('id')
+      .eq('vendor_id', vendor.id)
+      .maybeSingle();
+
+    if (existingError) return res.status(500).json({ success: false, error: existingError.message });
+
+    const basePayload = {
+      ...buildDefaultVendorPreferences(vendor.id),
+      ...updates,
+      vendor_id: vendor.id,
+    };
+
+    const result = existing?.id
+      ? await supabase.from('vendor_preferences').update(updates).eq('vendor_id', vendor.id).select('*').maybeSingle()
+      : await supabase.from('vendor_preferences').insert([{ ...basePayload, created_at: new Date().toISOString() }]).select('*').maybeSingle();
+
+    if (result.error) return res.status(500).json({ success: false, error: result.error.message });
+    clearVendorCacheEntries(vendor.id);
+    return res.json({ success: true, preferences: result.data, coverage: {
+      states: result.data?.preferred_states || [],
+      cities: result.data?.preferred_cities || [],
+      categories: result.data?.preferred_micro_categories || [],
+    } });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.patch('/me/preferences', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
+  req.method = 'PUT';
+  return router.handle(req, res);
+});
+
+router.get('/me/coverage', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
+  req.url = '/me/preferences';
+  return router.handle(req, res);
+});
+
+router.put('/me/coverage', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
+  req.url = '/me/preferences';
+  return router.handle(req, res);
 });
 
 router.get('/me/banks', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
@@ -3550,14 +3700,29 @@ router.get('/:vendorId/service-categories', async (req, res) => {
     const ids = prefs?.preferred_micro_categories || [];
     if (!ids?.length) return res.json({ success: true, categories: [] });
 
-    const { data: headCats, error: headErr } = await supabase
-      .from('head_categories')
-      .select('id, name')
+    const { data: microCats, error: microErr } = await supabase
+      .from('micro_categories')
+      .select('id, name, slug, sub_categories(id, name, slug, head_categories(id, name, slug))')
       .in('id', ids);
 
-    if (headErr) return res.status(500).json({ success: false, error: headErr.message });
+    if (microErr) return res.status(500).json({ success: false, error: microErr.message });
 
-    const mapped = (headCats || []).map((h) => ({ id: h.id, name: h.name }));
+    const mapped = (microCats || []).map((micro) => ({
+      id: micro.id,
+      name: micro.name,
+      slug: micro.slug,
+      type: 'micro',
+      sub_category: micro.sub_categories
+        ? { id: micro.sub_categories.id, name: micro.sub_categories.name, slug: micro.sub_categories.slug }
+        : null,
+      head_category: micro.sub_categories?.head_categories
+        ? {
+            id: micro.sub_categories.head_categories.id,
+            name: micro.sub_categories.head_categories.name,
+            slug: micro.sub_categories.head_categories.slug,
+          }
+        : null,
+    }));
     return res.json({ success: true, categories: mapped });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });
