@@ -137,6 +137,7 @@ const isTransientUpstreamError = (error) => {
 
 const parseBuyerProfileInput = (body = {}) => ({
   company_name: optionalText(pickFirstDefined(body.company_name, body.companyName)),
+  gst_number: optionalText(pickFirstDefined(body.gst_number, body.gstNumber)),
   state_id: optionalId(pickFirstDefined(body.state_id, body.stateId)),
   city_id: optionalId(pickFirstDefined(body.city_id, body.cityId)),
   state: optionalText(pickFirstDefined(body.state, body.state_name, body.stateName)),
@@ -266,6 +267,7 @@ async function upsertBuyerProfile({
   full_name,
   phone,
   company_name,
+  gst_number,
   state_id,
   city_id,
   state,
@@ -297,6 +299,7 @@ async function upsertBuyerProfile({
   const nameValue = optionalText(full_name) || (normalizedEmail ? normalizedEmail.split('@')[0] : 'Buyer');
   const phoneValue = optionalText(phone);
   const companyNameValue = optionalText(company_name);
+  const gstNumberValue = optionalText(gst_number);
   const stateIdValue = optionalId(state_id);
   const cityIdValue = optionalId(city_id);
   const stateValue = optionalText(state);
@@ -311,6 +314,7 @@ async function upsertBuyerProfile({
     if (nameValue && existing.full_name !== nameValue) updates.full_name = nameValue;
     if (phoneValue && existing.phone !== phoneValue) updates.phone = phoneValue;
     if (companyNameValue && existing.company_name !== companyNameValue) updates.company_name = companyNameValue;
+    if (gstNumberValue && existing.gst_number !== gstNumberValue) updates.gst_number = gstNumberValue;
     if (stateIdValue && String(existing.state_id || '') !== String(stateIdValue)) updates.state_id = stateIdValue;
     if (cityIdValue && String(existing.city_id || '') !== String(cityIdValue)) updates.city_id = cityIdValue;
     if (stateValue && existing.state !== stateValue) updates.state = stateValue;
@@ -358,6 +362,7 @@ async function upsertBuyerProfile({
     email: normalizedEmail || null,
     phone: phoneValue,
     company_name: companyNameValue,
+    gst_number: gstNumberValue,
     state_id: stateIdValue,
     city_id: cityIdValue,
     state: stateValue,
