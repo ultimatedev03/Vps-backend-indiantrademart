@@ -523,7 +523,7 @@ router.get("/audit-logs", async (req, res) => {
  */
 router.get("/vendors", async (req, res) => {
   try {
-    const REQUIRED_VENDOR_DOCUMENT_TYPES = new Set(["GST", "PAN", "AADHAR", "BANK"]);
+    const REQUIRED_VENDOR_DOCUMENT_TYPES = new Set(["PAN", "AADHAR", "BANK"]);
     const normalizeDocumentType = (value) => {
       const raw = String(value || "").trim().toUpperCase();
       if (!raw) return "";
