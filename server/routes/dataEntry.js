@@ -15,6 +15,14 @@ import { supabase } from '../lib/supabaseClient.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 import { writeAuditLog } from '../lib/audit.js';
 import { invalidateDirCache } from '../lib/cacheMiddleware.js';
+import {
+  getPublicUserByEmail,
+  hashPassword,
+  normalizeEmail,
+  upsertPublicUser,
+} from '../lib/auth.js';
+import { sendTemporaryPasswordEmail, sendWelcomeEmail } from '../lib/emailService.js';
+import { logger } from '../utils/logger.js';
 
 const router = express.Router();
 
@@ -83,6 +91,103 @@ function sanitizeProductPayload(payload = {}) {
   delete next.created_by_user_id;
   delete next.created_by_email;
   return next;
+}
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const STRONG_PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
+
+const generateTemporaryPassword = () => {
+  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const lower = 'abcdefghijkmnpqrstuvwxyz';
+  const digits = '23456789';
+  const symbols = '@#$%&*!?';
+  const all = upper + lower + digits + symbols;
+  const pick = (pool) => pool[Math.floor(Math.random() * pool.length)];
+  const chars = [pick(upper), pick(lower), pick(digits), pick(symbols)];
+
+  while (chars.length < 10) chars.push(pick(all));
+  for (let i = chars.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join('');
+};
+
+const isDuplicateUserError = (error) => {
+  const message = String(error?.message || error || '').toLowerCase();
+  return message.includes('already') || message.includes('exists') || message.includes('registered');
+};
+
+const normalizeVendorOnboardingInput = (body = {}) => ({
+  companyName: String(body.companyName || body.company_name || '').trim(),
+  ownerName: String(body.ownerName || body.owner_name || '').trim(),
+  email: normalizeEmail(body.email),
+  phone: String(body.phone || '').replace(/\D/g, '').slice(0, 10),
+  address: String(body.address || body.registered_address || '').trim(),
+  gstNumber: String(body.gstNumber || body.gst_number || '').trim().toUpperCase() || null,
+  stateId: String(body.stateId || body.state_id || '').trim() || null,
+  cityId: String(body.cityId || body.city_id || '').trim() || null,
+  stateName: String(body.stateName || body.state || '').trim() || null,
+  cityName: String(body.cityName || body.city || '').trim() || null,
+  tempPassword: String(body.tempPassword || body.temp_password || '').trim(),
+});
+
+async function ensureVendorAuthUser({ email, password, fullName, phone }) {
+  const password_hash = await hashPassword(password);
+  const existing = await getPublicUserByEmail(email);
+
+  if (existing?.id) {
+    if (supabase?.auth?.admin?.updateUserById) {
+      supabase.auth.admin
+        .updateUserById(existing.id, {
+          password,
+          email_confirm: true,
+          user_metadata: { full_name: fullName, role: 'VENDOR', phone },
+          app_metadata: { role: 'VENDOR' },
+        })
+        .then(({ error }) => {
+          if (error) logger.warn('[DataEntry] Supabase auth password update failed:', error.message);
+        })
+        .catch((error) => logger.warn('[DataEntry] Supabase auth password update failed:', error?.message || error));
+    }
+
+    return upsertPublicUser({
+      id: existing.id,
+      email,
+      full_name: fullName,
+      role: 'VENDOR',
+      phone,
+      password_hash,
+      allowPasswordUpdate: true,
+    });
+  }
+
+  let authUserId = null;
+  if (supabase?.auth?.admin?.createUser) {
+    const { data, error } = await supabase.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: { full_name: fullName, role: 'VENDOR', phone },
+      app_metadata: { role: 'VENDOR' },
+    });
+
+    if (error && !isDuplicateUserError(error)) {
+      throw new Error(error.message || 'Auth signup failed');
+    }
+
+    authUserId = data?.user?.id || null;
+  }
+
+  return upsertPublicUser({
+    id: authUserId || undefined,
+    email,
+    full_name: fullName,
+    role: 'VENDOR',
+    phone,
+    password_hash,
+    allowPasswordUpdate: true,
+  });
 }
 
 function isMissingSchemaColumnError(error, columnName = '') {
@@ -258,31 +363,110 @@ router.post('/vendors', requireAuth(), async (req, res) => {
     if (!emp) return;
 
     const actorId = emp.user_id;
-    const vendorData = req.body || {};
+    const vendorData = normalizeVendorOnboardingInput(req.body || {});
+
+    if (!vendorData.companyName) {
+      return res.status(400).json({ success: false, error: 'Company name is required' });
+    }
+    if (!vendorData.ownerName) {
+      return res.status(400).json({ success: false, error: 'Owner name is required' });
+    }
+    if (!vendorData.email || !EMAIL_REGEX.test(vendorData.email)) {
+      return res.status(400).json({ success: false, error: 'Valid email is required' });
+    }
+    if (!vendorData.phone || vendorData.phone.length !== 10) {
+      return res.status(400).json({ success: false, error: 'Valid 10-digit business phone is required' });
+    }
+    if (!vendorData.address) {
+      return res.status(400).json({ success: false, error: 'Business address is required' });
+    }
+    if (!vendorData.stateId || !vendorData.cityId) {
+      return res.status(400).json({ success: false, error: 'State and city are required' });
+    }
+
+    const existingVendorByEmail = await supabase
+      .from('vendors')
+      .select('id, vendor_id, company_name, email')
+      .eq('email', vendorData.email)
+      .maybeSingle();
+
+    if (existingVendorByEmail.error) {
+      return res.status(500).json({ success: false, error: existingVendorByEmail.error.message });
+    }
+
+    if (existingVendorByEmail.data?.id) {
+      return res.status(409).json({
+        success: false,
+        error: `Vendor already exists for ${vendorData.email}`,
+        vendor: existingVendorByEmail.data,
+      });
+    }
 
     // Generate vendor ID
     const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
     const digits = '0123456789';
     const rand = (len, chars) => Array.from({ length: len }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
     const generatedId = `${rand(3, letters)}-VIN-${rand(4, digits)}-${rand(3, letters)}`;
-    const tempPassword = vendorData.temp_password || (Math.random().toString(36).slice(-8) + '!Aa1');
+    const tempPassword = vendorData.tempPassword || generateTemporaryPassword();
+
+    if (!STRONG_PASSWORD_REGEX.test(tempPassword)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Temporary password must be 8+ chars with upper, lower, number and symbol',
+      });
+    }
+
+    const authUser = await ensureVendorAuthUser({
+      email: vendorData.email,
+      password: tempPassword,
+      fullName: vendorData.ownerName,
+      phone: vendorData.phone,
+    });
 
     const payload = {
-      ...vendorData,
+      user_id: authUser.id,
+      company_name: vendorData.companyName,
+      owner_name: vendorData.ownerName,
+      email: vendorData.email,
+      phone: vendorData.phone,
+      address: vendorData.address,
+      registered_address: vendorData.address,
+      gst_number: vendorData.gstNumber,
+      state_id: vendorData.stateId,
+      city_id: vendorData.cityId,
+      state: vendorData.stateName,
+      city: vendorData.cityName,
       vendor_id: generatedId,
       assigned_to: actorId,
       created_by_user_id: actorId,
       kyc_status: 'PENDING',
       profile_completion: 10,
       is_active: true,
+      is_verified: true,
+      verified_at: new Date().toISOString(),
       is_password_temporary: true,
     };
-    delete payload.temp_password;
 
     const { data, error } = await supabase.from('vendors').insert([payload]).select().single();
     if (error) return res.status(500).json({ success: false, error: error.message });
 
     await writeAuditLog({ action: 'VENDOR_CREATED', entity_type: 'vendor', entity_id: data.id, actor_id: actorId }).catch(() => {});
+
+    const loginUrl = `${process.env.FRONTEND_URL || process.env.VITE_SITE_URL || 'https://indiantrademart.com'}/vendor/login`;
+    sendWelcomeEmail({
+      to: vendorData.email,
+      fullName: vendorData.ownerName,
+      role: 'VENDOR',
+      dashboardUrl: loginUrl,
+    }).catch((error) => logger.warn('[DataEntry] Vendor welcome email failed:', error?.message || error));
+
+    sendTemporaryPasswordEmail({
+      to: vendorData.email,
+      fullName: vendorData.ownerName,
+      temporaryPassword: tempPassword,
+      loginUrl,
+    }).catch((error) => logger.warn('[DataEntry] Vendor temporary password email failed:', error?.message || error));
+
     return res.status(201).json({ success: true, vendor: { ...data, password: tempPassword } });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });

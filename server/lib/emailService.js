@@ -367,3 +367,41 @@ export const sendWelcomeEmail = async ({
     `,
   });
 };
+
+export const sendTemporaryPasswordEmail = async ({
+  to,
+  fullName = '',
+  temporaryPassword = '',
+  loginUrl = '',
+} = {}) => {
+  const name = String(fullName || '').trim() || to?.split('@')?.[0] || 'there';
+  const resolvedLoginUrl = String(loginUrl || '').trim() || `${DEFAULT_FRONTEND_URL}/vendor/login`;
+
+  return sendEmail({
+    to,
+    purpose: 'welcome',
+    subject: `${APP_NAME} vendor login details`,
+    text: `Hi ${name}, your vendor account is ready. Login: ${resolvedLoginUrl}. Temporary password: ${temporaryPassword}. Please change it after signing in.`,
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 640px; margin: 0 auto; padding: 24px; color: #1f2937;">
+        <h1 style="margin: 0 0 12px; color: #003D82;">Your vendor login is ready</h1>
+        <p style="margin: 0 0 12px;">Hi ${escapeHtml(name)},</p>
+        <p style="margin: 0 0 12px;">
+          Your ${escapeHtml(APP_NAME)} vendor account has been created by our onboarding team.
+        </p>
+        <div style="background:#f3f4f6;border-radius:8px;padding:16px;margin:18px 0;">
+          <p style="margin:0 0 8px;"><strong>Email:</strong> ${escapeHtml(to)}</p>
+          <p style="margin:0;"><strong>Temporary password:</strong> ${escapeHtml(temporaryPassword)}</p>
+        </div>
+        <p style="margin: 0 0 18px;">
+          <a href="${escapeHtml(resolvedLoginUrl)}" style="display:inline-block;padding:12px 18px;background:#003D82;color:#fff;text-decoration:none;border-radius:8px;">
+            Sign in to Vendor Portal
+          </a>
+        </p>
+        <p style="margin: 0; font-size: 13px; color: #6b7280;">
+          Please change this password from your account settings after signing in.
+        </p>
+      </div>
+    `,
+  });
+};
