@@ -452,19 +452,22 @@ router.post('/vendors', requireAuth(), async (req, res) => {
 
     await writeAuditLog({ action: 'VENDOR_CREATED', entity_type: 'vendor', entity_id: data.id, actor_id: actorId }).catch(() => {});
 
-    const loginUrl = `${process.env.FRONTEND_URL || process.env.VITE_SITE_URL || 'https://indiantrademart.com'}/vendor/login`;
+    const frontendUrl = process.env.FRONTEND_URL || process.env.VITE_SITE_URL || 'https://indiantrademart.com';
+    const dashboardUrl = `${frontendUrl}/vendor/dashboard`;
+    const forgotPasswordUrl = `${frontendUrl}/vendor/forgot-password`;
     sendWelcomeEmail({
       to: vendorData.email,
       fullName: vendorData.ownerName,
       role: 'VENDOR',
-      dashboardUrl: loginUrl,
+      dashboardUrl,
     }).catch((error) => logger.warn('[DataEntry] Vendor welcome email failed:', error?.message || error));
 
     sendTemporaryPasswordEmail({
       to: vendorData.email,
       fullName: vendorData.ownerName,
       temporaryPassword: tempPassword,
-      loginUrl,
+      loginUrl: dashboardUrl,
+      forgotPasswordUrl,
     }).catch((error) => logger.warn('[DataEntry] Vendor temporary password email failed:', error?.message || error));
 
     return res.status(201).json({ success: true, vendor: { ...data, password: tempPassword } });

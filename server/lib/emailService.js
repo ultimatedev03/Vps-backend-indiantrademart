@@ -373,15 +373,18 @@ export const sendTemporaryPasswordEmail = async ({
   fullName = '',
   temporaryPassword = '',
   loginUrl = '',
+  forgotPasswordUrl = '',
 } = {}) => {
   const name = String(fullName || '').trim() || to?.split('@')?.[0] || 'there';
-  const resolvedLoginUrl = String(loginUrl || '').trim() || `${DEFAULT_FRONTEND_URL}/vendor/login`;
+  const resolvedDashboardUrl = String(loginUrl || '').trim() || `${DEFAULT_FRONTEND_URL}/vendor/dashboard`;
+  const resolvedForgotPasswordUrl =
+    String(forgotPasswordUrl || '').trim() || `${DEFAULT_FRONTEND_URL}/vendor/forgot-password`;
 
   return sendEmail({
     to,
     purpose: 'welcome',
     subject: `${APP_NAME} vendor login details`,
-    text: `Hi ${name}, your vendor account is ready. Login: ${resolvedLoginUrl}. Temporary password: ${temporaryPassword}. Please change it after signing in.`,
+    text: `Hi ${name}, your vendor account is ready. Dashboard: ${resolvedDashboardUrl}. Temporary password: ${temporaryPassword}. For security, use Forgot Password to change this password after your first login: ${resolvedForgotPasswordUrl}.`,
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 640px; margin: 0 auto; padding: 24px; color: #1f2937;">
         <h1 style="margin: 0 0 12px; color: #003D82;">Your vendor login is ready</h1>
@@ -394,12 +397,15 @@ export const sendTemporaryPasswordEmail = async ({
           <p style="margin:0;"><strong>Temporary password:</strong> ${escapeHtml(temporaryPassword)}</p>
         </div>
         <p style="margin: 0 0 18px;">
-          <a href="${escapeHtml(resolvedLoginUrl)}" style="display:inline-block;padding:12px 18px;background:#003D82;color:#fff;text-decoration:none;border-radius:8px;">
-            Sign in to Vendor Portal
+          <a href="${escapeHtml(resolvedDashboardUrl)}" style="display:inline-block;padding:12px 18px;background:#003D82;color:#fff;text-decoration:none;border-radius:8px;">
+            Open Vendor Dashboard
           </a>
         </p>
-        <p style="margin: 0; font-size: 13px; color: #6b7280;">
-          Please change this password from your account settings after signing in.
+        <p style="margin: 0 0 10px; font-size: 13px; color: #6b7280;">
+          For security, please use the Forgot Password option to change this temporary password after your first login.
+        </p>
+        <p style="margin: 0; font-size: 13px;">
+          <a href="${escapeHtml(resolvedForgotPasswordUrl)}" style="color:#003D82;">Change password with Forgot Password</a>
         </p>
       </div>
     `,
