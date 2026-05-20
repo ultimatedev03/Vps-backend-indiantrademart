@@ -48,9 +48,9 @@ export function createRuntimeConfig(overrides = {}) {
 
     // Rate limiting
     apiRateWindowMs: parseNumber(process.env.API_RATE_WINDOW_MS, 60 * 1000),
-    apiRateMax: parseNumber(process.env.API_RATE_MAX, isProd ? 60 : 300),
+    apiRateMax: parseNumber(process.env.API_RATE_MAX, isProd ? 1200 : 3000),
     authRateWindowMs: parseNumber(process.env.AUTH_RATE_WINDOW_MS, 60 * 1000),
-    authRateMax: parseNumber(process.env.AUTH_RATE_MAX, isProd ? 60 : 200),
+    authRateMax: parseNumber(process.env.AUTH_RATE_MAX, isProd ? 300 : 1000),
     otpRateWindowMs: parseNumber(process.env.OTP_RATE_WINDOW_MS, 15 * 60 * 1000),
     otpRateMax: parseNumber(process.env.OTP_RATE_MAX, isProd ? 20 : 100),
     disableApiRateLimit: process.env.DISABLE_API_RATE_LIMIT === 'true',

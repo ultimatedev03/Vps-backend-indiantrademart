@@ -16,12 +16,13 @@
     "express-mongo-sanitize": "^2.2.0",
     "express-rate-limit": "^7.1.5",
     "groq-sdk": "^0.6.0",
-    "jspdf": "^4.0.0",
     "jsonwebtoken": "^9.0.3",
+    "jspdf": "^4.0.0",
     "node-cron": "^4.2.1",
     "nodemailer": "^6.9.7",
     "openai": "^4.77.4",
     "papaparse": "^5.4.1",
-    "razorpay": "^2.9.6"
+    "razorpay": "^2.9.6",
+    "ws": "^8.20.1"
   }
 }

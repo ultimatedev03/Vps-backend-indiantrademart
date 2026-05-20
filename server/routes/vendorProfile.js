@@ -1982,6 +1982,109 @@ router.put('/me/coverage', requireAuth({ roles: ['VENDOR'] }), async (req, res) 
   return router.handle(req, res);
 });
 
+router.get('/me/collections', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
+  try {
+    const vendor = await resolveVendorForUser(req.user);
+    if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
+
+    const { data: vendorRow, error: vendorError } = await supabase
+      .from('vendors')
+      .select('collection_groups, collection_assignments, collection_notes')
+      .eq('id', vendor.id)
+      .maybeSingle();
+    if (vendorError) return res.status(500).json({ success: false, error: vendorError.message });
+
+    const { data: products, error: productError } = await supabase
+      .from('products')
+      .select('id, metadata')
+      .eq('vendor_id', vendor.id)
+      .neq('status', 'ARCHIVED');
+    if (productError) return res.status(500).json({ success: false, error: productError.message });
+
+    const groups = new Set(Array.isArray(vendorRow?.collection_groups) ? vendorRow.collection_groups : []);
+    const assignments = vendorRow?.collection_assignments && typeof vendorRow.collection_assignments === 'object'
+      ? { ...vendorRow.collection_assignments }
+      : {};
+
+    (products || []).forEach((product) => {
+      const group = String(product?.metadata?.custom_group || '').trim();
+      if (!group) return;
+      groups.add(group);
+      assignments[product.id] = group;
+    });
+
+    return res.json({
+      success: true,
+      groups: Array.from(groups),
+      assignments,
+      notes: vendorRow?.collection_notes || {},
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.put('/me/collections', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
+  try {
+    const vendor = await resolveVendorForUser(req.user);
+    if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
+
+    const groups = Array.from(
+      new Set((Array.isArray(req.body?.groups) ? req.body.groups : [])
+        .map((group) => String(group || '').trim())
+        .filter(Boolean))
+    );
+    const assignments = req.body?.assignments && typeof req.body.assignments === 'object'
+      ? req.body.assignments
+      : {};
+    const notes = req.body?.notes && typeof req.body.notes === 'object'
+      ? req.body.notes
+      : {};
+
+    const { data: existingCollections, error: existingCollectionsError } = await supabase
+      .from('vendors')
+      .select('collection_assignments, collection_notes')
+      .eq('id', vendor.id)
+      .maybeSingle();
+    if (existingCollectionsError) return res.status(500).json({ success: false, error: existingCollectionsError.message });
+
+    const mergedAssignments = {
+      ...(existingCollections?.collection_assignments && typeof existingCollections.collection_assignments === 'object'
+        ? existingCollections.collection_assignments
+        : {}),
+      ...assignments,
+    };
+    const mergedNotes = {
+      ...(existingCollections?.collection_notes && typeof existingCollections.collection_notes === 'object'
+        ? existingCollections.collection_notes
+        : {}),
+      ...notes,
+    };
+
+    const { data, error } = await supabase
+      .from('vendors')
+      .update({
+        collection_groups: groups,
+        collection_assignments: mergedAssignments,
+        collection_notes: mergedNotes,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', vendor.id)
+      .select('collection_groups, collection_assignments, collection_notes')
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    return res.json({
+      success: true,
+      groups: data?.collection_groups || [],
+      assignments: data?.collection_assignments || {},
+      notes: data?.collection_notes || {},
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 router.get('/me/banks', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
   try {
     const vendor = await resolveVendorForUser(req.user);
@@ -4477,6 +4580,64 @@ router.get('/me/support-stats', requireAuth({ roles: ['VENDOR'] }), async (req, 
 });
 
 // ✅ Delete a product (ownership-scoped)
+router.get('/me/products', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
+  try {
+    const vendor = await resolveVendorForUser(req.user);
+    if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
+
+    const includeArchived = String(req.query?.includeArchived || '').toLowerCase() === 'true';
+    let query = supabase
+      .from('products')
+      .select('id, name, category, category_path, category_other, extra_micro_categories, is_service, metadata, status, head_category_id, sub_category_id, micro_category_id, created_at, updated_at')
+      .eq('vendor_id', vendor.id)
+      .order('created_at', { ascending: false });
+
+    if (!includeArchived) query = query.neq('status', 'ARCHIVED');
+
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    return res.json({ success: true, products: data || [] });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.patch('/me/products/:productId/metadata', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
+  try {
+    const vendor = await resolveVendorForUser(req.user);
+    if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
+
+    const productId = String(req.params.productId || '').trim();
+    if (!productId) return res.status(400).json({ success: false, error: 'Product ID required' });
+
+    const metadata = req.body?.metadata && typeof req.body.metadata === 'object' && !Array.isArray(req.body.metadata)
+      ? req.body.metadata
+      : null;
+    if (!metadata) return res.status(400).json({ success: false, error: 'metadata object required' });
+
+    const { data: product } = await supabase
+      .from('products')
+      .select('id, vendor_id')
+      .eq('id', productId)
+      .maybeSingle();
+
+    if (!product) return res.status(404).json({ success: false, error: 'Product not found' });
+    if (product.vendor_id !== vendor.id) return res.status(403).json({ success: false, error: 'Not your product' });
+
+    const { data, error } = await supabase
+      .from('products')
+      .update({ metadata, updated_at: new Date().toISOString() })
+      .eq('id', productId)
+      .select()
+      .single();
+
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    return res.json({ success: true, product: data });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 router.delete('/me/products/:productId', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
   try {
     const vendor = await resolveVendorForUser(req.user);

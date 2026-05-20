@@ -103,6 +103,7 @@ const apiLimiter = rateLimit({
   legacyHeaders: false,
   skip: (req) => {
     if (runtimeConfig.disableApiRateLimit) return true;
+    if (req.method === 'GET' && ['/auth/me', '/auth/buyer/profile'].includes(req.path)) return true;
     if (!runtimeConfig.isProd && req.path.startsWith('/auth/')) return true;
     return false;
   },
@@ -114,7 +115,10 @@ const authLimiter = rateLimit({
   message: 'Too many auth attempts, try again later',
   standardHeaders: true,
   legacyHeaders: false,
-  skip: () => runtimeConfig.disableApiRateLimit,
+  skip: (req) => {
+    if (runtimeConfig.disableApiRateLimit) return true;
+    return req.method === 'GET' && ['/me', '/buyer/profile'].includes(req.path);
+  },
 });
 
 app.use('/api/', apiLimiter);

@@ -3,6 +3,7 @@ import { setDefaultResultOrder } from 'dns';
 import dotenv from 'dotenv';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import WebSocket from 'ws';
 
 // Compute repo root relative to this file, not cwd, so it works regardless of where node is launched from.
 const here = fileURLToPath(import.meta.url);
@@ -117,6 +118,9 @@ export const supabase = createClient(supabaseUrl, serviceOrAnonKey, {
   global: {
     fetch: resilientFetch,
   },
+  realtime: {
+    transport: WebSocket,
+  },
   auth: {
     persistSession: false,
     autoRefreshToken: false,
@@ -129,6 +133,9 @@ export const supabaseAnon = supabaseAnonKey
   ? createClient(supabaseUrl, supabaseAnonKey, {
       global: {
         fetch: resilientFetch,
+      },
+      realtime: {
+        transport: WebSocket,
       },
       auth: {
         persistSession: false,
