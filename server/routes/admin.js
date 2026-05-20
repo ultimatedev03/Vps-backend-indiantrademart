@@ -76,6 +76,42 @@ function escapeIlikeTerm(value) {
     .replace(/,/g, " ");
 }
 
+function buildVendorSearchFilters(search) {
+  const raw = String(search || "").trim();
+  if (!raw) return "";
+
+  const filters = new Set();
+  const addTextFilters = (term) => {
+    const escaped = escapeIlikeTerm(term);
+    if (!escaped) return;
+    filters.add(`company_name.ilike.%${escaped}%`);
+    filters.add(`owner_name.ilike.%${escaped}%`);
+    filters.add(`vendor_id.ilike.%${escaped}%`);
+    filters.add(`email.ilike.%${escaped}%`);
+    filters.add(`phone.ilike.%${escaped}%`);
+  };
+
+  addTextFilters(raw);
+
+  const compact = raw.replace(/\s+/g, "");
+  if (compact && compact !== raw) addTextFilters(compact);
+
+  const phoneDigits = raw.replace(/\D/g, "");
+  if (phoneDigits.length >= 3) {
+    filters.add(`phone.ilike.%${escapeIlikeTerm(phoneDigits)}%`);
+  }
+
+  if (EMAIL_SEARCH_RE.test(raw)) {
+    filters.add(`email.ilike.%${escapeIlikeTerm(normalizeEmail(raw))}%`);
+  }
+
+  if (UUID_LIKE_RE.test(raw)) {
+    filters.add(`id.eq.${raw}`);
+  }
+
+  return Array.from(filters).join(",");
+}
+
 async function findPublicUserByEmail(email) {
   const target = normalizeEmail(email);
   if (!target) return null;
@@ -581,25 +617,8 @@ router.get("/vendors", async (req, res) => {
     }
 
     if (search) {
-      const normalizedSearchEmail = normalizeEmail(search);
-      const escapedSearch = escapeIlikeTerm(search);
-      const looksLikeEmailSearch = EMAIL_SEARCH_RE.test(search);
-      const looksLikeUuidSearch = UUID_LIKE_RE.test(search);
-
-      if (looksLikeEmailSearch) {
-        vendorQuery = vendorQuery.ilike("email", normalizedSearchEmail);
-      } else if (looksLikeUuidSearch) {
-        vendorQuery = vendorQuery.eq("id", search);
-      } else {
-        vendorQuery = vendorQuery.or(
-          [
-            `company_name.ilike.%${escapedSearch}%`,
-            `owner_name.ilike.%${escapedSearch}%`,
-            `vendor_id.ilike.%${escapedSearch}%`,
-            `email.ilike.%${escapedSearch}%`,
-          ].join(",")
-        );
-      }
+      const searchFilters = buildVendorSearchFilters(search);
+      if (searchFilters) vendorQuery = vendorQuery.or(searchFilters);
     }
 
     if (hasJoinedFrom) {
