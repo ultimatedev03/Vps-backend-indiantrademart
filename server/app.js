@@ -112,6 +112,7 @@ const apiLimiter = rateLimit({
       req.method === 'GET' &&
       (
         ['/auth/me', '/auth/buyer/profile', '/notifications/list'].includes(req.path) ||
+        req.path.startsWith('/public/') ||
         req.path.startsWith('/dir/categories/') ||
         req.path.startsWith('/vendors/me')
       )
