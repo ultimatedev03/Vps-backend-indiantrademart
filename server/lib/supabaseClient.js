@@ -28,7 +28,7 @@ for (const envPath of envCandidates) {
 }
 
 const nodeEnv = process.env.NODE_ENV || 'development';
-const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || process.env.UPABASE_URL;
 // Prefer proper service role key; allow alternative var name; fall back to anon ONLY in non-production for local boot.
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY;
 const supabaseAnonKey =
