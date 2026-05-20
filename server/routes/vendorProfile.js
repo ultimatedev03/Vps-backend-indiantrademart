@@ -3620,7 +3620,7 @@ router.delete('/me/proposals/:proposalId', requireAuth({ roles: ['VENDOR'] }), a
   }
 });
 
-router.get('/:vendorId', async (req, res) => {
+router.get('/:vendorId([0-9a-fA-F-]{36})', async (req, res) => {
   try {
     const { vendorId } = req.params;
     if (!isValidId(vendorId)) {
@@ -3638,7 +3638,7 @@ router.get('/:vendorId', async (req, res) => {
   }
 });
 
-router.get('/:vendorId/products', async (req, res) => {
+router.get('/:vendorId([0-9a-fA-F-]{36})/products', async (req, res) => {
   try {
     const { vendorId } = req.params;
     if (!isValidId(vendorId)) {
@@ -3737,7 +3737,7 @@ router.get('/:vendorId/products', async (req, res) => {
   }
 });
 
-router.get('/:vendorId/services', async (req, res) => {
+router.get('/:vendorId([0-9a-fA-F-]{36})/services', async (req, res) => {
   try {
     const { vendorId } = req.params;
     if (!isValidId(vendorId)) {
@@ -3785,7 +3785,7 @@ router.get('/:vendorId/services', async (req, res) => {
   }
 });
 
-router.get('/:vendorId/service-categories', async (req, res) => {
+router.get('/:vendorId([0-9a-fA-F-]{36})/service-categories', async (req, res) => {
   try {
     const { vendorId } = req.params;
     if (!isValidId(vendorId)) {
@@ -3832,7 +3832,7 @@ router.get('/:vendorId/service-categories', async (req, res) => {
   }
 });
 
-router.get('/:vendorId/favorite', requireAuth({ roles: ['BUYER'] }), async (req, res) => {
+router.get('/:vendorId([0-9a-fA-F-]{36})/favorite', requireAuth({ roles: ['BUYER'] }), async (req, res) => {
   try {
     const { vendorId } = req.params;
     if (!isValidId(vendorId)) {
@@ -3859,7 +3859,7 @@ router.get('/:vendorId/favorite', requireAuth({ roles: ['BUYER'] }), async (req,
   }
 });
 
-router.post('/:vendorId/favorite', requireAuth({ roles: ['BUYER'] }), async (req, res) => {
+router.post('/:vendorId([0-9a-fA-F-]{36})/favorite', requireAuth({ roles: ['BUYER'] }), async (req, res) => {
   try {
     const { vendorId } = req.params;
     if (!isValidId(vendorId)) {
@@ -3887,7 +3887,7 @@ router.post('/:vendorId/favorite', requireAuth({ roles: ['BUYER'] }), async (req
   }
 });
 
-router.delete('/:vendorId/favorite', requireAuth({ roles: ['BUYER'] }), async (req, res) => {
+router.delete('/:vendorId([0-9a-fA-F-]{36})/favorite', requireAuth({ roles: ['BUYER'] }), async (req, res) => {
   try {
     const { vendorId } = req.params;
     if (!isValidId(vendorId)) {
@@ -4257,7 +4257,7 @@ router.post('/:vendorId/leads', optionalAuth(), async (req, res) => {
   }
 });
 
-router.get('/:vendorId/leads', requireAuth(), async (req, res) => {
+router.get('/:vendorId([0-9a-fA-F-]{36})/leads', requireAuth(), async (req, res) => {
   try {
     const { vendorId } = req.params;
     if (!isValidId(vendorId)) {

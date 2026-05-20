@@ -98,12 +98,26 @@ const otpLimiter = rateLimit({
 const apiLimiter = rateLimit({
   windowMs: runtimeConfig.apiRateWindowMs,
   max: runtimeConfig.apiRateMax,
-  message: 'Too many requests, try again later',
   standardHeaders: true,
   legacyHeaders: false,
+  handler: (_req, res) => {
+    res.status(429).json({
+      success: false,
+      error: 'Too many requests. Please wait a moment and try again.',
+    });
+  },
   skip: (req) => {
     if (runtimeConfig.disableApiRateLimit) return true;
-    if (req.method === 'GET' && ['/auth/me', '/auth/buyer/profile'].includes(req.path)) return true;
+    if (
+      req.method === 'GET' &&
+      (
+        ['/auth/me', '/auth/buyer/profile', '/notifications/list'].includes(req.path) ||
+        req.path.startsWith('/dir/categories/') ||
+        req.path.startsWith('/vendors/me')
+      )
+    ) {
+      return true;
+    }
     if (!runtimeConfig.isProd && req.path.startsWith('/auth/')) return true;
     return false;
   },
