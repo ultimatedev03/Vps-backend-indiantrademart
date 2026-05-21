@@ -186,16 +186,29 @@ const calculateVendorProfileCompletion = (vendor = {}) => {
 const buildVendorResponse = (vendor = null) => {
   if (!vendor) return null;
 
-  const storedProfileCompletion = Number(vendor?.profile_completion);
   const derivedProfileCompletion = calculateVendorProfileCompletion(vendor);
 
   return {
     ...vendor,
     vendor_id: String(vendor?.vendor_id || '').trim() || String(vendor?.id || '').trim() || null,
-    profile_completion: Number.isFinite(storedProfileCompletion)
-      ? Math.max(storedProfileCompletion, derivedProfileCompletion)
-      : derivedProfileCompletion,
+    profile_completion: derivedProfileCompletion,
   };
+};
+
+const countRows = async (table, applyFilters) => {
+  let query = supabase.from(table).select('id', { count: 'planned', head: true });
+  query = applyFilters(query);
+  const { count, error } = await query;
+  if (error) {
+    if (isMissingColumnError(error) || error?.code === '42P01') return 0;
+    throw new Error(error.message || `Failed to count ${table}`);
+  }
+  return Number(count || 0);
+};
+
+const filterVendorIds = (query, vendorIds = []) => {
+  const ids = (vendorIds || []).map((id) => String(id || '').trim()).filter(Boolean);
+  return ids.length === 1 ? query.eq('vendor_id', ids[0]) : query.in('vendor_id', ids);
 };
 
 const clearVendorCacheEntries = (vendorId = '') => {
@@ -4476,25 +4489,56 @@ router.get('/me/dashboard-stats', requireAuth({ roles: ['VENDOR'] }), async (req
   try {
     const vendor = buildVendorResponse(await resolveVendorForUser(req.user));
     if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
+    const vendorIds = await resolveVendorIdsForUser(req.user);
+    if (!vendorIds.includes(vendor.id)) vendorIds.unshift(vendor.id);
 
-    const ck = `dash:${vendor.id}`;
+    const ck = `dash:${vendorIds.join('|')}`;
     const hit = _getCached(_cacheDash, ck);
     if (hit) {
       return res.json({ success: true, stats: hit });
     }
 
-    const [products, leads, proposals, messages] = await Promise.all([
-      supabase.from('products').select('*', { count: 'planned', head: true }).eq('vendor_id', vendor.id),
-      supabase.from('leads').select('*', { count: 'planned', head: true }).eq('vendor_id', vendor.id).eq('status', 'AVAILABLE'),
-      supabase.from('proposals').select('*', { count: 'planned', head: true }).eq('vendor_id', vendor.id).eq('status', 'SENT'),
-      supabase.from('vendor_messages').select('*', { count: 'planned', head: true }).eq('vendor_id', vendor.id),
+    const userId = String(req.user?.id || '').trim();
+    const userEmail = normalizeEmail(req.user?.email || '');
+
+    const [
+      totalProducts,
+      directLeads,
+      purchasedLeads,
+      proposalLeads,
+      unreadNotifications,
+    ] = await Promise.all([
+      countRows('products', (query) => filterVendorIds(query, vendorIds).neq('status', 'ARCHIVED')),
+      countRows('leads', (query) => filterVendorIds(query, vendorIds).neq('status', 'CLOSED')),
+      countRows('lead_purchases', (query) => filterVendorIds(query, vendorIds)),
+      countRows('proposals', (query) => filterVendorIds(query, vendorIds).neq('status', 'CLOSED')),
+      (async () => {
+        const identityFilters = [];
+        if (userId) identityFilters.push(`user_id.eq.${userId}`);
+        if (userEmail) identityFilters.push(`user_email.ilike.${userEmail}`);
+        if (!identityFilters.length) return 0;
+
+        let query = supabase
+          .from('notifications')
+          .select('id', { count: 'planned', head: true })
+          .eq('is_read', false)
+          .or(identityFilters.join(','))
+          .or('type.eq.PROPOSAL_MESSAGE,type.eq.SUPPORT_ALERT,link.ilike.%/vendor/messages%,link.ilike.%/vendor/support%');
+
+        const { count, error } = await query;
+        if (error) {
+          if (isMissingColumnError(error) || error?.code === '42P01') return 0;
+          throw new Error(error.message || 'Failed to count notifications');
+        }
+        return Number(count || 0);
+      })(),
     ]);
 
     const stats = {
-      totalProducts: products.count || 0,
-      totalLeads: (leads.count || 0) + (proposals.count || 0),
-      totalMessages: messages.count || 0,
-      profileCompletion: vendor.profile_completion || calculateVendorProfileCompletion(vendor),
+      totalProducts,
+      totalLeads: directLeads + purchasedLeads + proposalLeads,
+      totalMessages: unreadNotifications,
+      profileCompletion: calculateVendorProfileCompletion(vendor),
       kycStatus: vendor.kyc_status || 'PENDING',
       trustScore: 0,
       rating: 0,
