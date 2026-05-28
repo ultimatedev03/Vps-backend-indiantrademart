@@ -64,8 +64,8 @@ export function createRuntimeConfig(overrides = {}) {
 
     // External integrations
     gmailEmail: process.env.GMAIL_EMAIL,
-    supabaseUrl: process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || process.env.UPABASE_URL,
-    supabaseServiceKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
+    mysqlHost: process.env.MYSQL_HOST || '127.0.0.1',
+    mysqlDatabase: process.env.MYSQL_DATABASE || 'indiantrademart',
 
     // Debug
     debugSubdomain: process.env.DEBUG_SUBDOMAIN === 'true',

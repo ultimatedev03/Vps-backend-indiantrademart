@@ -1,4 +1,4 @@
-import { supabase } from './supabaseClient.js';
+import { db } from './dbClient.js';
 
 /**
  * Send a renewal reminder notification to a vendor
@@ -7,7 +7,7 @@ import { supabase } from './supabaseClient.js';
 export async function sendRenewalReminder(vendorId, planName, expiryDate) {
   try {
     // Get vendor details to find associated user
-    const { data: vendor, error: vendorError } = await supabase
+    const { data: vendor, error: vendorError } = await db
       .from('vendors')
       .select('user_id, company_name')
       .eq('id', vendorId)
@@ -25,7 +25,7 @@ export async function sendRenewalReminder(vendorId, planName, expiryDate) {
     });
 
     // Create notification record
-    const { data: notification, error: notificationError } = await supabase
+    const { data: notification, error: notificationError } = await db
       .from('notifications')
       .insert([
         {
@@ -58,7 +58,7 @@ export async function sendRenewalReminder(vendorId, planName, expiryDate) {
  */
 export async function sendExpirationWarning(vendorId, planName) {
   try {
-    const { data: vendor, error: vendorError } = await supabase
+    const { data: vendor, error: vendorError } = await db
       .from('vendors')
       .select('user_id, company_name')
       .eq('id', vendorId)
@@ -69,7 +69,7 @@ export async function sendExpirationWarning(vendorId, planName) {
       return null;
     }
 
-    const { data: notification, error: notificationError } = await supabase
+    const { data: notification, error: notificationError } = await db
       .from('notifications')
       .insert([
         {
@@ -102,7 +102,7 @@ export async function sendExpirationWarning(vendorId, planName) {
  */
 export async function sendSubscriptionActivatedNotification(vendorId, planName, expiryDate) {
   try {
-    const { data: vendor, error: vendorError } = await supabase
+    const { data: vendor, error: vendorError } = await db
       .from('vendors')
       .select('user_id, company_name')
       .eq('id', vendorId)
@@ -119,7 +119,7 @@ export async function sendSubscriptionActivatedNotification(vendorId, planName, 
       day: 'numeric'
     });
 
-    const { data: notification, error: notificationError } = await supabase
+    const { data: notification, error: notificationError } = await db
       .from('notifications')
       .insert([
         {
@@ -152,7 +152,7 @@ export async function sendSubscriptionActivatedNotification(vendorId, planName, 
  */
 export async function sendSubscriptionRenewedNotification(vendorId, planName, newExpiryDate) {
   try {
-    const { data: vendor, error: vendorError } = await supabase
+    const { data: vendor, error: vendorError } = await db
       .from('vendors')
       .select('user_id, company_name')
       .eq('id', vendorId)
@@ -169,7 +169,7 @@ export async function sendSubscriptionRenewedNotification(vendorId, planName, ne
       day: 'numeric'
     });
 
-    const { data: notification, error: notificationError } = await supabase
+    const { data: notification, error: notificationError } = await db
       .from('notifications')
       .insert([
         {
@@ -201,7 +201,7 @@ export async function sendSubscriptionRenewedNotification(vendorId, planName, ne
  */
 export async function markRenewalNotificationSent(subscriptionId) {
   try {
-    const { error } = await supabase
+    const { error } = await db
       .from('vendor_plan_subscriptions')
       .update({
         renewal_notification_sent: true,

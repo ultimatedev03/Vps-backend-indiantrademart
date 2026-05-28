@@ -57,6 +57,36 @@ const sanitizePublicIdPart = (value = '') =>
     .replace(/^_+|_+$/g, '')
     .slice(0, 180) || 'upload';
 
+const injectCloudinaryTransform = (url = '', transform = '') => {
+  const raw = String(url || '').trim();
+  if (!raw || !transform) return raw;
+
+  const marker = '/upload/';
+  const uploadIdx = raw.indexOf(marker);
+  if (uploadIdx === -1) return raw;
+
+  const before = raw.slice(0, uploadIdx + marker.length);
+  const after = raw.slice(uploadIdx + marker.length);
+  if (!after || after.startsWith(`${transform}/`)) return raw;
+
+  return `${before}${transform}/${after}`;
+};
+
+const buildOptimizedDeliveryUrl = ({ url, resourceType, contentType }) => {
+  const type = String(resourceType || '').toLowerCase();
+  const mime = String(contentType || '').toLowerCase();
+
+  if (type === 'image') {
+    return injectCloudinaryTransform(url, 'f_auto,q_auto,c_limit,w_1800,h_1800');
+  }
+
+  if (type === 'video' || mime.startsWith('video/')) {
+    return injectCloudinaryTransform(url, 'q_auto');
+  }
+
+  return url;
+};
+
 export const uploadBufferToCloudinary = async ({
   buffer,
   contentType = 'application/octet-stream',
@@ -106,7 +136,12 @@ export const uploadBufferToCloudinary = async ({
     bucket: `cloudinary:${finalResourceType}`,
     path: payload?.public_id || params.public_id,
     publicId: payload?.public_id || params.public_id,
-    publicUrl: payload?.secure_url || payload?.url || null,
+    publicUrl: buildOptimizedDeliveryUrl({
+      url: payload?.secure_url || payload?.url || null,
+      resourceType: finalResourceType,
+      contentType,
+    }),
+    originalUrl: payload?.secure_url || payload?.url || null,
     resourceType: finalResourceType,
     bytes: payload?.bytes || buffer.length,
   };

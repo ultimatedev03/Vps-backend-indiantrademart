@@ -1,12 +1,12 @@
 import cron from 'node-cron';
-import { supabase } from './supabaseClient.js';
+import { db } from './dbClient.js';
 import {
   sendRenewalReminder,
   markRenewalNotificationSent,
   sendExpirationWarning,
 } from './notificationService.js';
 
-// Supabase client is centralized in supabaseClient.js with robust env loading and dev fallback.
+// Database client is centralized in dbClient.js with robust env loading and dev fallback.
 
 /**
  * Check subscriptions expiring in 7 days and send renewal reminders
@@ -25,7 +25,7 @@ function checkExpiringSubscriptions() {
 
         // ✅ Subscriptions expiring between tomorrow and 7 days from now
         // ✅ and renewal notification not sent
-        const { data: expiringSubscriptions, error } = await supabase
+        const { data: expiringSubscriptions, error } = await db
           .from('vendor_plan_subscriptions')
           .select(
             `
@@ -92,7 +92,7 @@ function checkExpiredSubscriptions() {
         const now = new Date();
 
         // ✅ Subscriptions already expired but still ACTIVE
-        const { data: expiredSubscriptions, error } = await supabase
+        const { data: expiredSubscriptions, error } = await db
           .from('vendor_plan_subscriptions')
           .select(
             `
@@ -127,7 +127,7 @@ function checkExpiredSubscriptions() {
             await sendExpirationWarning(subscription.vendor_id, planName);
 
             // Mark subscription EXPIRED
-            const { error: updateError } = await supabase
+            const { error: updateError } = await db
               .from('vendor_plan_subscriptions')
               .update({ status: 'EXPIRED' })
               .eq('id', subscription.id);
@@ -160,7 +160,7 @@ function checkExpiredSubscriptions() {
  */
 async function updateVendorLeadQuotaOnExpiry(vendorId) {
   try {
-    const { error } = await supabase
+    const { error } = await db
       .from('vendor_lead_quota')
       .update({
         daily_used: 0,
@@ -213,21 +213,21 @@ export async function getSubscriptionExpirationSummary() {
     const sevenDaysFromNow = new Date(today.getTime() + 7 * 24 * 60 * 60 * 1000);
     const thirtyDaysFromNow = new Date(today.getTime() + 30 * 24 * 60 * 60 * 1000);
 
-    const { count: expiringSoonCount } = await supabase
+    const { count: expiringSoonCount } = await db
       .from('vendor_plan_subscriptions')
       .select('id', { count: 'exact', head: true })
       .eq('status', 'ACTIVE')
       .gte('end_date', today.toISOString())
       .lte('end_date', sevenDaysFromNow.toISOString());
 
-    const { count: expiringMonthCount } = await supabase
+    const { count: expiringMonthCount } = await db
       .from('vendor_plan_subscriptions')
       .select('id', { count: 'exact', head: true })
       .eq('status', 'ACTIVE')
       .gte('end_date', today.toISOString())
       .lte('end_date', thirtyDaysFromNow.toISOString());
 
-    const { count: expiredCount } = await supabase
+    const { count: expiredCount } = await db
       .from('vendor_plan_subscriptions')
       .select('id', { count: 'exact', head: true })
       .eq('status', 'EXPIRED');

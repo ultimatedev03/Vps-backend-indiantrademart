@@ -20,6 +20,7 @@ import { leadRoutes } from './lead/index.js';
 import { employeeRoutes } from './employee/index.js';
 import { adminRoutes } from './admin/index.js';
 import { notificationRoutes } from './notifications/index.js';
+import { databaseRoutes } from './database/index.js';
 
 export const backendModules = Object.freeze([
   { name: 'auth', routes: authRoutes },
@@ -30,4 +31,5 @@ export const backendModules = Object.freeze([
   { name: 'employee', routes: employeeRoutes },
   { name: 'admin', routes: adminRoutes },
   { name: 'notifications', routes: notificationRoutes },
+  { name: 'database', routes: databaseRoutes },
 ]);

@@ -1,6 +1,6 @@
 import { logger } from '../utils/logger.js';
 import express from 'express';
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import { notifyRole, notifyUser } from '../lib/notify.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 
@@ -34,7 +34,7 @@ const getTicketUsers = async (ticket) => {
   let buyerEmail = null;
 
   if (vendorId) {
-    const { data } = await supabase
+    const { data } = await db
       .from('vendors')
       .select('user_id, email')
       .eq('id', vendorId)
@@ -44,7 +44,7 @@ const getTicketUsers = async (ticket) => {
   }
 
   if (buyerId) {
-    const { data } = await supabase
+    const { data } = await db
       .from('buyers')
       .select('user_id, email')
       .eq('id', buyerId)
@@ -62,7 +62,7 @@ router.get('/tickets', async (req, res) => {
     const { status, priority, search, scope = 'ALL', page = 1, pageSize = 100 } = req.query;
     
     
-    let query = supabase
+    let query = db
       .from('support_tickets')
       .select('*, vendors(company_name, email, owner_name, vendor_id), buyers(id, full_name, email, company_name)', { count: 'exact' })
       .order('created_at', { ascending: false });
@@ -80,7 +80,7 @@ router.get('/tickets', async (req, res) => {
     // Apply search filter (search across subject and description)
     if (search && search.trim()) {
       const searchTerm = search.toLowerCase();
-      // Note: Supabase text search requires ilike operator
+      // Text search uses ilike-style matching.
       query = query.or(`subject.ilike.%${searchTerm}%,description.ilike.%${searchTerm}%,ticket_display_id.ilike.%${searchTerm}%`);
     }
 
@@ -131,7 +131,7 @@ router.get('/tickets/:id', async (req, res) => {
     
     logger.log(`🔍 Fetching ticket: ${id}`);
     
-    const { data: ticket, error } = await supabase
+    const { data: ticket, error } = await db
       .from('support_tickets')
       .select('*, vendors(company_name, email, owner_name, vendor_id), buyers(id, full_name, email, company_name)')
       .eq('id', id)
@@ -160,7 +160,7 @@ router.get('/tickets/:id', async (req, res) => {
 router.get('/tickets/:id/messages', async (req, res) => {
   try {
     const { id } = req.params;
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('ticket_messages')
       .select('*')
       .eq('ticket_id', id)
@@ -188,7 +188,7 @@ router.post('/tickets/:id/messages', async (req, res) => {
 
     const senderType = normalizeSenderType(sender_type) || 'SUPPORT';
 
-    const { data: ticket, error: tErr } = await supabase
+    const { data: ticket, error: tErr } = await db
       .from('support_tickets')
       .select('*')
       .eq('id', id)
@@ -198,12 +198,12 @@ router.post('/tickets/:id/messages', async (req, res) => {
       return res.status(404).json({ error: 'Ticket not found' });
     }
 
-    await supabase
+    await db
       .from('support_tickets')
       .update({ last_reply_at: nowIso(), updated_at: nowIso() })
       .eq('id', id);
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('ticket_messages')
       .insert([{
         ticket_id: id,
@@ -305,7 +305,7 @@ router.post('/tickets', async (req, res) => {
     
     logger.log('📝 Creating support ticket:', ticketNumber);
     
-    const { data: newTicket, error } = await supabase
+    const { data: newTicket, error } = await db
       .from('support_tickets')
       .insert([ticketPayload])
       .select()
@@ -365,7 +365,7 @@ router.delete('/tickets/:id', async (req, res) => {
       });
     }
 
-    let scopeQuery = supabase
+    let scopeQuery = db
       .from('support_tickets')
       .select('id')
       .eq('id', id);
@@ -389,7 +389,7 @@ router.delete('/tickets/:id', async (req, res) => {
       });
     }
 
-    const { error: messageDeleteError } = await supabase
+    const { error: messageDeleteError } = await db
       .from('ticket_messages')
       .delete()
       .eq('ticket_id', id);
@@ -402,7 +402,7 @@ router.delete('/tickets/:id', async (req, res) => {
       });
     }
 
-    const { data: deletedRows, error: deleteError } = await supabase
+    const { data: deletedRows, error: deleteError } = await db
       .from('support_tickets')
       .delete()
       .eq('id', id)
@@ -457,7 +457,7 @@ router.patch('/tickets/:id', async (req, res) => {
       });
     }
     
-    const { data: updatedTicket, error } = await supabase
+    const { data: updatedTicket, error } = await db
       .from('support_tickets')
       .update(sanitizedUpdates)
       .eq('id', id)
@@ -522,7 +522,7 @@ router.put('/tickets/:id/status', async (req, res) => {
       updatePayload.resolved_at = nowIso();
     }
     
-    const { data: updatedTicket, error } = await supabase
+    const { data: updatedTicket, error } = await db
       .from('support_tickets')
       .update(updatePayload)
       .eq('id', id)
@@ -590,7 +590,7 @@ router.post('/tickets/:id/notify-customer', async (req, res) => {
     const { id } = req.params;
     const rawMessage = String(req.body?.message || '').trim();
 
-    const { data: ticket, error: ticketError } = await supabase
+    const { data: ticket, error: ticketError } = await db
       .from('support_tickets')
       .select('id, ticket_display_id, subject, description, category, vendor_id, buyer_id')
       .eq('id', id)
@@ -667,7 +667,7 @@ router.post('/tickets/:id/escalate', requireAuth({ roles: ['ADMIN', 'SUPPORT', '
       return res.status(409).json({ error: `Cannot escalate a ticket to the same ${targetLabels[targetRole] || 'team'}.` });
     }
 
-    const { data: ticket, error: ticketError } = await supabase
+    const { data: ticket, error: ticketError } = await db
       .from('support_tickets')
       .select('id, ticket_display_id, subject, description, vendor_id, buyer_id')
       .eq('id', id)
@@ -684,7 +684,7 @@ router.post('/tickets/:id/escalate', requireAuth({ roles: ['ADMIN', 'SUPPORT', '
       `Support escalated this ${entityLabel.toLowerCase()} issue to ${targetLabel} for review.`;
     const auditMessage = `[Escalated to ${targetLabel}] ${message}`;
 
-    const { error: messageError } = await supabase
+    const { error: messageError } = await db
       .from('ticket_messages')
       .insert([{
         ticket_id: id,
@@ -698,7 +698,7 @@ router.post('/tickets/:id/escalate', requireAuth({ roles: ['ADMIN', 'SUPPORT', '
       return res.status(500).json({ error: 'Failed to record escalation', details: messageError.message });
     }
 
-    await supabase
+    await db
       .from('support_tickets')
       .update({ last_reply_at: nowIso(), updated_at: nowIso() })
       .eq('id', id);
@@ -763,7 +763,7 @@ router.get('/stats', async (req, res) => {
     logger.log('📊 Fetching ticket statistics');
     
     // Get count by status
-    const { data: tickets, error } = await supabase
+    const { data: tickets, error } = await db
       .from('support_tickets')
       .select('status, priority');
     
@@ -851,7 +851,7 @@ router.get('/vendor/:vendorId', async (req, res) => {
     
     logger.log(`🔍 Fetching tickets for vendor: ${vendorId}`);
     
-    let query = supabase
+    let query = db
       .from('support_tickets')
       .select('*')
       .eq('vendor_id', vendorId)
@@ -898,7 +898,7 @@ router.get('/buyer/:buyerId', async (req, res) => {
     
     logger.log(`🔍 Fetching tickets for buyer: ${buyerId}`);
     
-    let query = supabase
+    let query = db
       .from('support_tickets')
       .select('*')
       .eq('buyer_id', buyerId)

@@ -1,5 +1,5 @@
 import express from 'express';
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 import { writeAuditLog } from '../lib/audit.js';
 import {
@@ -20,7 +20,7 @@ async function resolveVendorForAuthUser(user = {}) {
   const email = normalizeEmail(user?.email);
 
   if (userId) {
-    const { data: byUserId, error: byUserErr } = await supabase
+    const { data: byUserId, error: byUserErr } = await db
       .from('vendors')
       .select('*')
       .eq('user_id', userId)
@@ -29,7 +29,7 @@ async function resolveVendorForAuthUser(user = {}) {
   }
 
   if (email) {
-    const { data: byEmail, error: byEmailErr } = await supabase
+    const { data: byEmail, error: byEmailErr } = await db
       .from('vendors')
       .select('*')
       .ilike('email', email)
@@ -51,26 +51,26 @@ router.get('/me', async (req, res) => {
     if (!vendor?.id) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
 
     const [profile, walletRes, settings, referredRowsRes, earnedRowsRes, linkedReferralRes] = await Promise.all([
-      ensureVendorReferralProfile(vendor, supabase),
-      supabase
+      ensureVendorReferralProfile(vendor, db),
+      db
         .from('vendor_referral_wallets')
         .select('*')
         .eq('vendor_id', vendor.id)
         .maybeSingle(),
-      getReferralSettings(supabase),
-      supabase
+      getReferralSettings(db),
+      db
         .from('vendor_referrals')
         .select('id, status, created_at, qualified_at, rewarded_at, referred_vendor_id')
         .eq('referrer_vendor_id', vendor.id)
         .order('created_at', { ascending: false })
         .limit(25),
-      supabase
+      db
         .from('vendor_referral_wallet_ledger')
         .select('id, entry_type, amount, status, created_at, referral_id, payment_id')
         .eq('vendor_id', vendor.id)
         .order('created_at', { ascending: false })
         .limit(50),
-      supabase
+      db
         .from('vendor_referrals')
         .select('id, status, created_at, qualified_at, rewarded_at, rejection_reason, referral_code, referrer_vendor_id')
         .eq('referred_vendor_id', vendor.id)
@@ -91,7 +91,7 @@ router.get('/me', async (req, res) => {
 
     let vendorMap = {};
     if (referredVendorIds.length > 0) {
-      const { data: vendors, error: vendorsErr } = await supabase
+      const { data: vendors, error: vendorsErr } = await db
         .from('vendors')
         .select('id, company_name, vendor_id, email')
         .in('id', referredVendorIds);
@@ -111,7 +111,7 @@ router.get('/me', async (req, res) => {
 
     let linkedReferral = linkedReferralRes.data || null;
     if (linkedReferral?.referrer_vendor_id) {
-      const { data: referrerVendor, error: referrerErr } = await supabase
+      const { data: referrerVendor, error: referrerErr } = await db
         .from('vendors')
         .select('id, company_name, vendor_id, email')
         .eq('id', linkedReferral.referrer_vendor_id)
@@ -169,7 +169,7 @@ router.post('/link', async (req, res) => {
         referredVendor: vendor,
         referralCode,
       },
-      supabase
+      db
     );
 
     await writeAuditLog({
@@ -204,7 +204,7 @@ router.get('/cashouts', async (req, res) => {
     const vendor = await resolveVendorForAuthUser(req.user);
     if (!vendor?.id) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendor_referral_cashout_requests')
       .select('*')
       .eq('vendor_id', vendor.id)
@@ -235,7 +235,7 @@ router.post('/cashout', async (req, res) => {
         bankDetailId: bankDetailId || null,
         note: note || null,
       },
-      supabase
+      db
     );
 
     await writeAuditLog({

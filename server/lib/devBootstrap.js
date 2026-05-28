@@ -1,4 +1,4 @@
-import { supabase } from './supabaseClient.js';
+import { db } from './dbClient.js';
 import { hashPassword, normalizeEmail, upsertPublicUser } from './auth.js';
 
 const truthy = (value) => String(value || '').toLowerCase() === 'true';
@@ -25,7 +25,7 @@ export async function ensureDevAdmin() {
   });
 
   // Optional employee profile (for internal portals)
-  const { data: existingEmp, error: empErr } = await supabase
+  const { data: existingEmp, error: empErr } = await db
     .from('employees')
     .select('id')
     .eq('email', email)
@@ -37,7 +37,7 @@ export async function ensureDevAdmin() {
   }
 
   if (!existingEmp?.id) {
-    const { error: insertErr } = await supabase
+    const { error: insertErr } = await db
       .from('employees')
       .insert([{
         user_id: adminUser?.id || null,

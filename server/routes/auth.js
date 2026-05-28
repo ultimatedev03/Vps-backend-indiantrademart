@@ -1,7 +1,7 @@
 import { logger } from '../utils/logger.js';
 import express from 'express';
 import { randomUUID } from 'crypto';
-import { supabase, supabaseAnon } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import { isCloudinaryConfigured, uploadBufferToCloudinary } from '../lib/cloudinaryUpload.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 import {
@@ -31,12 +31,10 @@ import { validateStrongPassword } from '../lib/passwordPolicy.js';
 
 const router = express.Router();
 
-const ENABLE_SUPABASE_AUTH_MIGRATION =
-  String(process.env.ENABLE_SUPABASE_AUTH_MIGRATION || 'true').toLowerCase() !== 'false';
-
-const ENABLE_SUPABASE_AUTH_SIGNUP =
-  String(process.env.ENABLE_SUPABASE_AUTH_SIGNUP || 'true').toLowerCase() !== 'false';
+const ENABLE_MYSQL_AUTH_SIGNUP =
+  String(process.env.ENABLE_MYSQL_AUTH_SIGNUP || 'true').toLowerCase() !== 'false';
 const BUYER_NOT_REGISTERED_MESSAGE = 'This email is not registered as buyer';
+const SYSTEM_CONFIG_KEY = 'maintenance_mode';
 const BUYER_AVATAR_MIN_BYTES = 10 * 1024;
 const BUYER_AVATAR_MAX_BYTES = 5 * 1024 * 1024;
 const BUYER_AVATAR_ALLOWED_MIME = new Set([
@@ -135,6 +133,26 @@ const isTransientUpstreamError = (error) => {
   );
 };
 
+async function isVendorRegistrationAllowed() {
+  try {
+    const { data, error } = await db
+      .from('system_config')
+      .select('allow_vendor_registration')
+      .eq('config_key', SYSTEM_CONFIG_KEY)
+      .maybeSingle();
+
+    if (error) {
+      logger.warn('[Auth] Vendor registration config lookup failed:', error?.message || error);
+      return true;
+    }
+
+    return data?.allow_vendor_registration !== false;
+  } catch (error) {
+    logger.warn('[Auth] Vendor registration config exception:', error?.message || error);
+    return true;
+  }
+}
+
 const parseBuyerProfileInput = (body = {}) => ({
   company_name: optionalText(pickFirstDefined(body.company_name, body.companyName)),
   gst_number: optionalText(pickFirstDefined(body.gst_number, body.gstNumber)),
@@ -187,7 +205,7 @@ async function assertUserActive(user) {
   const role = normalizeRole(user.role || 'USER');
 
   if (role === 'VENDOR') {
-    const { data: vendor } = await supabase
+    const { data: vendor } = await db
       .from('vendors')
       .select('is_active')
       .or(
@@ -207,7 +225,7 @@ async function assertUserActive(user) {
   }
 
   if (role === 'BUYER') {
-    const { data: buyer } = await supabase
+    const { data: buyer } = await db
       .from('buyers')
       .select('is_active')
       .or(
@@ -227,7 +245,7 @@ async function assertUserActive(user) {
   }
 
   if (['ADMIN', 'HR', 'DATA_ENTRY', 'SUPPORT', 'SALES', 'FINANCE', 'SUPERADMIN'].includes(role)) {
-    const { data: emp } = await supabase
+    const { data: emp } = await db
       .from('employees')
       .select('status')
       .or(
@@ -247,12 +265,12 @@ async function assertUserActive(user) {
   return { ok: true };
 }
 
-async function verifyViaSupabase(email, password) {
-  if (!supabaseAnon?.auth?.signInWithPassword) {
-    return { user: null, error: 'Supabase anon client not available' };
+async function verifyViaMysqlAuth(email, password) {
+  if (!db?.auth?.signInWithPassword) {
+    return { user: null, error: 'MySQL auth client not available' };
   }
 
-  const { data, error } = await supabaseAnon.auth.signInWithPassword({ email, password });
+  const { data, error } = await db.auth.signInWithPassword({ email, password });
 
   if (error || !data?.user) {
     return { user: null, error: error?.message || 'Invalid credentials' };
@@ -279,7 +297,7 @@ async function upsertBuyerProfile({
   let existing = null;
 
   if (userId) {
-    const { data } = await supabase
+    const { data } = await db
       .from('buyers')
       .select('*')
       .eq('user_id', userId)
@@ -288,7 +306,7 @@ async function upsertBuyerProfile({
   }
 
   if (!existing && normalizedEmail) {
-    const { data } = await supabase
+    const { data } = await db
       .from('buyers')
       .select('*')
       .eq('email', normalizedEmail)
@@ -344,7 +362,7 @@ async function upsertBuyerProfile({
 
     updates.updated_at = new Date().toISOString();
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('buyers')
       .update(updates)
       .eq('id', existing.id)
@@ -372,7 +390,7 @@ async function upsertBuyerProfile({
     updated_at: nowIso,
   };
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('buyers')
     .insert([payload])
     .select('*')
@@ -383,7 +401,7 @@ async function upsertBuyerProfile({
   // Safe retry for race conditions when profile gets created in parallel.
   if (String(error?.code || '') === '23505') {
     if (userId) {
-      const { data: byUserId } = await supabase
+      const { data: byUserId } = await db
         .from('buyers')
         .select('*')
         .eq('user_id', userId)
@@ -392,7 +410,7 @@ async function upsertBuyerProfile({
     }
 
     if (normalizedEmail) {
-      const { data: byEmail } = await supabase
+      const { data: byEmail } = await db
         .from('buyers')
         .select('*')
         .eq('email', normalizedEmail)
@@ -436,7 +454,7 @@ async function findBuyerProfileForUser(user) {
 
   if (!identityFilters) return null;
 
-  const { data } = await supabase
+  const { data } = await db
     .from('buyers')
     .select('*')
     .or(identityFilters)
@@ -469,7 +487,7 @@ async function resolveBuyerAccessUser(user) {
     return { user: ensuredUser, buyer: null, upgraded: false };
   }
 
-  const { data: buyerByIdentity } = await supabase
+  const { data: buyerByIdentity } = await db
     .from('buyers')
     .select('*')
     .or(identityFilters)
@@ -498,7 +516,7 @@ async function resolveVendorProfileForUser(user) {
   let vendor = null;
 
   if (user?.id) {
-    const { data } = await supabase
+    const { data } = await db
       .from('vendors')
       .select('*')
       .eq('user_id', user.id)
@@ -510,7 +528,7 @@ async function resolveVendorProfileForUser(user) {
 
   if (!vendor && user?.email) {
     const normalizedEmail = normalizeEmail(user.email);
-    const { data } = await supabase
+    const { data } = await db
       .from('vendors')
       .select('*')
       .ilike('email', normalizedEmail)
@@ -599,7 +617,7 @@ router.post('/login', async (req, res) => {
     // buyer login requires an existing buyer identity by email
     // and must not use vendor-only identities.
     if (roleHint === 'BUYER') {
-      const { data: buyerByEmail, error: buyerLookupError } = await supabase
+      const { data: buyerByEmail, error: buyerLookupError } = await db
         .from('buyers')
         .select('id')
         .ilike('email', email)
@@ -615,7 +633,7 @@ router.post('/login', async (req, res) => {
         return res.status(403).json({ success: false, error: BUYER_NOT_REGISTERED_MESSAGE });
       }
 
-      const { data: vendorByEmail } = await supabase
+      const { data: vendorByEmail } = await db
         .from('vendors')
         .select('id')
         .ilike('email', email)
@@ -645,8 +663,8 @@ router.post('/login', async (req, res) => {
           allowPasswordUpdate: true,
         });
       }
-    } else if (ENABLE_SUPABASE_AUTH_MIGRATION) {
-      const { user: authUser, error } = await verifyViaSupabase(email, password);
+    } else {
+      const { user: authUser, error } = await verifyViaMysqlAuth(email, password);
       if (!authUser) {
         return res.status(401).json({ success: false, error: error || 'Invalid credentials' });
       }
@@ -670,8 +688,6 @@ router.post('/login', async (req, res) => {
       });
 
       await syncProfileUserId(authUser.id, email);
-    } else {
-      return res.status(401).json({ success: false, error: 'Invalid credentials' });
     }
 
     user = await ensureUserRole(user);
@@ -697,7 +713,7 @@ router.post('/login', async (req, res) => {
       });
 
       if (vendor.id && (!vendor.user_id || vendor.user_id !== user.id)) {
-        const { error: linkError } = await supabase
+        const { error: linkError } = await db
           .from('vendors')
           .update({ user_id: user.id })
           .eq('id', vendor.id);
@@ -794,6 +810,13 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ success: false, error: passwordValidation.error });
     }
 
+    if (role === 'VENDOR' && !(await isVendorRegistrationAllowed())) {
+      return res.status(403).json({
+        success: false,
+        error: 'Vendor registration is currently disabled',
+      });
+    }
+
     // ✅ If already exists in public_users -> 409
     const existing = await getPublicUserByEmail(email);
     if (existing?.id) {
@@ -805,8 +828,8 @@ router.post('/register', async (req, res) => {
 
     let userId = null;
 
-    if (ENABLE_SUPABASE_AUTH_SIGNUP && supabase?.auth?.admin?.createUser) {
-      const { data, error } = await supabase.auth.admin.createUser({
+    if (ENABLE_MYSQL_AUTH_SIGNUP && db?.auth?.admin?.createUser) {
+      const { data, error } = await db.auth.admin.createUser({
         email,
         password,
         email_confirm: true,
@@ -814,7 +837,7 @@ router.post('/register', async (req, res) => {
         app_metadata: { role },
       });
 
-      // ✅ FIX: If Supabase says already exists -> respond 409 (not 400)
+      // Keep duplicate registration behavior consistent with the old auth provider.
       if (error || !data?.user) {
         const msg = String(error?.message || '').toLowerCase();
         if (msg.includes('already') || msg.includes('exists') || msg.includes('registered')) {
@@ -1030,7 +1053,7 @@ router.patch('/buyer/profile', requireAuth({ roles: ['BUYER'] }), async (req, re
 
     updates.updated_at = new Date().toISOString();
 
-    const { data: updatedBuyer, error } = await supabase
+    const { data: updatedBuyer, error } = await db
       .from('buyers')
       .update(updates)
       .eq('id', buyer.id)
@@ -1135,7 +1158,7 @@ router.post('/buyer/profile/avatar', requireAuth({ roles: ['BUYER'] }), async (r
         return res.status(500).json({ success: false, error: 'Failed to build public url' });
       }
 
-      const { error: updateError } = await supabase
+      const { error: updateError } = await db
         .from('buyers')
         .update({
           avatar_url: uploaded.publicUrl,
@@ -1155,7 +1178,7 @@ router.post('/buyer/profile/avatar', requireAuth({ roles: ['BUYER'] }), async (r
       });
     }
 
-    const { error: uploadError } = await supabase.storage
+    const { error: uploadError } = await db.storage
       .from('avatars')
       .upload(objectPath, buffer, {
         contentType: mime,
@@ -1167,13 +1190,13 @@ router.post('/buyer/profile/avatar', requireAuth({ roles: ['BUYER'] }), async (r
       return res.status(500).json({ success: false, error: uploadError.message || 'Upload failed' });
     }
 
-    const { data } = supabase.storage.from('avatars').getPublicUrl(objectPath);
+    const { data } = db.storage.from('avatars').getPublicUrl(objectPath);
     const publicUrl = data?.publicUrl || null;
     if (!publicUrl) {
       return res.status(500).json({ success: false, error: 'Failed to build public url' });
     }
 
-    const { error: updateError } = await supabase
+    const { error: updateError } = await db
       .from('buyers')
       .update({
         avatar_url: publicUrl,
@@ -1232,7 +1255,7 @@ router.patch('/password', requireAuth(), async (req, res) => {
 
     const updatedUser = await setPublicUserPassword(user.id, newPassword);
 
-    // Keep Supabase auth.users password in sync when this ID exists in auth.
+    // Keep the MySQL auth row password in sync when this ID exists in users.
     let authPasswordSynced = false;
     const authIdCandidates = Array.from(
       new Set(
@@ -1244,13 +1267,13 @@ router.patch('/password', requireAuth(), async (req, res) => {
 
     for (const authUserId of authIdCandidates) {
       try {
-        const { error } = await supabase.auth.admin.updateUserById(authUserId, { password: newPassword });
+        const { error } = await db.auth.admin.updateUserById(authUserId, { password: newPassword });
         if (!error) {
           authPasswordSynced = true;
           break;
         }
       } catch {
-        // Ignore sync failures for legacy non-Supabase identities.
+        // Ignore sync failures for legacy identities.
       }
     }
 

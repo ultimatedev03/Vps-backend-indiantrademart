@@ -1,7 +1,7 @@
 // ✅ File: server/routes/dir.js
 import { logger } from '../utils/logger.js';
 import express from 'express';
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import { cacheResponse } from '../lib/cacheMiddleware.js';
 
 const router = express.Router();
@@ -61,7 +61,7 @@ function applySort(q, sort) {
 async function resolveMicroId(microSlug) {
   if (!microSlug) return null;
 
-  const { data: micro, error } = await supabase
+  const { data: micro, error } = await db
     .from('micro_categories')
     .select('id')
     .eq('slug', microSlug)
@@ -74,7 +74,7 @@ async function resolveMicroId(microSlug) {
 }
 
 async function fetchRankedProductsViaRpc({ microId, cityId, stateId, q, sort, from, limit }) {
-  const { data, error } = await supabase.rpc('dir_ranked_products', {
+  const { data, error } = await db.rpc('dir_ranked_products', {
     p_micro_id: microId,
     p_city_id: cityId,
     p_state_id: stateId,
@@ -91,7 +91,7 @@ async function fetchRankedProductsViaRpc({ microId, cityId, stateId, q, sort, fr
 
   // If we paged past the end, probe once to recover total_count.
   if (rows.length === 0 && from > 0) {
-    const { data: probeRows, error: probeErr } = await supabase.rpc('dir_ranked_products', {
+    const { data: probeRows, error: probeErr } = await db.rpc('dir_ranked_products', {
       p_micro_id: microId,
       p_city_id: cityId,
       p_state_id: stateId,
@@ -112,7 +112,7 @@ async function fetchRankedProductsViaRpc({ microId, cityId, stateId, q, sort, fr
 async function getActivePlanMaps() {
   const nowIso = new Date().toISOString();
 
-  const { data: subs, error } = await supabase
+  const { data: subs, error } = await db
     .from('vendor_plan_subscriptions')
     .select('vendor_id, plan_id, status, end_date, start_date, plan:vendor_plans(name)')
     .eq('status', 'ACTIVE')
@@ -143,7 +143,7 @@ async function getActivePlanMaps() {
  * Assuming vendors table has boolean column: is_active
  */
 function buildBaseProductQuery({ microId, q, stateId, cityId }) {
-  let query = supabase
+  let query = db
     .from('products')
     .select(
       `
@@ -386,7 +386,7 @@ router.get('/products', cacheResponse('dir:products', 120), handleRankedProducts
 // --- PUBLIC LOCATION ROUTES ---
 router.get('/states', cacheResponse('dir:states', 3600), async (req, res) => {
   try {
-    const { data, error } = await supabase.from('states').select('id, name, slug').order('name');
+    const { data, error } = await db.from('states').select('id, name, slug').order('name');
     if (error) throw error;
     res.json({ success: true, states: data || [] });
   } catch (err) {
@@ -398,10 +398,10 @@ router.get('/cities', cacheResponse('dir:cities', 3600), async (req, res) => {
   try {
     const { stateId } = req.query;
     if (!isValidId(stateId)) return res.status(400).json({ success: false, error: 'stateId required' });
-    let query = supabase.from('cities').select('id, name, slug, suplier_count, state_id').eq('state_id', stateId).order('name');
+    let query = db.from('cities').select('id, name, slug, suplier_count, state_id').eq('state_id', stateId).order('name');
     const { data, error } = await query;
     if (error && String(error.message).includes('does not exist')) {
-      const fb = await supabase.from('cities').select('id, name, slug, supplier_count, state_id').eq('state_id', stateId).order('name');
+      const fb = await db.from('cities').select('id, name, slug, supplier_count, state_id').eq('state_id', stateId).order('name');
       return res.json({ success: true, cities: fb.data || [] });
     }
     if (error) throw error;
@@ -414,7 +414,7 @@ router.get('/cities', cacheResponse('dir:cities', 3600), async (req, res) => {
 // --- PUBLIC CATEGORY ROUTES ---
 router.get('/head-categories', cacheResponse('dir:head-categories', 1800), async (req, res) => {
   try {
-    const { data, error } = await supabase.from('head_categories').select('id, name, slug, image_url, description').eq('is_active', true).order('name');
+    const { data, error } = await db.from('head_categories').select('id, name, slug, image_url, description').eq('is_active', true).order('name');
     if (error) throw error;
     res.json({ success: true, categories: data || [] });
   } catch (err) {
@@ -426,7 +426,7 @@ router.get('/sub-categories', cacheResponse('dir:sub-categories', 1800), async (
   try {
     const { headId } = req.query;
     if (!isValidId(headId)) return res.status(400).json({ success: false, error: 'headId required' });
-    const { data, error } = await supabase.from('sub_categories').select('id, name, slug, image_url, description').eq('head_category_id', headId).eq('is_active', true).order('name');
+    const { data, error } = await db.from('sub_categories').select('id, name, slug, image_url, description').eq('head_category_id', headId).eq('is_active', true).order('name');
     if (error) throw error;
     res.json({ success: true, categories: data || [] });
   } catch (err) {
@@ -438,7 +438,7 @@ router.get('/micro-categories', cacheResponse('dir:micro-categories', 1800), asy
   try {
     const { subId } = req.query;
     if (!isValidId(subId)) return res.status(400).json({ success: false, error: 'subId required' });
-    const { data, error } = await supabase.from('micro_categories').select('id, name, slug, sort_order, image_url').eq('sub_category_id', subId).eq('is_active', true).order('sort_order').order('name');
+    const { data, error } = await db.from('micro_categories').select('id, name, slug, sort_order, image_url').eq('sub_category_id', subId).eq('is_active', true).order('sort_order').order('name');
     if (error) throw error;
     res.json({ success: true, categories: data || [] });
   } catch (err) {
@@ -455,7 +455,7 @@ router.get('/search-micro', cacheResponse('dir:search-micro', 300), async (req, 
 
     let results = [];
 
-    const { data: microData } = await supabase
+    const { data: microData } = await db
       .from('micro_categories')
       .select('id, name, slug, sub_categories(id, name, slug, head_categories(id, name, slug))')
       .ilike('name', `%${q}%`)
@@ -476,7 +476,7 @@ router.get('/search-micro', cacheResponse('dir:search-micro', 300), async (req, 
     }
 
     if (results.length < 6) {
-      const { data: prodData } = await supabase
+      const { data: prodData } = await db
         .from('products')
         .select('id, micro_category_id, status')
         .ilike('name', `%${q}%`)
@@ -486,7 +486,7 @@ router.get('/search-micro', cacheResponse('dir:search-micro', 300), async (req, 
       if (prodData) {
         const microIds = Array.from(new Set(prodData.map(p => p.micro_category_id).filter(Boolean)));
         if (microIds.length > 0) {
-          const { data: microFromProducts } = await supabase
+          const { data: microFromProducts } = await db
             .from('micro_categories')
             .select('id, name, slug, sub_categories(id, name, slug, head_categories(id, name, slug))')
             .in('id', microIds)
@@ -511,7 +511,7 @@ router.get('/search-micro', cacheResponse('dir:search-micro', 300), async (req, 
     }
 
     if (results.length < 5) {
-      const { data: subData } = await supabase
+      const { data: subData } = await db
         .from('sub_categories')
         .select('id, name, slug, head_categories(id, name, slug)')
         .ilike('name', `%${q}%`)
@@ -558,7 +558,7 @@ router.get('/products-preview', cacheResponse('dir:products-preview', 300), asyn
     const per = Math.max(1, Math.min(Number(req.query.perMicro) || 6, 12));
     const fetchLimit = Math.min(ids.length * per * 3, 600);
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('products')
       .select('id, name, slug, price, images, micro_category_id, created_at, vendors!inner(is_active)')
       .in('micro_category_id', ids)
@@ -591,7 +591,7 @@ router.get('/micro-covers', cacheResponse('dir:micro-covers', 600), async (req, 
     if (!ids.length) return res.json({ success: true, covers: {} });
 
     // 1) First prefer explicit micro category images (if configured)
-    const { data: microData, error: microErr } = await supabase
+    const { data: microData, error: microErr } = await db
       .from('micro_categories')
       .select('id, image_url')
       .in('id', ids);
@@ -607,7 +607,7 @@ router.get('/micro-covers', cacheResponse('dir:micro-covers', 600), async (req, 
     const missing = ids.filter((id) => !map[id]);
     if (missing.length === 0) return res.json({ success: true, covers: map });
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('products')
       .select('micro_category_id, images, created_at, vendors!inner(is_active)')
       .in('micro_category_id', missing)
@@ -644,27 +644,27 @@ router.get('/category/:type/:slug', cacheResponse('dir:category-detail', 1800, {
     const { type, slug } = req.params;
     
     if (type === 'head') {
-      let headRes = await supabase.from('head_categories').select('id, name, slug, description, meta_tags, keywords').eq('slug', slug).limit(1);
-      if (headRes.error) headRes = await supabase.from('head_categories').select('id, name, slug, description').eq('slug', slug).limit(1);
+      let headRes = await db.from('head_categories').select('id, name, slug, description, meta_tags, keywords').eq('slug', slug).limit(1);
+      if (headRes.error) headRes = await db.from('head_categories').select('id, name, slug, description').eq('slug', slug).limit(1);
       return res.json({ success: true, category: headRes.data?.[0] || null });
     }
     
     if (type === 'sub') {
-      let subRes = await supabase.from('sub_categories').select('id, name, slug, description, meta_tags, keywords, head_category_id').eq('slug', slug).limit(1);
-      if (subRes.error) subRes = await supabase.from('sub_categories').select('id, name, slug, description, head_category_id').eq('slug', slug).limit(1);
+      let subRes = await db.from('sub_categories').select('id, name, slug, description, meta_tags, keywords, head_category_id').eq('slug', slug).limit(1);
+      if (subRes.error) subRes = await db.from('sub_categories').select('id, name, slug, description, head_category_id').eq('slug', slug).limit(1);
       return res.json({ success: true, category: subRes.data?.[0] || null });
     }
     
     if (type === 'micro') {
-      const { data: micro, error } = await supabase.from('micro_categories').select(`
+      const { data: micro, error } = await db.from('micro_categories').select(`
           id, name, slug,
           sub_categories (id, name, slug, head_categories (id, name, slug))
         `).eq('slug', slug).order('updated_at', { ascending: false }).limit(1).maybeSingle();
         
       if (error || !micro) return res.json({ success: true, category: null });
       
-      let metaRes = await supabase.from('micro_category_meta').select('meta_tags, description, keywords').eq('micro_categories', micro.id).order('updated_at', { ascending: false }).limit(1).maybeSingle();
-      if (metaRes.error) metaRes = await supabase.from('micro_category_meta').select('meta_tags, description').eq('micro_category_id', micro.id).order('updated_at', { ascending: false }).limit(1).maybeSingle();
+      let metaRes = await db.from('micro_category_meta').select('meta_tags, description, keywords').eq('micro_categories', micro.id).order('updated_at', { ascending: false }).limit(1).maybeSingle();
+      if (metaRes.error) metaRes = await db.from('micro_category_meta').select('meta_tags, description').eq('micro_category_id', micro.id).order('updated_at', { ascending: false }).limit(1).maybeSingle();
       
       return res.json({ 
         success: true, 
@@ -688,7 +688,7 @@ router.get('/product/:slug', cacheResponse('dir:product', 300, { includeParams: 
     const slug = req.params.slug;
     if (!slug) return res.status(400).json({ success: false, error: 'Slug required' });
 
-    const { data: product, error } = await supabase
+    const { data: product, error } = await db
       .from('products')
       .select('*, vendors(*), micro_categories(id, name, slug, sub_categories(id, name, slug, head_categories(id, name, slug)))')
       .eq('slug', slug)
@@ -701,7 +701,7 @@ router.get('/product/:slug', cacheResponse('dir:product', 300, { includeParams: 
     }
 
     // Attempt to increment view count asynchronously without blocking
-    supabase.from('products').update({ views: (product.views || 0) + 1 }).eq('id', product.id).then();
+    db.from('products').update({ views: (product.views || 0) + 1 }).eq('id', product.id).then();
 
     res.json({ success: true, product });
   } catch (err) {
@@ -726,17 +726,17 @@ const fetchMicroCategoriesBySubIds = async (subIds) => {
   if (!Array.isArray(subIds) || subIds.length === 0) return [];
   const chunks = chunkArray(subIds, 60);
   const runChunk = async (ids) => {
-    let q = supabase.from('micro_categories').select('id, sub_category_id, name, slug').in('sub_category_id', ids).eq('is_active', true).order('sort_order', { ascending: true }).order('name', { ascending: true });
+    let q = db.from('micro_categories').select('id, sub_category_id, name, slug').in('sub_category_id', ids).eq('is_active', true).order('sort_order', { ascending: true }).order('name', { ascending: true });
     let res = await q;
-    if (res.error && isMissingColumnErr(res.error, 'is_active')) res = await supabase.from('micro_categories').select('id, sub_category_id, name, slug').in('sub_category_id', ids).order('sort_order', { ascending: true }).order('name', { ascending: true });
+    if (res.error && isMissingColumnErr(res.error, 'is_active')) res = await db.from('micro_categories').select('id, sub_category_id, name, slug').in('sub_category_id', ids).order('sort_order', { ascending: true }).order('name', { ascending: true });
     if (res.error && isMissingColumnErr(res.error, 'sort_order')) {
-      let q2 = supabase.from('micro_categories').select('id, sub_category_id, name, slug').in('sub_category_id', ids).order('name', { ascending: true });
+      let q2 = db.from('micro_categories').select('id, sub_category_id, name, slug').in('sub_category_id', ids).order('name', { ascending: true });
       if (!isMissingColumnErr(res.error, 'is_active')) {
         q2 = q2.eq('is_active', true);
       }
       res = await q2;
       if (res.error && isMissingColumnErr(res.error, 'is_active')) {
-        res = await supabase.from('micro_categories').select('id, sub_category_id, name, slug').in('sub_category_id', ids).order('name', { ascending: true });
+        res = await db.from('micro_categories').select('id, sub_category_id, name, slug').in('sub_category_id', ids).order('name', { ascending: true });
       }
     }
     return res.data || [];
@@ -756,11 +756,11 @@ router.get('/categories/home-showcase', cacheResponse('dir:home-showcase', 900),
     const subLimit = Number(req.query.subLimit) || 0;
     const microLimit = Number(req.query.microLimit) || 0;
 
-    let headQuery = supabase.from('head_categories').select('id, name, slug, image_url, description').eq('is_active', true).order('sort_order', { ascending: true }).order('name', { ascending: true });
+    let headQuery = db.from('head_categories').select('id, name, slug, image_url, description').eq('is_active', true).order('sort_order', { ascending: true }).order('name', { ascending: true });
     if (headLimit > 0) headQuery = headQuery.limit(headLimit);
     let headRes = await headQuery;
     if (headRes.error && isMissingColumnErr(headRes.error, 'sort_order')) {
-      let fallbackHeadQuery = supabase.from('head_categories').select('id, name, slug, image_url, description').eq('is_active', true).order('name', { ascending: true });
+      let fallbackHeadQuery = db.from('head_categories').select('id, name, slug, image_url, description').eq('is_active', true).order('name', { ascending: true });
       if (headLimit > 0) fallbackHeadQuery = fallbackHeadQuery.limit(headLimit);
       headRes = await fallbackHeadQuery;
     }
@@ -769,9 +769,9 @@ router.get('/categories/home-showcase', cacheResponse('dir:home-showcase', 900),
     if (heads.length === 0) return res.json({ success: true, categories: [] });
 
     const headIds = heads.map((h) => h.id);
-    let subRes = await supabase.from('sub_categories').select('id, head_category_id, name, slug, image_url, description').in('head_category_id', headIds).eq('is_active', true).order('sort_order', { ascending: true }).order('name', { ascending: true });
+    let subRes = await db.from('sub_categories').select('id, head_category_id, name, slug, image_url, description').in('head_category_id', headIds).eq('is_active', true).order('sort_order', { ascending: true }).order('name', { ascending: true });
     if (subRes.error && isMissingColumnErr(subRes.error, 'sort_order')) {
-      subRes = await supabase.from('sub_categories').select('id, head_category_id, name, slug, image_url, description').in('head_category_id', headIds).eq('is_active', true).order('name', { ascending: true });
+      subRes = await db.from('sub_categories').select('id, head_category_id, name, slug, image_url, description').in('head_category_id', headIds).eq('is_active', true).order('name', { ascending: true });
     }
     if (subRes.error) throw subRes.error;
     const subs = subRes.data || [];
@@ -817,9 +817,9 @@ router.get('/categories/children', cacheResponse('dir:categories-children', 1800
     let table = parentType === 'SUB' ? 'micro_categories' : 'sub_categories';
     let foreignKey = parentType === 'SUB' ? 'sub_category_id' : 'head_category_id';
 
-    let r = await supabase.from(table).select('*').eq(foreignKey, parentId).eq('is_active', true).order('sort_order', { ascending: true }).order('name', { ascending: true });
+    let r = await db.from(table).select('*').eq(foreignKey, parentId).eq('is_active', true).order('sort_order', { ascending: true }).order('name', { ascending: true });
     if (r.error && isMissingColumnErr(r.error, 'sort_order')) {
-      r = await supabase.from(table).select('*').eq(foreignKey, parentId).eq('is_active', true).order('name', { ascending: true });
+      r = await db.from(table).select('*').eq(foreignKey, parentId).eq('is_active', true).order('name', { ascending: true });
     }
     if (r.error) throw r.error;
     res.json({ success: true, children: r.data || [] });
@@ -830,9 +830,9 @@ router.get('/categories/children', cacheResponse('dir:categories-children', 1800
 
 router.get('/categories/top-level', cacheResponse('dir:categories-top', 1800), async (req, res) => {
   try {
-    let r = await supabase.from('head_categories').select('*').eq('is_active', true).order('sort_order', { ascending: true }).order('name', { ascending: true });
+    let r = await db.from('head_categories').select('*').eq('is_active', true).order('sort_order', { ascending: true }).order('name', { ascending: true });
     if (r.error && isMissingColumnErr(r.error, 'sort_order')) {
-      r = await supabase.from('head_categories').select('*').eq('is_active', true).order('name', { ascending: true });
+      r = await db.from('head_categories').select('*').eq('is_active', true).order('name', { ascending: true });
     }
     if (r.error) throw r.error;
     res.json({ success: true, categories: r.data || [] });
@@ -843,7 +843,7 @@ router.get('/categories/top-level', cacheResponse('dir:categories-top', 1800), a
 
 router.get('/categories/head-count', cacheResponse('dir:head-count', 1800), async (req, res) => {
   try {
-    const { count, error } = await supabase.from('head_categories').select('*', { count: 'exact', head: true }).eq('is_active', true);
+    const { count, error } = await db.from('head_categories').select('*', { count: 'exact', head: true }).eq('is_active', true);
     if (error) throw error;
     res.json({ success: true, count: count || 0 });
   } catch (err) {
@@ -854,13 +854,13 @@ router.get('/categories/head-count', cacheResponse('dir:head-count', 1800), asyn
 router.get('/category/universal/:slug', cacheResponse('dir:universal', 1800, { includeParams: true }), async (req, res) => {
   try {
     const { slug } = req.params;
-    const { data: h } = await supabase.from('head_categories').select('*').eq('slug', slug).eq('is_active', true).maybeSingle();
+    const { data: h } = await db.from('head_categories').select('*').eq('slug', slug).eq('is_active', true).maybeSingle();
     if (h) return res.json({ success: true, category: { ...h, type: 'HEAD' } });
     
-    const { data: s } = await supabase.from('sub_categories').select('*, parent:head_categories(id, name, slug)').eq('slug', slug).eq('is_active', true).maybeSingle();
+    const { data: s } = await db.from('sub_categories').select('*, parent:head_categories(id, name, slug)').eq('slug', slug).eq('is_active', true).maybeSingle();
     if (s) return res.json({ success: true, category: { ...s, type: 'SUB' } });
     
-    const { data: m } = await supabase.from('micro_categories').select('*, parent:sub_categories(id, name, slug, grandparent:head_categories(id, name, slug))').eq('slug', slug).eq('is_active', true).maybeSingle();
+    const { data: m } = await db.from('micro_categories').select('*, parent:sub_categories(id, name, slug, grandparent:head_categories(id, name, slug))').eq('slug', slug).eq('is_active', true).maybeSingle();
     if (m) return res.json({ success: true, category: { ...m, type: 'MICRO' } });
     
     res.json({ success: true, category: null });
@@ -875,7 +875,7 @@ router.get('/vendor/:vendorSlug', cacheResponse('dir:vendor', 300, { includePara
     const { vendorSlug } = req.params;
     if (!vendorSlug) return res.status(400).json({ success: false, error: 'Vendor slug required' });
 
-    const { data: vendor, error } = await supabase
+    const { data: vendor, error } = await db
       .from('vendors')
       .select(`
         id, vendor_id, company_name, owner_name, email, phone,
@@ -892,7 +892,7 @@ router.get('/vendor/:vendorSlug', cacheResponse('dir:vendor', 300, { includePara
     if (error) {
       // Retry without slug column if it doesn't exist
       if (String(error.message).includes('slug')) {
-        const { data: byId, error: idErr } = await supabase
+        const { data: byId, error: idErr } = await db
           .from('vendors')
           .select('id, vendor_id, company_name, owner_name, city, state, is_active, avatar_url, kyc_status, verification_badge, seller_rating')
           .eq('vendor_id', vendorSlug)
@@ -913,7 +913,7 @@ router.get('/vendor/:vendorSlug', cacheResponse('dir:vendor', 300, { includePara
 // GET /api/dir/categories — flat list of all categories (head level)
 router.get('/categories', cacheResponse('dir:categories', 1800), async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('head_categories')
       .select('id, name, slug, image_url, description')
       .eq('is_active', true)
@@ -929,9 +929,9 @@ router.get('/categories', cacheResponse('dir:categories', 1800), async (req, res
 router.get('/hierarchy', cacheResponse('dir:hierarchy', 1800), async (req, res) => {
   try {
     const [headsRes, subsRes, microsRes] = await Promise.all([
-      supabase.from('head_categories').select('id, name, slug, image_url').eq('is_active', true).order('name'),
-      supabase.from('sub_categories').select('id, name, slug, head_category_id').eq('is_active', true).order('name'),
-      supabase.from('micro_categories').select('id, name, slug, sub_category_id').eq('is_active', true).order('name'),
+      db.from('head_categories').select('id, name, slug, image_url').eq('is_active', true).order('name'),
+      db.from('sub_categories').select('id, name, slug, head_category_id').eq('is_active', true).order('name'),
+      db.from('micro_categories').select('id, name, slug, sub_category_id').eq('is_active', true).order('name'),
     ]);
 
     if (headsRes.error) throw headsRes.error;
@@ -970,7 +970,7 @@ router.get('/products/list', cacheResponse('dir:products-list', 120), async (req
     const limit = clampInt(req.query.limit, 20, 1, 100);
     const offset = clampInt(req.query.offset, 0, 0, 10000);
 
-    let query = supabase
+    let query = db
       .from('products')
       .select('*, vendors!inner(id, company_name, city, state, is_active, kyc_status, verification_badge)', { count: 'exact' })
       .eq('status', 'ACTIVE')
@@ -999,7 +999,7 @@ router.get('/product/id/:productId', cacheResponse('dir:product-id', 300, { incl
     const { productId } = req.params;
     if (!productId) return res.status(400).json({ success: false, error: 'Product ID required' });
 
-    const { data: product, error } = await supabase
+    const { data: product, error } = await db
       .from('products')
       .select('*, vendors(*), micro_categories(id, name, slug, sub_categories(id, name, slug, head_categories(id, name, slug)))')
       .eq('id', productId)
@@ -1023,7 +1023,7 @@ router.get('/vendors/search', cacheResponse('dir:vendors-search', 120), async (r
     const limit = clampInt(req.query.limit, 20, 1, 100);
     const offset = clampInt(req.query.offset, 0, 0, 10000);
 
-    let query = supabase
+    let query = db
       .from('vendors')
       .select('id, vendor_id, company_name, owner_name, city, state, state_id, city_id, avatar_url, kyc_status, verification_badge, seller_rating, trust_score', { count: 'exact' })
       .eq('is_active', true);
@@ -1048,7 +1048,7 @@ router.get('/vendors/detail/:vendorId', cacheResponse('dir:vendor-detail', 300, 
     const { vendorId } = req.params;
     if (!vendorId) return res.status(400).json({ success: false, error: 'Vendor ID required' });
 
-    const { data: vendor, error } = await supabase
+    const { data: vendor, error } = await db
       .from('vendors')
       .select(`
         id, vendor_id, company_name, owner_name, city, state, state_id, city_id,
@@ -1072,7 +1072,7 @@ router.get('/vendors/detail/:vendorId', cacheResponse('dir:vendor-detail', 300, 
 router.get('/vendors/:vendorId/ratings', cacheResponse('dir:vendor-ratings', 300, { includeParams: true }), async (req, res) => {
   try {
     const { vendorId } = req.params;
-    const { data: vendor, error } = await supabase
+    const { data: vendor, error } = await db
       .from('vendors')
       .select('id, seller_rating, trust_score')
       .eq('id', vendorId)
@@ -1083,7 +1083,7 @@ router.get('/vendors/:vendorId/ratings', cacheResponse('dir:vendor-ratings', 300
 
     // Attempt to fetch review rows if table exists
     let reviews = [];
-    const reviewsRes = await supabase
+    const reviewsRes = await db
       .from('vendor_reviews')
       .select('id, rating, comment, created_at, buyer_id')
       .eq('vendor_id', vendorId)
@@ -1115,7 +1115,7 @@ router.get('/leads/public', cacheResponse('dir:leads-public', 120), async (req, 
     const limit = clampInt(req.query.limit, 20, 1, 100);
     const offset = clampInt(req.query.offset, 0, 0, 10000);
 
-    let query = supabase
+    let query = db
       .from('proposals')
       .select('id, buyer_name, buyer_email, product_description, quantity, budget, created_at, micro_category_id', { count: 'exact' })
       .eq('status', 'OPEN');
@@ -1128,7 +1128,7 @@ router.get('/leads/public', cacheResponse('dir:leads-public', 120), async (req, 
     const { data, count, error } = await query;
     if (error) {
       // Fallback: try leads table
-      const leadsRes = await supabase
+      const leadsRes = await db
         .from('leads')
         .select('id, buyer_name, product_description, quantity, budget, created_at, micro_category_id', { count: 'exact' })
         .order('created_at', { ascending: false })
@@ -1167,7 +1167,7 @@ router.post('/contact', async (req, res) => {
       created_at: nowIso,
     };
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('contact_submissions')
       .insert([payload])
       .select()
@@ -1184,7 +1184,7 @@ router.post('/contact', async (req, res) => {
 // GET /api/dir/categories/heads → same as /head-categories
 router.get('/categories/heads', cacheResponse('dir:heads-alias', 1800), async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('head_categories')
       .select('id, name, slug, image_url, description, is_active')
       .eq('is_active', true)
@@ -1201,7 +1201,7 @@ router.get('/categories/subs', cacheResponse('dir:subs-alias', 1800), async (req
   try {
     const headId = req.query.head_id || req.query.headId || req.query.headCategoryId;
     if (!headId) return res.status(400).json({ success: false, error: 'head_id is required' });
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('sub_categories')
       .select('id, name, slug, head_category_id, is_active')
       .eq('head_category_id', headId)
@@ -1219,7 +1219,7 @@ router.get('/categories/micros', cacheResponse('dir:micros-alias', 1800), async 
   try {
     const subId = req.query.sub_id || req.query.subId || req.query.subCategoryId;
     if (!subId) return res.status(400).json({ success: false, error: 'sub_id is required' });
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('micro_categories')
       .select('id, name, slug, sub_category_id, is_active')
       .eq('sub_category_id', subId)

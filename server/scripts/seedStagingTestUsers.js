@@ -1,4 +1,4 @@
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import fs from 'fs';
 import { resolve as pathResolve } from 'path';
 
@@ -26,7 +26,7 @@ function genVendorId(ownerName, companyName, phoneDigits) {
 }
 
 async function createAuthUser({ email, password, role, meta = {} }) {
-  const { data, error } = await supabase.auth.admin.createUser({
+  const { data, error } = await db.auth.admin.createUser({
     email,
     password,
     email_confirm: true,
@@ -48,7 +48,7 @@ async function upsertPublicUser({ userId, email, role, fullName, phone }) {
     created_at: NOW(),
   };
 
-  const { error } = await supabase.from('users').upsert([payload], { onConflict: 'id' });
+  const { error } = await db.from('users').upsert([payload], { onConflict: 'id' });
   if (error) throw new Error(`users upsert failed for ${email}: ${error.message}`);
 }
 
@@ -69,7 +69,7 @@ async function upsertVendor({ userId, email, companyName, ownerName, phone }) {
     created_at: NOW(),
     updated_at: NOW(),
   };
-  const { data, error } = await supabase.from('vendors').insert([payload]).select('id').maybeSingle();
+  const { data, error } = await db.from('vendors').insert([payload]).select('id').maybeSingle();
   if (error) throw new Error(`vendors insert failed for ${email}: ${error.message}`);
   return data;
 }
@@ -84,7 +84,7 @@ async function upsertBuyer({ userId, email, fullName, phone }) {
     created_at: NOW(),
     updated_at: NOW(),
   };
-  const { data, error } = await supabase.from('buyers').insert([payload]).select('id').maybeSingle();
+  const { data, error } = await db.from('buyers').insert([payload]).select('id').maybeSingle();
   if (error) throw new Error(`buyers insert failed for ${email}: ${error.message}`);
   return data;
 }

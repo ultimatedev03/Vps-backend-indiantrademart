@@ -1,6 +1,6 @@
 import { logger } from '../utils/logger.js';
 import express from 'express';
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import {
   getPublicUserByEmail,
   normalizeEmail,
@@ -37,7 +37,7 @@ router.post('/', async (req, res) => {
     let userRole = null;
 
     // Check in buyers table
-    const { data: buyer } = await supabase
+    const { data: buyer } = await db
       .from('buyers')
       .select('user_id, email')
       .eq('email', emailLower)
@@ -50,7 +50,7 @@ router.post('/', async (req, res) => {
 
     // If not found in buyers, check vendors table
     if (!userId) {
-      const { data: vendor } = await supabase
+      const { data: vendor } = await db
         .from('vendors')
         .select('user_id, email')
         .eq('email', emailLower)
@@ -90,7 +90,7 @@ router.post('/', async (req, res) => {
       }
     }
 
-    // Step 3: Best-effort sync with Supabase auth.users
+    // Step 3: Best-effort sync with MySQL users
     let authPasswordSynced = false;
     const authIdCandidates = Array.from(
       new Set(
@@ -100,7 +100,7 @@ router.post('/', async (req, res) => {
     );
     for (const authCandidateId of authIdCandidates) {
       try {
-        const { error: authSyncError } = await supabase.auth.admin.updateUserById(authCandidateId, {
+        const { error: authSyncError } = await db.auth.admin.updateUserById(authCandidateId, {
           password: new_password,
         });
         if (!authSyncError) {
@@ -108,7 +108,7 @@ router.post('/', async (req, res) => {
           break;
         }
       } catch {
-        // Ignore sync failures for non-Supabase identities.
+        // Ignore sync failures for legacy identities.
       }
     }
 
@@ -146,7 +146,7 @@ router.post('/verify-email', async (req, res) => {
 
     // Verify the role matches by checking the specific table
     if (role === 'BUYER') {
-      const { data: buyer, error: buyerError } = await supabase
+      const { data: buyer, error: buyerError } = await db
         .from('buyers')
         .select('id, email, user_id')
         .eq('email', emailLower)
@@ -171,7 +171,7 @@ router.post('/verify-email', async (req, res) => {
 
     } else if (role === 'VENDOR') {
       logger.log('[verify-email] Checking vendor for email:', emailLower);
-      const { data: vendor, error: vendorError } = await supabase
+      const { data: vendor, error: vendorError } = await db
         .from('vendors')
         .select('id, email, user_id')
         .eq('email', emailLower)

@@ -1,6 +1,6 @@
 import { logger } from '../utils/logger.js';
 import express from 'express';
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import { assertCaptchaForExpressRequest } from '../lib/captcha.js';
 import { getAuthCookieNames, getCookie, normalizeEmail as normalizeAuthEmail, verifyAuthToken } from '../lib/auth.js';
 import { cacheDelete, cacheGetJson, cacheSetJson, isRedisConfigured } from '../lib/redisCache.js';
@@ -154,26 +154,26 @@ const upsertOtpForEmail = async (email) => {
         },
         OTP_TTL_SECONDS
       );
-      await supabase
+      await db
         .from('auth_otps')
         .delete()
         .eq('email', email)
         .eq('used', false);
       return { otp, expiresAt, store: 'redis' };
     } catch (error) {
-      logger.warn('[OTP] Redis write failed. Falling back to Supabase OTP store.', {
+      logger.warn('[OTP] Redis write failed. Falling back to MySQL OTP store.', {
         reason: error?.message || 'Unknown Redis error',
       });
     }
   }
 
-  await supabase
+  await db
     .from('auth_otps')
     .delete()
     .eq('email', email)
     .eq('used', false);
 
-  const { error: dbError } = await supabase
+  const { error: dbError } = await db
     .from('auth_otps')
     .insert([
       {
@@ -189,7 +189,7 @@ const upsertOtpForEmail = async (email) => {
     throw new Error('Failed to generate OTP');
   }
 
-  return { otp, expiresAt, store: 'supabase' };
+  return { otp, expiresAt, store: 'db' };
 };
 
 const verifyOtpFromRedis = async (email, otpCode) => {
@@ -211,7 +211,7 @@ const verifyOtpFromRedis = async (email, otpCode) => {
     await cacheDelete(getOtpCacheKey(email));
     return { matched: true };
   } catch (error) {
-    logger.warn('[OTP] Redis verify failed. Falling back to Supabase OTP store.', {
+    logger.warn('[OTP] Redis verify failed. Falling back to MySQL OTP store.', {
       reason: error?.message || 'Unknown Redis error',
     });
     return null;
@@ -269,7 +269,7 @@ router.post('/verify', async (req, res) => {
       return res.status(401).json({ error: 'Invalid or expired OTP code' });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('auth_otps')
       .select('*')
       .eq('email', email)
@@ -288,7 +288,7 @@ router.post('/verify', async (req, res) => {
       return res.status(401).json({ error: 'Invalid or expired OTP code' });
     }
 
-    await supabase
+    await db
       .from('auth_otps')
       .update({ used: true })
       .eq('id', data.id);

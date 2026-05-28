@@ -18,6 +18,7 @@ import mongoSanitize from 'express-mongo-sanitize';
 
 import runtimeConfig from './lib/runtimeConfig.js';
 import { backendModules } from './modules/index.js';
+import { storageRoot } from './lib/localStorage.js';
 
 // Middleware imports
 import { subdomainMiddleware, subdomainRedirectMiddleware, getSubdomainAwareCORS } from './middleware/subdomainMiddleware.js';
@@ -64,6 +65,7 @@ app.use(subdomainRedirectMiddleware);
 //    generous limit. This is configurable via JSON_BODY_LIMIT env var.
 app.use(express.json({ limit: runtimeConfig.jsonBodyLimit }));
 app.use(express.urlencoded({ extended: true, limit: runtimeConfig.jsonBodyLimit }));
+app.use('/uploads', express.static(storageRoot));
 
 // 6. Input sanitization — prevent NoSQL injection and basic XSS
 app.use(mongoSanitize());
@@ -108,6 +110,13 @@ const apiLimiter = rateLimit({
   },
   skip: (req) => {
     if (runtimeConfig.disableApiRateLimit) return true;
+    if (
+      !runtimeConfig.isProd &&
+      req.path === '/db/query' &&
+      String(req.body?.operation || 'select').toLowerCase() === 'select'
+    ) {
+      return true;
+    }
     if (
       req.method === 'GET' &&
       (

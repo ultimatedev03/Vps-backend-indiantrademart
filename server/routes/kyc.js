@@ -1,6 +1,6 @@
 import { logger } from '../utils/logger.js';
 import express from 'express';
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import { notifyUser, notifyRole } from '../lib/notify.js';
 import { isEmailTransportConfigured, sendEmail } from '../lib/emailService.js';
 import { requireEmployeeRoles } from '../middleware/requireEmployeeRoles.js';
@@ -85,7 +85,7 @@ const resolveBuyerReminderTargets = async (vendorId) => {
     });
   };
 
-  const { data: proposalRows } = await supabase
+  const { data: proposalRows } = await db
     .from('proposals')
     .select('buyer_id, buyer_email, buyer_name')
     .eq('vendor_id', vendorId)
@@ -109,7 +109,7 @@ const resolveBuyerReminderTargets = async (vendorId) => {
   );
 
   if (buyerIds.length > 0) {
-    const { data: buyersById } = await supabase
+    const { data: buyersById } = await db
       .from('buyers')
       .select('id, user_id, email, full_name, company_name')
       .in('id', buyerIds);
@@ -124,7 +124,7 @@ const resolveBuyerReminderTargets = async (vendorId) => {
   }
 
   if (proposalEmails.length > 0) {
-    const { data: buyersByEmail } = await supabase
+    const { data: buyersByEmail } = await db
       .from('buyers')
       .select('id, user_id, email, full_name, company_name')
       .in('email', proposalEmails);
@@ -153,7 +153,7 @@ function normalizeDocType(type = '') {
   return String(type || '').trim().toLowerCase().replace(/\s+/g, '_') || 'document';
 }
 
-function extractSupabasePath(url) {
+function extractStoragePath(url) {
   if (!isHttpUrl(url)) return null;
 
   const m =
@@ -173,16 +173,16 @@ async function toWorkingUrl(value, defaultBucket = 'avatars', expiresSec = 60 * 
     if (!value) return '';
 
     if (isHttpUrl(value)) {
-      const info = extractSupabasePath(value);
+      const info = extractStoragePath(value);
       if (info?.bucket && info?.path) {
-        const { data, error } = await supabase.storage.from(info.bucket).createSignedUrl(info.path, expiresSec);
+        const { data, error } = await db.storage.from(info.bucket).createSignedUrl(info.path, expiresSec);
         if (!error && data?.signedUrl) return data.signedUrl;
       }
       return value;
     }
 
     const path = String(value).replace(/^\/+/, '');
-    const { data, error } = await supabase.storage.from(defaultBucket).createSignedUrl(path, expiresSec);
+    const { data, error } = await db.storage.from(defaultBucket).createSignedUrl(path, expiresSec);
     if (!error && data?.signedUrl) return data.signedUrl;
 
     return '';
@@ -196,7 +196,7 @@ router.get('/vendors', async (req, res) => {
   try {
     const { status = 'ALL' } = req.query;
 
-    let query = supabase.from('vendors').select('*').order('created_at', { ascending: false });
+    let query = db.from('vendors').select('*').order('created_at', { ascending: false });
     if (status && status !== 'ALL') query = query.eq('kyc_status', status);
 
     const { data, error } = await query;
@@ -245,7 +245,7 @@ router.post(
       };
 
       try {
-        const { data: vDocs, error: vDocsError } = await supabase
+        const { data: vDocs, error: vDocsError } = await db
           .from('vendor_documents')
           .select('*')
           .in('vendor_id', vendorIds);
@@ -272,7 +272,7 @@ router.post(
       }
 
       try {
-        const { data: legacyDocs, error: legacyError } = await supabase
+        const { data: legacyDocs, error: legacyError } = await db
           .from('kyc_documents')
           .select('*')
           .in('vendor_id', vendorIds);
@@ -316,7 +316,7 @@ router.get('/vendors/:vendorId/documents', async (req, res) => {
     const { vendorId } = req.params;
 
     // ✅ NO kyc_docs column here
-    const { data: vendor, error: vErr } = await supabase
+    const { data: vendor, error: vErr } = await db
       .from('vendors')
       .select('id, company_name, owner_name, email, phone, kyc_status, gst_number, pan_number, created_at, updated_at')
       .eq('id', vendorId)
@@ -328,7 +328,7 @@ router.get('/vendors/:vendorId/documents', async (req, res) => {
 
     // 1) vendor_documents table (your upload is saving here)
     try {
-      const { data: vDocs, error } = await supabase
+      const { data: vDocs, error } = await db
         .from('vendor_documents')
         .select('*')
         .eq('vendor_id', vendorId)
@@ -357,7 +357,7 @@ router.get('/vendors/:vendorId/documents', async (req, res) => {
 
     // 2) Optional: kyc_documents table (if exists in your DB)
     try {
-      const { data: tableDocs, error } = await supabase
+      const { data: tableDocs, error } = await db
         .from('kyc_documents')
         .select('*')
         .eq('vendor_id', vendorId)
@@ -388,14 +388,14 @@ router.get('/vendors/:vendorId/documents', async (req, res) => {
     const folders = [`vendor-docs/${vendorId}`, `vendor-kyc/${vendorId}`];
     for (const folder of folders) {
       try {
-        const { data: files, error } = await supabase.storage.from('avatars').list(folder, { limit: 100 });
+        const { data: files, error } = await db.storage.from('avatars').list(folder, { limit: 100 });
         if (error || !files?.length) continue;
 
         for (const f of files) {
           if (!f?.name) continue;
           const fullPath = `${folder}/${f.name}`;
 
-          const { data: signed, error: signErr } = await supabase.storage.from('avatars').createSignedUrl(fullPath, 60 * 60);
+          const { data: signed, error: signErr } = await db.storage.from('avatars').createSignedUrl(fullPath, 60 * 60);
           if (signErr || !signed?.signedUrl) continue;
 
           docs.push({
@@ -437,7 +437,7 @@ router.post('/vendors/:vendorId/approve', async (req, res) => {
   try {
     const { vendorId } = req.params;
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendors')
       .update({
         kyc_status: 'APPROVED',
@@ -494,7 +494,7 @@ router.post('/vendors/:vendorId/reject', async (req, res) => {
     const { vendorId } = req.params;
     const { remarks } = req.body || {};
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendors')
       .update({
         kyc_status: 'REJECTED',
@@ -570,7 +570,7 @@ router.post(
       const sendBell = delivery === 'both' || delivery === 'bell';
       const sendEmail = delivery === 'both' || delivery === 'email';
 
-      const { data: vendor, error: vendorError } = await supabase
+      const { data: vendor, error: vendorError } = await db
         .from('vendors')
         .select('id, user_id, email, company_name, vendor_id, rejection_reason')
         .eq('id', vendorId)
@@ -673,7 +673,7 @@ router.post(
 router.get('/vendors/:vendorId/remarks', async (req, res) => {
   try {
     const { vendorId } = req.params;
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('kyc_remarks')
       .select('*, created_by_user:users(full_name)')
       .eq('vendor_id', vendorId)

@@ -1,7 +1,7 @@
 import { logger } from '../utils/logger.js';
 import express from 'express';
 import crypto from 'crypto';
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import { razorpayInstance } from '../lib/razorpayClient.js';
 import { generateInvoiceNumber, generateInvoicePDF, generateInvoiceSummary } from '../lib/invoiceGenerator.js';
 import { sendSubscriptionActivatedNotification } from '../lib/notificationService.js';
@@ -154,7 +154,7 @@ const isMissingRelationError = (error, relationName) => {
 
 async function consumeLeadForVendor({ vendorId, leadId, mode = 'AUTO', purchasePrice = 0 }) {
   return consumeLeadForVendorWithCompat({
-    supabase,
+    db,
     vendorId,
     leadId,
     mode,
@@ -164,7 +164,7 @@ async function consumeLeadForVendor({ vendorId, leadId, mode = 'AUTO', purchaseP
 
 async function getActiveVendorSubscription(vendorId) {
   const nowIso = new Date().toISOString();
-  const { data: rows, error } = await supabase
+  const { data: rows, error } = await db
     .from('vendor_plan_subscriptions')
     .select('id, vendor_id, plan_id, status, start_date, end_date')
     .eq('vendor_id', vendorId)
@@ -184,7 +184,7 @@ async function getActiveVendorSubscription(vendorId) {
 async function fetchVendorPlanForPricing(planId) {
   if (!planId) return null;
 
-  const full = await supabase
+  const full = await db
     .from('vendor_plans')
     .select('id, name, price, features')
     .eq('id', planId)
@@ -196,7 +196,7 @@ async function fetchVendorPlanForPricing(planId) {
     return null;
   }
 
-  const fallback = await supabase
+  const fallback = await db
     .from('vendor_plans')
     .select('id, name, price')
     .eq('id', planId)
@@ -214,7 +214,7 @@ async function resolveVendorForAuthUser(user = {}) {
   const email = normalizeEmail(user?.email);
 
   if (userId) {
-    const { data: byUserId, error: byUserErr } = await supabase
+    const { data: byUserId, error: byUserErr } = await db
       .from('vendors')
       .select('*')
       .eq('user_id', userId)
@@ -223,7 +223,7 @@ async function resolveVendorForAuthUser(user = {}) {
   }
 
   if (email) {
-    const { data: byEmail, error: byEmailErr } = await supabase
+    const { data: byEmail, error: byEmailErr } = await db
       .from('vendors')
       .select('*')
       .ilike('email', email)
@@ -263,7 +263,7 @@ async function resolveOfferForPayment({
   let couponFailureMessage = 'Coupon not found or inactive';
 
   if (hasProvidedCode) {
-    const { data: cpn, error: couponErr } = await supabase
+    const { data: cpn, error: couponErr } = await db
       .from('vendor_plan_coupons')
       .select('*')
       .ilike('code', normalizedCode)
@@ -310,7 +310,7 @@ async function resolveOfferForPayment({
       vendor,
       plan,
       at: new Date(),
-    }, supabase);
+    }, db);
 
     const requestedReferralCode = normalizeReferralCode(normalizedCode);
     const offerCode = normalizeReferralCode(referralOffer?.offer_code || '');
@@ -365,7 +365,7 @@ router.post('/initiate', async (req, res) => {
     }
 
     // Fetch vendor details
-    const { data: vendor, error: vendorError } = await supabase
+    const { data: vendor, error: vendorError } = await db
       .from('vendors')
       .select('*')
       .eq('id', vendor_id)
@@ -377,7 +377,7 @@ router.post('/initiate', async (req, res) => {
     }
 
     // Fetch plan details
-    const { data: plan, error: planError } = await supabase
+    const { data: plan, error: planError } = await db
       .from('vendor_plans')
       .select('*')
       .eq('id', plan_id)
@@ -479,13 +479,13 @@ router.post('/verify', async (req, res) => {
     }
 
     // Fetch vendor and plan
-    const { data: vendor } = await supabase
+    const { data: vendor } = await db
       .from('vendors')
       .select('*')
       .eq('id', vendor_id)
       .single();
 
-    const { data: plan } = await supabase
+    const { data: plan } = await db
       .from('vendor_plans')
       .select('*')
       .eq('id', plan_id)
@@ -517,13 +517,13 @@ router.post('/verify', async (req, res) => {
     const endDate = new Date(startDate);
     endDate.setDate(endDate.getDate() + (plan.duration_days || 365));
 
-    await supabase
+    await db
       .from('vendor_plan_subscriptions')
       .update({ status: 'INACTIVE' })
       .eq('vendor_id', vendor_id)
       .eq('status', 'ACTIVE');
 
-    const { data: subscription, error: subscriptionError } = await supabase
+    const { data: subscription, error: subscriptionError } = await db
       .from('vendor_plan_subscriptions')
       .insert([
         {
@@ -556,19 +556,19 @@ router.post('/verify', async (req, res) => {
       updated_at: startDate.toISOString(),
     };
 
-    const { data: existingQuota } = await supabase
+    const { data: existingQuota } = await db
       .from('vendor_lead_quota')
       .select('id')
       .eq('vendor_id', vendor_id)
       .maybeSingle();
 
     if (existingQuota?.id) {
-      await supabase
+      await db
         .from('vendor_lead_quota')
         .update(quotaPayload)
         .eq('vendor_id', vendor_id);
     } else {
-      await supabase
+      await db
         .from('vendor_lead_quota')
         .insert([quotaPayload]);
     }
@@ -591,7 +591,7 @@ router.post('/verify', async (req, res) => {
 
     const invoicePdf = generateInvoicePDF(invoicePdfData);
 
-    const { data: payment, error: paymentError } = await supabase
+    const { data: payment, error: paymentError } = await db
       .from('vendor_payments')
       .insert([
         {
@@ -619,11 +619,11 @@ router.post('/verify', async (req, res) => {
     if (paymentError) {
       logger.error('Payment record error:', paymentError);
     } else if (coupon) {
-      await supabase
+      await db
         .from('vendor_plan_coupons')
         .update({ used_count: (coupon.used_count || 0) + 1 })
         .eq('id', coupon.id);
-      await supabase.from('vendor_coupon_usages').insert([
+      await db.from('vendor_coupon_usages').insert([
         {
           coupon_id: coupon.id,
           payment_id: payment?.id || null,
@@ -644,7 +644,7 @@ router.post('/verify', async (req, res) => {
             paymentRow: payment,
             netAmount,
           },
-          supabase
+          db
         );
       } catch (referralRewardError) {
         logger.warn(
@@ -759,7 +759,7 @@ router.post('/lead/initiate', requireAuth({ roles: ['VENDOR'] }), async (req, re
     }
     const activePlan = await fetchVendorPlanForPricing(activeSubscription?.plan_id);
 
-    const { data: lead, error: leadError } = await supabase
+    const { data: lead, error: leadError } = await db
       .from('leads')
       .select('*')
       .eq('id', leadId)
@@ -781,7 +781,7 @@ router.post('/lead/initiate', requireAuth({ roles: ['VENDOR'] }), async (req, re
       return res.status(409).json({ error: 'This lead is not purchasable' });
     }
 
-    const { data: existingPurchaseRows, error: existingPurchaseError } = await supabase
+    const { data: existingPurchaseRows, error: existingPurchaseError } = await db
       .from('lead_purchases')
       .select('id')
       .eq('vendor_id', vendor.id)
@@ -797,7 +797,7 @@ router.post('/lead/initiate', requireAuth({ roles: ['VENDOR'] }), async (req, re
       return res.status(409).json({ error: 'You already purchased this lead' });
     }
 
-    const { count: purchaseCount, error: purchaseCountError } = await supabase
+    const { count: purchaseCount, error: purchaseCountError } = await db
       .from('lead_purchases')
       .select('id', { count: 'exact', head: true })
       .eq('lead_id', leadId);
@@ -882,7 +882,7 @@ router.post('/lead/verify', requireAuth({ roles: ['VENDOR'] }), async (req, res)
       return res.status(400).json({ error: 'Invalid payment signature' });
     }
 
-    const { data: lead, error: leadError } = await supabase
+    const { data: lead, error: leadError } = await db
       .from('leads')
       .select('*')
       .eq('id', leadId)
@@ -961,7 +961,7 @@ router.post('/lead/verify', requireAuth({ roles: ['VENDOR'] }), async (req, res)
 
     try {
       if (!wasExistingPurchase && purchaseRow?.id) {
-        const { error: historyError } = await supabase.from('lead_status_history').insert([
+        const { error: historyError } = await db.from('lead_status_history').insert([
           {
             lead_id: leadId,
             vendor_id: vendor.id,
@@ -1023,7 +1023,7 @@ router.get('/history/:vendor_id', async (req, res) => {
       return res.status(400).json({ error: 'Missing vendor_id' });
     }
 
-    const { data: payments, error } = await supabase
+    const { data: payments, error } = await db
       .from('vendor_payments')
       .select('*')
       .eq('vendor_id', vendor_id)
@@ -1062,7 +1062,7 @@ router.get('/invoice/:payment_id', async (req, res) => {
       return res.status(400).json({ error: 'Missing payment_id' });
     }
 
-    const { data: payment, error } = await supabase
+    const { data: payment, error } = await db
       .from('vendor_payments')
       .select('*')
       .eq('id', payment_id)
@@ -1075,8 +1075,8 @@ router.get('/invoice/:payment_id', async (req, res) => {
     // If refresh requested or invoice missing, regenerate with latest template
     if (refresh || !payment.invoice_url) {
       const [{ data: vendor }, { data: plan }] = await Promise.all([
-        supabase.from('vendors').select('*').eq('id', payment.vendor_id).single(),
-        supabase.from('vendor_plans').select('*').eq('id', payment.plan_id).single(),
+        db.from('vendors').select('*').eq('id', payment.vendor_id).single(),
+        db.from('vendor_plans').select('*').eq('id', payment.plan_id).single(),
       ]);
 
       const invoicePdfData = {
@@ -1096,7 +1096,7 @@ router.get('/invoice/:payment_id', async (req, res) => {
 
       const newPdf = generateInvoicePDF(invoicePdfData);
 
-      await supabase
+      await db
         .from('vendor_payments')
         .update({
           invoice_url: newPdf,
@@ -1139,7 +1139,7 @@ router.get('/invoice/by-tx/:transaction_id', async (req, res) => {
       return res.status(400).json({ error: 'Missing transaction_id' });
     }
 
-    const { data: payment, error } = await supabase
+    const { data: payment, error } = await db
       .from('vendor_payments')
       .select('*')
       .eq('transaction_id', transaction_id)
@@ -1151,8 +1151,8 @@ router.get('/invoice/by-tx/:transaction_id', async (req, res) => {
 
     if (refresh || !payment.invoice_url) {
       const [{ data: vendor }, { data: plan }] = await Promise.all([
-        supabase.from('vendors').select('*').eq('id', payment.vendor_id).single(),
-        supabase.from('vendor_plans').select('*').eq('id', payment.plan_id).single(),
+        db.from('vendors').select('*').eq('id', payment.vendor_id).single(),
+        db.from('vendor_plans').select('*').eq('id', payment.plan_id).single(),
       ]);
 
       const invoicePdfData = {
@@ -1172,7 +1172,7 @@ router.get('/invoice/by-tx/:transaction_id', async (req, res) => {
 
       const newPdf = generateInvoicePDF(invoicePdfData);
 
-      await supabase
+      await db
         .from('vendor_payments')
         .update({
           invoice_url: newPdf,
@@ -1199,7 +1199,7 @@ router.get('/invoice/by-tx/:transaction_id', async (req, res) => {
  */
 router.get('/plans', async (req, res) => {
   try {
-    const { data: plans, error } = await supabase
+    const { data: plans, error } = await db
       .from('vendor_plans')
       .select('*')
       .eq('is_active', true)
@@ -1228,13 +1228,13 @@ router.get('/referral-offers/:vendor_id', async (req, res) => {
     }
 
     const [{ data: vendor, error: vendorError }, { data: plans, error: plansError }, settings] = await Promise.all([
-      supabase.from('vendors').select('*').eq('id', vendor_id).maybeSingle(),
-      supabase
+      db.from('vendors').select('*').eq('id', vendor_id).maybeSingle(),
+      db
         .from('vendor_plans')
         .select('id, name, price, is_active')
         .eq('is_active', true)
         .order('price', { ascending: true }),
-      getReferralSettings(supabase),
+      getReferralSettings(db),
     ]);
 
     if (vendorError || !vendor) {
@@ -1262,7 +1262,7 @@ router.get('/referral-offers/:vendor_id', async (req, res) => {
         try {
           const referralOffer = await getReferralOfferForVendor(
             { vendor, plan, at: now },
-            supabase
+            db
           );
           const configuredTypeRaw = String(referralOffer?.rule?.discount_type || '').toUpperCase();
           configuredDiscountType = configuredTypeRaw || null;

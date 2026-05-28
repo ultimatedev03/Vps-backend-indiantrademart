@@ -1,7 +1,7 @@
 import { logger } from '../utils/logger.js';
 import express from 'express';
 import { randomUUID } from 'crypto';
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import { inferCloudinaryResourceType, isCloudinaryConfigured, uploadBufferToCloudinary } from '../lib/cloudinaryUpload.js';
 import { normalizeEmail } from '../lib/auth.js';
 import { optionalAuth, requireAuth } from '../middleware/requireAuth.js';
@@ -15,11 +15,11 @@ const FALLBACK_IMAGE =
 const FALLBACK_SERVICE_IMAGE =
   'https://images.unsplash.com/photo-1521737604893-d14cc237f11d?auto=format&fit=crop&w=800&q=80';
 const ALLOWED_UPLOAD_BUCKETS = new Set(['avatars', 'product-images', 'product-media']);
-const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const GENERIC_IMAGE_MIN_BYTES = 10 * 1024;
-const PRODUCT_IMAGE_MIN_BYTES = 50 * 1024;
-const PRODUCT_IMAGE_MAX_BYTES = 3 * 1024 * 1024;
-const KYC_DOC_MIN_BYTES = 100 * 1024;
+const PRODUCT_IMAGE_MIN_BYTES = 10 * 1024;
+const PRODUCT_IMAGE_MAX_BYTES = 1024 * 1024;
+const KYC_DOC_MIN_BYTES = 10 * 1024;
 const KYC_DOC_MAX_BYTES = 5 * 1024 * 1024;
 const KYC_ALLOWED_DOC_TYPES = new Set(['GST', 'PAN', 'AADHAR', 'BANK']);
 const KYC_ALLOWED_MIME = new Set(['image/jpeg', 'image/jpg', 'image/png']);
@@ -196,7 +196,7 @@ const buildVendorResponse = (vendor = null) => {
 };
 
 const countRows = async (table, applyFilters) => {
-  let query = supabase.from(table).select('id', { count: 'planned', head: true });
+  let query = db.from(table).select('id', { count: 'planned', head: true });
   query = applyFilters(query);
   const { count, error } = await query;
   if (error) {
@@ -480,7 +480,7 @@ async function resolveVendorForUser(user) {
 
   let vendor = null;
   if (userId) {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendors')
       .select('*')
       .eq('user_id', userId)
@@ -490,7 +490,7 @@ async function resolveVendorForUser(user) {
   }
 
   if (!vendor && email) {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendors')
       .select('*')
       .ilike('email', email)
@@ -502,7 +502,7 @@ async function resolveVendorForUser(user) {
   }
 
   if (vendor && userId && vendor.user_id !== userId) {
-    await supabase
+    await db
       .from('vendors')
       .update({ user_id: userId })
       .eq('id', vendor.id);
@@ -518,7 +518,7 @@ async function resolveVendorIdsForUser(user = {}) {
   const vendorIds = new Set();
 
   if (userId) {
-    const { data: byUserRows, error: byUserError } = await supabase
+    const { data: byUserRows, error: byUserError } = await db
       .from('vendors')
       .select('id')
       .eq('user_id', userId)
@@ -532,7 +532,7 @@ async function resolveVendorIdsForUser(user = {}) {
   }
 
   if (email) {
-    const { data: byEmailRows, error: byEmailError } = await supabase
+    const { data: byEmailRows, error: byEmailError } = await db
       .from('vendors')
       .select('id')
       .ilike('email', email)
@@ -553,7 +553,7 @@ async function resolveActiveSubscriptionForVendor(vendorId) {
   if (!normalizedVendorId) return null;
 
   const nowIso = new Date().toISOString();
-  const { data: rows, error } = await supabase
+  const { data: rows, error } = await db
     .from('vendor_plan_subscriptions')
     .select('id, vendor_id, plan_id, status, start_date, end_date')
     .eq('vendor_id', normalizedVendorId)
@@ -575,7 +575,7 @@ async function resolveActiveSubscriptionForVendor(vendorId) {
 
 async function resolveBuyerId(userId) {
   if (!userId) return null;
-  const { data: buyer } = await supabase
+  const { data: buyer } = await db
     .from('buyers')
     .select('id')
     .eq('user_id', userId)
@@ -588,7 +588,7 @@ async function resolveBuyerProfileForUser(user = {}) {
   const email = normalizeEmail(user?.email || '');
 
   if (userId) {
-    const { data: byUserId } = await supabase
+    const { data: byUserId } = await db
       .from('buyers')
       .select('id, full_name, company_name, email, phone, whatsapp')
       .eq('user_id', userId)
@@ -597,7 +597,7 @@ async function resolveBuyerProfileForUser(user = {}) {
   }
 
   if (email) {
-    const { data: byEmail, error: byEmailError } = await supabase
+    const { data: byEmail, error: byEmailError } = await db
       .from('buyers')
       .select('id, full_name, company_name, email, phone, whatsapp')
       .ilike('email', email)
@@ -618,7 +618,7 @@ async function resolveLocationNames({ stateId = '', cityId = '' } = {}) {
   let cityName = null;
 
   if (normalizedStateId) {
-    const { data: stateRow } = await supabase
+    const { data: stateRow } = await db
       .from('states')
       .select('name')
       .eq('id', normalizedStateId)
@@ -627,7 +627,7 @@ async function resolveLocationNames({ stateId = '', cityId = '' } = {}) {
   }
 
   if (normalizedCityId) {
-    const { data: cityRow } = await supabase
+    const { data: cityRow } = await db
       .from('cities')
       .select('name')
       .eq('id', normalizedCityId)
@@ -642,7 +642,7 @@ async function fetchVendorByPublicSlug(slug) {
   const normalizedSlug = String(slug || '').trim().toLowerCase();
   if (!normalizedSlug) return { vendor: null, error: null };
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('vendors')
     .select('*')
     .eq('slug', normalizedSlug)
@@ -659,7 +659,7 @@ async function fetchVendorById(vendorId) {
   const normalizedId = String(vendorId || '').trim();
   if (!normalizedId) return { vendor: null, error: null };
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('vendors')
     .select('*')
     .eq('id', normalizedId)
@@ -770,7 +770,7 @@ async function loadMarketplaceFilterContext(vendorId) {
     stateSet: new Set(),
   };
 
-  const { data: prefs } = await supabase
+  const { data: prefs } = await db
     .from('vendor_preferences')
     .select('preferred_micro_categories, preferred_states, preferred_cities, auto_lead_filter, min_budget, max_budget')
     .eq('vendor_id', vendorId)
@@ -789,9 +789,9 @@ async function loadMarketplaceFilterContext(vendorId) {
 
   if (prefCategoryIds.length) {
     const [microRes, subRes, headRes] = await Promise.all([
-      supabase.from('micro_categories').select('id, name').in('id', prefCategoryIds),
-      supabase.from('sub_categories').select('id, name').in('id', prefCategoryIds),
-      supabase.from('head_categories').select('id, name').in('id', prefCategoryIds),
+      db.from('micro_categories').select('id, name').in('id', prefCategoryIds),
+      db.from('sub_categories').select('id, name').in('id', prefCategoryIds),
+      db.from('head_categories').select('id, name').in('id', prefCategoryIds),
     ]);
 
     [...(microRes?.data || []), ...(subRes?.data || []), ...(headRes?.data || [])].forEach((row) => {
@@ -801,7 +801,7 @@ async function loadMarketplaceFilterContext(vendorId) {
   }
 
   if (prefStateIds.length) {
-    const { data: states } = await supabase
+    const { data: states } = await db
       .from('states')
       .select('id, name')
       .in('id', prefStateIds);
@@ -812,7 +812,7 @@ async function loadMarketplaceFilterContext(vendorId) {
   }
 
   if (prefCityIds.length) {
-    const { data: cities } = await supabase
+    const { data: cities } = await db
       .from('cities')
       .select('id, name')
       .in('id', prefCityIds);
@@ -822,7 +822,7 @@ async function loadMarketplaceFilterContext(vendorId) {
     });
   }
 
-  const { data: products } = await supabase
+  const { data: products } = await db
     .from('products')
     .select('name, category_other')
     .eq('vendor_id', vendorId)
@@ -951,7 +951,7 @@ async function insertWithOptionalColumns({
 
   while (attempts.length > 0) {
     const candidate = attempts.shift();
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from(table)
       .insert([candidate])
       .select(select)
@@ -1077,7 +1077,7 @@ async function attachBuyerMetaToProposals(rows = [], options = {}) {
     const keys = Array.from(new Set((emailKeys || []).map(normalizeEmailValue).filter(Boolean)));
     if (!keys.length) return;
 
-    const { data: buyersByEmail, error: buyerByEmailError } = await supabase
+    const { data: buyersByEmail, error: buyerByEmailError } = await db
       .from('buyers')
       .select('id, user_id, full_name, company_name, email, phone, avatar_url, is_active, updated_at, created_at')
       .in('email', keys)
@@ -1099,7 +1099,7 @@ async function attachBuyerMetaToProposals(rows = [], options = {}) {
 
     const fallbackRows = await Promise.all(
       unresolvedEmailKeys.map(async (emailKey) => {
-        const { data: buyerByEmail, error } = await supabase
+        const { data: buyerByEmail, error } = await db
           .from('buyers')
           .select('id, user_id, full_name, company_name, email, phone, avatar_url, is_active, updated_at, created_at')
           .ilike('email', emailKey)
@@ -1127,7 +1127,7 @@ async function attachBuyerMetaToProposals(rows = [], options = {}) {
     const keys = Array.from(new Set((emailKeys || []).map(normalizeEmailValue).filter(Boolean)));
     if (!keys.length) return;
 
-    const { data: usersByEmail, error: usersByEmailError } = await supabase
+    const { data: usersByEmail, error: usersByEmailError } = await db
       .from('users')
       .select('id, email, full_name, updated_at, created_at')
       .in('email', keys)
@@ -1148,7 +1148,7 @@ async function attachBuyerMetaToProposals(rows = [], options = {}) {
 
     const fallbackRows = await Promise.all(
       unresolvedEmailKeys.map(async (emailKey) => {
-        const { data: userByEmail, error } = await supabase
+        const { data: userByEmail, error } = await db
           .from('users')
           .select('id, email, full_name, updated_at, created_at')
           .ilike('email', emailKey)
@@ -1169,7 +1169,7 @@ async function attachBuyerMetaToProposals(rows = [], options = {}) {
     });
   };
   if (buyerIds.length) {
-    const { data: buyers, error } = await supabase
+    const { data: buyers, error } = await db
       .from('buyers')
       .select('id, user_id, full_name, company_name, email, phone, avatar_url, is_active, updated_at, created_at')
       .in('id', buyerIds);
@@ -1207,7 +1207,7 @@ async function attachBuyerMetaToProposals(rows = [], options = {}) {
 
   const vendorUserMap = new Map();
   if (vendorIds.length) {
-    const { data: vendors, error: vendorError } = await supabase
+    const { data: vendors, error: vendorError } = await db
       .from('vendors')
       .select('id, user_id')
       .in('id', vendorIds);
@@ -1234,7 +1234,7 @@ async function attachBuyerMetaToProposals(rows = [], options = {}) {
       }
     });
 
-    const { data: proposalMessages, error: messageError } = await supabase
+    const { data: proposalMessages, error: messageError } = await db
       .from('proposal_messages')
       .select('proposal_id, sender_id, created_at')
       .in('proposal_id', proposalIds)
@@ -1271,7 +1271,7 @@ async function attachBuyerMetaToProposals(rows = [], options = {}) {
 
   const buyerMapByUserId = new Map();
   if (buyerUserIds.length) {
-    const { data: buyersByUserId, error: buyerUserError } = await supabase
+    const { data: buyersByUserId, error: buyerUserError } = await db
       .from('buyers')
       .select('id, user_id, full_name, company_name, email, phone, avatar_url, is_active, updated_at, created_at')
       .in('user_id', buyerUserIds)
@@ -1294,7 +1294,7 @@ async function attachBuyerMetaToProposals(rows = [], options = {}) {
 
   const unresolvedBuyerUserIds = buyerUserIds.filter((id) => !buyerMapByUserId.has(String(id)));
   if (unresolvedBuyerUserIds.length) {
-    const { data: usersById, error: usersByIdError } = await supabase
+    const { data: usersById, error: usersByIdError } = await db
       .from('users')
       .select('id, email, updated_at, created_at')
       .in('id', unresolvedBuyerUserIds);
@@ -1310,7 +1310,7 @@ async function attachBuyerMetaToProposals(rows = [], options = {}) {
 
       const userEmailKeys = Array.from(new Set(Array.from(userEmailMap.values()).filter(Boolean)));
       if (userEmailKeys.length) {
-        const { data: buyersFromUserEmails, error: buyersFromUserEmailsError } = await supabase
+        const { data: buyersFromUserEmails, error: buyersFromUserEmailsError } = await db
           .from('buyers')
           .select('id, user_id, full_name, company_name, email, phone, avatar_url, is_active, updated_at, created_at')
           .in('email', userEmailKeys)
@@ -1366,7 +1366,7 @@ async function attachBuyerMetaToProposals(rows = [], options = {}) {
 
   const leadBuyerMap = new Map();
   if (proposalIds.length) {
-    const { data: leads, error: leadError } = await supabase
+    const { data: leads, error: leadError } = await db
       .from('leads')
       .select('id, proposal_id, buyer_id, buyer_name, buyer_email, buyer_phone, company_name, city, state, location, created_at')
       .in('proposal_id', proposalIds)
@@ -1405,7 +1405,7 @@ async function attachBuyerMetaToProposals(rows = [], options = {}) {
     )
   );
   if (leadBuyerIds.length) {
-    const { data: leadBuyerRows, error: leadBuyerRowsError } = await supabase
+    const { data: leadBuyerRows, error: leadBuyerRowsError } = await db
       .from('buyers')
       .select('id, user_id, full_name, company_name, email, phone, avatar_url, is_active, updated_at, created_at')
       .in('id', leadBuyerIds);
@@ -1441,7 +1441,7 @@ async function attachBuyerMetaToProposals(rows = [], options = {}) {
   );
   const purchasedLeadIdSet = new Set();
   if (leadIdsForUnlock.length && vendorIds.length) {
-    const { data: purchases, error: purchasesError } = await supabase
+    const { data: purchases, error: purchasesError } = await db
       .from('lead_purchases')
       .select('lead_id')
       .in('lead_id', leadIdsForUnlock)
@@ -1554,11 +1554,11 @@ async function attachBuyerMetaToProposals(rows = [], options = {}) {
 async function insertNotification(payload = {}) {
   if (!payload?.user_id) return;
 
-  let { error } = await supabase.from('notifications').insert([payload]);
+  let { error } = await db.from('notifications').insert([payload]);
   if (error && String(error?.message || '').toLowerCase().includes('reference_id')) {
     const fallbackPayload = { ...payload };
     delete fallbackPayload.reference_id;
-    ({ error } = await supabase.from('notifications').insert([fallbackPayload]));
+    ({ error } = await db.from('notifications').insert([fallbackPayload]));
   }
   if (error) throw error;
 }
@@ -1602,7 +1602,7 @@ async function notifyQuotaExhausted({ userId, remaining, consumptionType }) {
 
   for (const alert of alerts) {
     try {
-      const { count, error: countError } = await supabase
+      const { count, error: countError } = await db
         .from('notifications')
         .select('id', { count: 'exact', head: true })
         .eq('user_id', userId)
@@ -1747,7 +1747,7 @@ const inferFallbackLeadStatus = (lead = {}) => {
 };
 
 async function resolveVendorLeadAccess({ vendorId, leadId }) {
-  const { data: lead, error: leadError } = await supabase
+  const { data: lead, error: leadError } = await db
     .from('leads')
     .select('*')
     .eq('id', leadId)
@@ -1758,7 +1758,7 @@ async function resolveVendorLeadAccess({ vendorId, leadId }) {
 
   const isDirect = String(lead?.vendor_id || '').trim() === String(vendorId || '').trim();
 
-  const { data: purchaseRows, error: purchaseError } = await supabase
+  const { data: purchaseRows, error: purchaseError } = await db
     .from('lead_purchases')
     .select(
       'id, purchase_date, purchase_datetime, amount, purchase_price, payment_status, consumption_type, lead_status, subscription_plan_name'
@@ -1779,7 +1779,7 @@ async function resolveVendorLeadAccess({ vendorId, leadId }) {
       ['AVAILABLE', 'PURCHASED'].includes(leadStatus) &&
       !isLeadExpired(lead);
     if (isMarketplace) {
-      const { count: purchaseCount, error: countError } = await supabase
+      const { count: purchaseCount, error: countError } = await db
         .from('lead_purchases')
         .select('id', { count: 'exact', head: true })
         .eq('lead_id', leadId);
@@ -1796,7 +1796,7 @@ async function resolveVendorLeadAccess({ vendorId, leadId }) {
 
 async function consumeLeadForVendor({ vendorId, leadId, mode = 'AUTO', purchasePrice = 0 }) {
   return consumeLeadForVendorWithCompat({
-    supabase,
+    db,
     vendorId,
     leadId,
     mode,
@@ -1835,7 +1835,7 @@ router.put('/me', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
     payload.profile_completion = calculateVendorProfileCompletion({ ...vendor, ...payload });
     payload.updated_at = new Date().toISOString();
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendors')
       .update(payload)
       .eq('id', vendor.id)
@@ -1868,7 +1868,7 @@ const buildDefaultVendorPreferences = (vendorId) => ({
 
 async function resolveActivePlanLimits(vendorId) {
   const defaults = { states: 2, cities: 20, categories: 5 };
-  const { data } = await supabase
+  const { data } = await db
     .from('vendor_plan_subscriptions')
     .select('plan:vendor_plans(name, features)')
     .eq('vendor_id', vendorId)
@@ -1904,7 +1904,7 @@ router.get('/me/preferences', requireAuth({ roles: ['VENDOR'] }), async (req, re
     if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
 
     const [{ data: prefs, error }, limits] = await Promise.all([
-      supabase.from('vendor_preferences').select('*').eq('vendor_id', vendor.id).maybeSingle(),
+      db.from('vendor_preferences').select('*').eq('vendor_id', vendor.id).maybeSingle(),
       resolveActivePlanLimits(vendor.id),
     ]);
 
@@ -1950,7 +1950,7 @@ router.put('/me/preferences', requireAuth({ roles: ['VENDOR'] }), async (req, re
     if (body.min_budget !== undefined) updates.min_budget = parseBudget(body.min_budget);
     if (body.max_budget !== undefined) updates.max_budget = parseBudget(body.max_budget);
 
-    const { data: existing, error: existingError } = await supabase
+    const { data: existing, error: existingError } = await db
       .from('vendor_preferences')
       .select('id')
       .eq('vendor_id', vendor.id)
@@ -1965,8 +1965,8 @@ router.put('/me/preferences', requireAuth({ roles: ['VENDOR'] }), async (req, re
     };
 
     const result = existing?.id
-      ? await supabase.from('vendor_preferences').update(updates).eq('vendor_id', vendor.id).select('*').maybeSingle()
-      : await supabase.from('vendor_preferences').insert([{ ...basePayload, created_at: new Date().toISOString() }]).select('*').maybeSingle();
+      ? await db.from('vendor_preferences').update(updates).eq('vendor_id', vendor.id).select('*').maybeSingle()
+      : await db.from('vendor_preferences').insert([{ ...basePayload, created_at: new Date().toISOString() }]).select('*').maybeSingle();
 
     if (result.error) return res.status(500).json({ success: false, error: result.error.message });
     clearVendorCacheEntries(vendor.id);
@@ -2000,14 +2000,14 @@ router.get('/me/collections', requireAuth({ roles: ['VENDOR'] }), async (req, re
     const vendor = await resolveVendorForUser(req.user);
     if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
 
-    const { data: vendorRow, error: vendorError } = await supabase
+    const { data: vendorRow, error: vendorError } = await db
       .from('vendors')
       .select('collection_groups, collection_assignments, collection_notes')
       .eq('id', vendor.id)
       .maybeSingle();
     if (vendorError) return res.status(500).json({ success: false, error: vendorError.message });
 
-    const { data: products, error: productError } = await supabase
+    const { data: products, error: productError } = await db
       .from('products')
       .select('id, metadata')
       .eq('vendor_id', vendor.id)
@@ -2054,7 +2054,7 @@ router.put('/me/collections', requireAuth({ roles: ['VENDOR'] }), async (req, re
       ? req.body.notes
       : {};
 
-    const { data: existingCollections, error: existingCollectionsError } = await supabase
+    const { data: existingCollections, error: existingCollectionsError } = await db
       .from('vendors')
       .select('collection_assignments, collection_notes')
       .eq('id', vendor.id)
@@ -2074,7 +2074,7 @@ router.put('/me/collections', requireAuth({ roles: ['VENDOR'] }), async (req, re
       ...notes,
     };
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendors')
       .update({
         collection_groups: groups,
@@ -2103,7 +2103,7 @@ router.get('/me/banks', requireAuth({ roles: ['VENDOR'] }), async (req, res) => 
     const vendor = await resolveVendorForUser(req.user);
     if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendor_bank_details')
       .select('*')
       .eq('vendor_id', vendor.id)
@@ -2127,7 +2127,7 @@ router.get('/me/banks/:bankId', requireAuth({ roles: ['VENDOR'] }), async (req, 
       return res.status(400).json({ success: false, error: 'Invalid bank detail id' });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendor_bank_details')
       .select('*')
       .eq('id', bankId)
@@ -2154,7 +2154,7 @@ router.post('/me/banks', requireAuth({ roles: ['VENDOR'] }), async (req, res) =>
       return res.status(400).json({ success: false, error: validationError.message });
     }
 
-    const { count, error: countError } = await supabase
+    const { count, error: countError } = await db
       .from('vendor_bank_details')
       .select('id', { count: 'exact', head: true })
       .eq('vendor_id', vendor.id);
@@ -2163,7 +2163,7 @@ router.post('/me/banks', requireAuth({ roles: ['VENDOR'] }), async (req, res) =>
 
     const shouldSetPrimary = payload.is_primary === true || !count;
     if (shouldSetPrimary) {
-      const { error: resetError } = await supabase
+      const { error: resetError } = await db
         .from('vendor_bank_details')
         .update({ is_primary: false, updated_at: new Date().toISOString() })
         .eq('vendor_id', vendor.id);
@@ -2171,7 +2171,7 @@ router.post('/me/banks', requireAuth({ roles: ['VENDOR'] }), async (req, res) =>
     }
 
     const nowIso = new Date().toISOString();
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendor_bank_details')
       .insert([{
         vendor_id: vendor.id,
@@ -2200,7 +2200,7 @@ router.put('/me/banks/:bankId', requireAuth({ roles: ['VENDOR'] }), async (req, 
       return res.status(400).json({ success: false, error: 'Invalid bank detail id' });
     }
 
-    const { data: existingBank, error: existingError } = await supabase
+    const { data: existingBank, error: existingError } = await db
       .from('vendor_bank_details')
       .select('*')
       .eq('id', bankId)
@@ -2222,7 +2222,7 @@ router.put('/me/banks/:bankId', requireAuth({ roles: ['VENDOR'] }), async (req, 
     }
 
     if (payload.is_primary === true) {
-      const { error: resetError } = await supabase
+      const { error: resetError } = await db
         .from('vendor_bank_details')
         .update({ is_primary: false, updated_at: new Date().toISOString() })
         .eq('vendor_id', vendor.id)
@@ -2230,7 +2230,7 @@ router.put('/me/banks/:bankId', requireAuth({ roles: ['VENDOR'] }), async (req, 
       if (resetError) return res.status(500).json({ success: false, error: resetError.message });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendor_bank_details')
       .update({
         ...payload,
@@ -2258,7 +2258,7 @@ router.delete('/me/banks/:bankId', requireAuth({ roles: ['VENDOR'] }), async (re
       return res.status(400).json({ success: false, error: 'Invalid bank detail id' });
     }
 
-    const { data: existingBank, error: existingError } = await supabase
+    const { data: existingBank, error: existingError } = await db
       .from('vendor_bank_details')
       .select('id, is_primary')
       .eq('id', bankId)
@@ -2268,7 +2268,7 @@ router.delete('/me/banks/:bankId', requireAuth({ roles: ['VENDOR'] }), async (re
     if (existingError) return res.status(500).json({ success: false, error: existingError.message });
     if (!existingBank) return res.status(404).json({ success: false, error: 'Bank detail not found' });
 
-    const { error: deleteError } = await supabase
+    const { error: deleteError } = await db
       .from('vendor_bank_details')
       .delete()
       .eq('id', bankId)
@@ -2277,7 +2277,7 @@ router.delete('/me/banks/:bankId', requireAuth({ roles: ['VENDOR'] }), async (re
     if (deleteError) return res.status(500).json({ success: false, error: deleteError.message });
 
     if (existingBank.is_primary) {
-      const { data: fallbackBank, error: fallbackError } = await supabase
+      const { data: fallbackBank, error: fallbackError } = await db
         .from('vendor_bank_details')
         .select('id')
         .eq('vendor_id', vendor.id)
@@ -2288,7 +2288,7 @@ router.delete('/me/banks/:bankId', requireAuth({ roles: ['VENDOR'] }), async (re
       if (fallbackError) return res.status(500).json({ success: false, error: fallbackError.message });
 
       if (fallbackBank?.id) {
-        const { error: resetPrimaryError } = await supabase
+        const { error: resetPrimaryError } = await db
           .from('vendor_bank_details')
           .update({ is_primary: true, updated_at: new Date().toISOString() })
           .eq('id', fallbackBank.id)
@@ -2303,7 +2303,7 @@ router.delete('/me/banks/:bankId', requireAuth({ roles: ['VENDOR'] }), async (re
   }
 });
 
-// ✅ Upload image/media to Cloudinary when configured (auth-required, keeps Supabase fallback for dev)
+// Upload image/media to Cloudinary when configured, otherwise use local storage.
 router.post('/me/upload', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
   try {
     const vendor = buildVendorResponse(await resolveVendorForUser(req.user));
@@ -2359,11 +2359,11 @@ router.post('/me/upload', requireAuth({ roles: ['VENDOR'] }), async (req, res) =
       return res.status(400).json({ success: false, error: 'Image too small (minimum 10KB)' });
     }
     if (buffer.length > MAX_UPLOAD_BYTES) {
-      return res.status(413).json({ success: false, error: 'File too large (max 10MB)' });
+      return res.status(413).json({ success: false, error: 'File too large (max 50MB)' });
     }
     if (bucket === 'product-images') {
       if (buffer.length < PRODUCT_IMAGE_MIN_BYTES) {
-        return res.status(400).json({ success: false, error: 'Image too small (minimum 50KB)' });
+        return res.status(400).json({ success: false, error: 'Image too small (minimum 10KB)' });
       }
       if (buffer.length > PRODUCT_IMAGE_MAX_BYTES) {
         return res.status(413).json({ success: false, error: 'Image too large (maximum 1MB)' });
@@ -2379,7 +2379,7 @@ router.post('/me/upload', requireAuth({ roles: ['VENDOR'] }), async (req, res) =
       if (buffer.length < KYC_DOC_MIN_BYTES) {
         return res.status(400).json({
           success: false,
-          error: 'KYC image too small (minimum 100KB)',
+          error: 'KYC image too small (minimum 10KB)',
         });
       }
       if (buffer.length > KYC_DOC_MAX_BYTES) {
@@ -2434,7 +2434,7 @@ router.post('/me/upload', requireAuth({ roles: ['VENDOR'] }), async (req, res) =
     let lastUploadError = null;
 
     for (const candidateBucket of bucketCandidates) {
-      const { error: uploadError } = await supabase.storage
+      const { error: uploadError } = await db.storage
         .from(candidateBucket)
         .upload(objectPath, buffer, {
           contentType,
@@ -2456,7 +2456,7 @@ router.post('/me/upload', requireAuth({ roles: ['VENDOR'] }), async (req, res) =
       return res.status(500).json({ success: false, error: lastUploadError?.message || 'Upload failed' });
     }
 
-    const { data } = supabase.storage.from(uploadedBucket).getPublicUrl(objectPath);
+    const { data } = db.storage.from(uploadedBucket).getPublicUrl(objectPath);
     return res.json({
       success: true,
       bucket: uploadedBucket,
@@ -2477,7 +2477,7 @@ router.post('/me/kyc/submit', requireAuth({ roles: ['VENDOR'] }), async (req, re
       return sendLockedKycResponse(res);
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendors')
       .update({ kyc_status: 'SUBMITTED', updated_at: new Date().toISOString() })
       .eq('id', vendor.id)
@@ -2533,7 +2533,7 @@ router.get('/me/documents', requireAuth({ roles: ['VENDOR'] }), async (req, res)
     const vendor = await resolveVendorForUser(req.user);
     if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
 
-    let query = supabase
+    let query = db
       .from('vendor_documents')
       .select('*')
       .eq('vendor_id', vendor.id);
@@ -2559,7 +2559,7 @@ router.get('/me/documents/:docId', requireAuth({ roles: ['VENDOR'] }), async (re
       return res.status(400).json({ success: false, error: 'Invalid document id' });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendor_documents')
       .select('*')
       .eq('id', docId)
@@ -2596,7 +2596,7 @@ router.post('/me/documents', requireAuth({ roles: ['VENDOR'] }), async (req, res
       });
     }
 
-    const { data: existingDocs, error: existingDocsError } = await supabase
+    const { data: existingDocs, error: existingDocsError } = await db
       .from('vendor_documents')
       .select('id, document_type')
       .eq('vendor_id', vendor.id);
@@ -2613,7 +2613,7 @@ router.post('/me/documents', requireAuth({ roles: ['VENDOR'] }), async (req, res
     let error = null;
 
     if (sameType?.id) {
-      const updateRes = await supabase
+      const updateRes = await db
         .from('vendor_documents')
         .update({
           document_type,
@@ -2636,7 +2636,7 @@ router.post('/me/documents', requireAuth({ roles: ['VENDOR'] }), async (req, res
         });
       }
 
-      const insertRes = await supabase
+      const insertRes = await db
         .from('vendor_documents')
         .insert([{
           vendor_id: vendor.id,
@@ -2699,7 +2699,7 @@ router.delete('/me/documents/:docId', requireAuth({ roles: ['VENDOR'] }), async 
       return res.status(400).json({ success: false, error: 'Invalid document id' });
     }
 
-    const { error } = await supabase
+    const { error } = await db
       .from('vendor_documents')
       .delete()
       .eq('id', docId)
@@ -2726,7 +2726,7 @@ router.delete('/me/documents', requireAuth({ roles: ['VENDOR'] }), async (req, r
       return res.status(400).json({ success: false, error: 'type query param is required' });
     }
 
-    const { error } = await supabase
+    const { error } = await db
       .from('vendor_documents')
       .delete()
       .eq('vendor_id', vendor.id)
@@ -2765,7 +2765,7 @@ router.get('/me/marketplace-leads', requireAuth({ roles: ['VENDOR'] }), async (r
 
     const maxAgeIso = new Date(Date.now() - MARKETPLACE_LEAD_MAX_AGE_DAYS * 86400000).toISOString();
 
-    const { data: marketplaceRows, error: rowsError } = await supabase
+    const { data: marketplaceRows, error: rowsError } = await db
       .from('leads')
       .select('*')
       .in('status', ['AVAILABLE', 'PURCHASED'])
@@ -2784,11 +2784,11 @@ router.get('/me/marketplace-leads', requireAuth({ roles: ['VENDOR'] }), async (r
     const allLeadIds = dedupe(allRows.map((row) => String(row?.id || '')).filter(Boolean));
 
     const [myPurchasesRes, allPurchasesRes, filterContext] = await Promise.all([
-      supabase
+      db
         .from('lead_purchases')
         .select('lead_id')
         .in('vendor_id', vendorIds),
-      supabase
+      db
         .from('lead_purchases')
         .select('lead_id')
         .in('lead_id', allLeadIds),
@@ -2862,7 +2862,7 @@ router.post('/me/leads/:leadId/purchase', requireAuth({ roles: ['VENDOR'] }), as
       return res.status(400).json({ success: false, error: 'Invalid lead id' });
     }
 
-    const { data: lead, error: leadError } = await supabase
+    const { data: lead, error: leadError } = await db
       .from('leads')
       .select('*')
       .eq('id', leadId)
@@ -2945,7 +2945,7 @@ router.post('/me/leads/:leadId/purchase', requireAuth({ roles: ['VENDOR'] }), as
       if (!wasExistingPurchase && purchaseRow?.id) {
         const purchaseStatus =
           normalizeVendorLeadStatus(payload?.lead_status || purchaseRow?.lead_status) || 'ACTIVE';
-        const { error: historyError } = await supabase.from('lead_status_history').insert([
+        const { error: historyError } = await db.from('lead_status_history').insert([
           {
             lead_id: leadId,
             vendor_id: vendor.id,
@@ -2992,7 +2992,7 @@ router.get('/me/leads/:leadId', requireAuth({ roles: ['VENDOR'] }), async (req, 
       return res.status(400).json({ success: false, error: 'Invalid lead id' });
     }
 
-    const { data: lead, error: leadError } = await supabase
+    const { data: lead, error: leadError } = await db
       .from('leads')
       .select('*')
       .eq('id', leadId)
@@ -3007,7 +3007,7 @@ router.get('/me/leads/:leadId', requireAuth({ roles: ['VENDOR'] }), async (req, 
 
     const isDirect = String(lead?.vendor_id || '').trim() === String(vendor.id || '').trim();
 
-    const { data: purchaseRows, error: purchaseError } = await supabase
+    const { data: purchaseRows, error: purchaseError } = await db
       .from('lead_purchases')
       .select(
         'id, purchase_date, purchase_datetime, amount, purchase_price, payment_status, consumption_type, lead_status, subscription_plan_name'
@@ -3028,7 +3028,7 @@ router.get('/me/leads/:leadId', requireAuth({ roles: ['VENDOR'] }), async (req, 
       const leadStatus = String(lead?.status || '').toUpperCase();
       const isMarketplace = !lead?.vendor_id && ['AVAILABLE', 'PURCHASED'].includes(leadStatus);
       if (isMarketplace) {
-        const { count: purchaseCount, error: countError } = await supabase
+        const { count: purchaseCount, error: countError } = await db
           .from('lead_purchases')
           .select('id', { count: 'exact', head: true })
           .eq('lead_id', leadId);
@@ -3075,7 +3075,7 @@ router.get('/me/leads/:leadId', requireAuth({ roles: ['VENDOR'] }), async (req, 
     const leadBuyerEmail = normalizeLeadBuyerEmail(lead?.buyer_email);
 
     if (leadBuyerId) {
-      const { data: buyerById, error: buyerByIdError } = await supabase
+      const { data: buyerById, error: buyerByIdError } = await db
         .from('buyers')
         .select('id, user_id, full_name, company_name, email, phone, avatar_url, is_active')
         .eq('id', leadBuyerId)
@@ -3087,7 +3087,7 @@ router.get('/me/leads/:leadId', requireAuth({ roles: ['VENDOR'] }), async (req, 
     }
 
     if (!buyerMeta && leadBuyerEmail) {
-      const { data: buyerByEmail, error: buyerByEmailError } = await supabase
+      const { data: buyerByEmail, error: buyerByEmailError } = await db
         .from('buyers')
         .select('id, user_id, full_name, company_name, email, phone, avatar_url, is_active')
         .ilike('email', leadBuyerEmail)
@@ -3162,7 +3162,7 @@ router.get('/me/leads/:leadId/contacts', requireAuth({ roles: ['VENDOR'] }), asy
       return res.status(403).json({ success: false, error: 'You have not purchased this lead' });
     }
 
-    const { data: contacts, error: contactsError } = await supabase
+    const { data: contacts, error: contactsError } = await db
       .from('lead_contacts')
       .select('*')
       .eq('vendor_id', vendor.id)
@@ -3222,7 +3222,7 @@ router.post('/me/leads/:leadId/contacts', requireAuth({ roles: ['VENDOR'] }), as
       created_at: nowIso,
     };
 
-    const { data: contact, error: contactError } = await supabase
+    const { data: contact, error: contactError } = await db
       .from('lead_contacts')
       .insert([contactPayload])
       .select('*')
@@ -3263,7 +3263,7 @@ router.get('/me/leads/:leadId/status-history', requireAuth({ roles: ['VENDOR'] }
       });
     }
 
-    const { data: historyRows, error: historyError } = await supabase
+    const { data: historyRows, error: historyError } = await db
       .from('lead_status_history')
       .select('id, lead_id, vendor_id, lead_purchase_id, status, note, source, created_by, created_at')
       .eq('lead_id', leadId)
@@ -3360,7 +3360,7 @@ router.post('/me/leads/:leadId/status', requireAuth({ roles: ['VENDOR'] }), asyn
     let updatedPurchase = purchase || null;
 
     if (purchase?.id) {
-      const { data: purchaseRow, error: purchaseUpdateError } = await supabase
+      const { data: purchaseRow, error: purchaseUpdateError } = await db
         .from('lead_purchases')
         .update({ lead_status: status })
         .eq('id', purchase.id)
@@ -3380,7 +3380,7 @@ router.post('/me/leads/:leadId/status', requireAuth({ roles: ['VENDOR'] }), asyn
       updatedPurchase = purchaseRow || updatedPurchase;
     } else if (isDirect) {
       const mappedLeadStatus = status === 'CLOSED' ? 'CLOSED' : 'AVAILABLE';
-      const { error: directUpdateError } = await supabase
+      const { error: directUpdateError } = await db
         .from('leads')
         .update({ status: mappedLeadStatus })
         .eq('id', leadId)
@@ -3405,7 +3405,7 @@ router.post('/me/leads/:leadId/status', requireAuth({ roles: ['VENDOR'] }), asyn
       created_at: nowIso,
     };
 
-    const { data: historyRow, error: historyError } = await supabase
+    const { data: historyRow, error: historyError } = await db
       .from('lead_status_history')
       .insert([historyInsert])
       .select('id, lead_id, vendor_id, lead_purchase_id, status, note, source, created_by, created_at')
@@ -3447,7 +3447,7 @@ router.get('/me/leads', requireAuth({ roles: ['VENDOR'] }), async (req, res) => 
     const vendorIds = await resolveVendorIdsForUser(req.user);
     if (!vendorIds.length) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
 
-    const { data: purchases, error: purchaseError } = await supabase
+    const { data: purchases, error: purchaseError } = await db
       .from('lead_purchases')
       .select(
         'id, vendor_id, lead_id, amount, purchase_price, payment_status, purchase_date, purchase_datetime, consumption_type, lead_status, subscription_plan_name'
@@ -3466,7 +3466,7 @@ router.get('/me/leads', requireAuth({ roles: ['VENDOR'] }), async (req, res) => 
 
     let purchasedLeads = [];
     if (purchasedIds.length) {
-      const { data: purchasedRows, error: purchasedRowsError } = await supabase
+      const { data: purchasedRows, error: purchasedRowsError } = await db
         .from('leads')
         .select('*')
         .in('id', purchasedIds);
@@ -3503,7 +3503,7 @@ router.get('/me/leads', requireAuth({ roles: ['VENDOR'] }), async (req, res) => 
         .map((lead) => attachLeadExpiryMeta(lead, now));
     }
 
-    const { data: directRows, error: directError } = await supabase
+    const { data: directRows, error: directError } = await db
       .from('leads')
       .select('*')
       .in('vendor_id', vendorIds)
@@ -3541,7 +3541,7 @@ router.get('/me/proposals', requireAuth({ roles: ['VENDOR'] }), async (req, res)
 
     const type = String(req.query?.type || 'received').toLowerCase();
 
-    const { data: proposals, error } = await supabase
+    const { data: proposals, error } = await db
       .from('proposals')
       .select('*')
       .in('vendor_id', vendorIds)
@@ -3586,7 +3586,7 @@ router.get('/me/proposals/:proposalId', requireAuth({ roles: ['VENDOR'] }), asyn
       return res.status(400).json({ success: false, error: 'Invalid proposal id' });
     }
 
-    const { data: proposal, error } = await supabase
+    const { data: proposal, error } = await db
       .from('proposals')
       .select('*')
       .eq('id', proposalId)
@@ -3616,7 +3616,7 @@ router.delete('/me/proposals/:proposalId', requireAuth({ roles: ['VENDOR'] }), a
       return res.status(400).json({ success: false, error: 'Invalid proposal id' });
     }
 
-    const { data: deletedRows, error } = await supabase
+    const { data: deletedRows, error } = await db
       .from('proposals')
       .delete()
       .eq('id', proposalId)
@@ -3658,7 +3658,7 @@ router.get('/:vendorId([0-9a-fA-F-]{36})/products', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid vendor id' });
     }
 
-    const { data: products, error: pErr } = await supabase
+    const { data: products, error: pErr } = await db
       .from('products')
       .select('id, name, price, price_unit, images, category_other, micro_category_id, sub_category_id, head_category_id')
       .eq('vendor_id', vendorId)
@@ -3673,19 +3673,19 @@ router.get('/:vendorId([0-9a-fA-F-]{36})/products', async (req, res) => {
 
     const [microRes, subRes, headRes] = await Promise.all([
       microIds.length
-        ? supabase
+        ? db
             .from('micro_categories')
             .select('id, name, sub_categories(id, name, head_categories(id, name))')
             .in('id', microIds)
         : Promise.resolve({ data: [] }),
       subIds.length
-        ? supabase
+        ? db
             .from('sub_categories')
             .select('id, name, head_categories(id, name)')
             .in('id', subIds)
         : Promise.resolve({ data: [] }),
       headIds.length
-        ? supabase.from('head_categories').select('id, name').in('id', headIds)
+        ? db.from('head_categories').select('id, name').in('id', headIds)
         : Promise.resolve({ data: [] }),
     ]);
 
@@ -3759,7 +3759,7 @@ router.get('/:vendorId([0-9a-fA-F-]{36})/services', async (req, res) => {
 
     let mappedServices = [];
     try {
-      const { data: services, error } = await supabase
+      const { data: services, error } = await db
         .from('vendor_services')
         .select('*')
         .eq('vendor_id', vendorId);
@@ -3805,7 +3805,7 @@ router.get('/:vendorId([0-9a-fA-F-]{36})/service-categories', async (req, res) =
       return res.status(400).json({ success: false, error: 'Invalid vendor id' });
     }
 
-    const { data: prefs, error } = await supabase
+    const { data: prefs, error } = await db
       .from('vendor_preferences')
       .select('preferred_micro_categories')
       .eq('vendor_id', vendorId)
@@ -3816,7 +3816,7 @@ router.get('/:vendorId([0-9a-fA-F-]{36})/service-categories', async (req, res) =
     const ids = prefs?.preferred_micro_categories || [];
     if (!ids?.length) return res.json({ success: true, categories: [] });
 
-    const { data: microCats, error: microErr } = await supabase
+    const { data: microCats, error: microErr } = await db
       .from('micro_categories')
       .select('id, name, slug, sub_categories(id, name, slug, head_categories(id, name, slug))')
       .in('id', ids);
@@ -3857,7 +3857,7 @@ router.get('/:vendorId([0-9a-fA-F-]{36})/favorite', requireAuth({ roles: ['BUYER
       return res.status(404).json({ success: false, error: 'Buyer profile not found' });
     }
 
-    const { data: favRow, error } = await supabase
+    const { data: favRow, error } = await db
       .from('favorites')
       .select('id')
       .eq('buyer_id', buyerId)
@@ -3884,7 +3884,7 @@ router.post('/:vendorId([0-9a-fA-F-]{36})/favorite', requireAuth({ roles: ['BUYE
       return res.status(404).json({ success: false, error: 'Buyer profile not found' });
     }
 
-    const { error } = await supabase
+    const { error } = await db
       .from('favorites')
       .insert([{ buyer_id: buyerId, vendor_id: vendorId }]);
 
@@ -3912,7 +3912,7 @@ router.delete('/:vendorId([0-9a-fA-F-]{36})/favorite', requireAuth({ roles: ['BU
       return res.status(404).json({ success: false, error: 'Buyer profile not found' });
     }
 
-    const { error } = await supabase
+    const { error } = await db
       .from('favorites')
       .delete()
       .match({ buyer_id: buyerId, vendor_id: vendorId });
@@ -3936,7 +3936,7 @@ router.post('/:vendorId/leads', optionalAuth(), async (req, res) => {
 
     let vendor = null;
     if (!isMarketplaceRequest) {
-      const { data: vendorRow, error: vendorError } = await supabase
+      const { data: vendorRow, error: vendorError } = await db
         .from('vendors')
         .select('id, user_id, company_name, email')
         .eq('id', rawVendorId)
@@ -4232,7 +4232,7 @@ router.post('/:vendorId/leads', optionalAuth(), async (req, res) => {
     if (vendor?.id) {
       let vendorUserId = vendor.user_id || null;
       if (!vendorUserId && vendor?.email) {
-        const { data: userRow } = await supabase
+        const { data: userRow } = await db
           .from('users')
           .select('id')
           .eq('email', String(vendor.email).toLowerCase().trim())
@@ -4282,7 +4282,7 @@ router.get('/:vendorId([0-9a-fA-F-]{36})/leads', requireAuth(), async (req, res)
       return res.json({ success: true, leads: [] });
     }
 
-    const { data: leads, error } = await supabase
+    const { data: leads, error } = await db
       .from('leads')
       .select('*')
       .eq('vendor_id', vendorId)
@@ -4296,7 +4296,7 @@ router.get('/:vendorId([0-9a-fA-F-]{36})/leads', requireAuth(), async (req, res)
   }
 });
 
-// ── Phase 2 additions: backend-first routes for operations that were direct Supabase ──
+// Backend-first routes for operations that were formerly direct database calls.
 
 router.get('/me/lead-stats', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
   try {
@@ -4349,13 +4349,13 @@ router.get('/me/lead-stats', requireAuth({ roles: ['VENDOR'] }), async (req, res
       quotaRes,
     ] = await Promise.all([
       // Total purchases across vendorIds (count-only)
-      supabase
+      db
         .from('lead_purchases')
         .select('*', { count: 'planned', head: true })
         .in('vendor_id', vendorIds),
 
       // Daily included used today for the active stats vendor
-      supabase
+      db
         .from('lead_purchases')
         .select('*', { count: 'planned', head: true })
         .eq('vendor_id', statsVendorId)
@@ -4363,7 +4363,7 @@ router.get('/me/lead-stats', requireAuth({ roles: ['VENDOR'] }), async (req, res
         .or(`purchase_datetime.gte.${todayIso},purchase_date.gte.${todayDate}`),
 
       // Weekly included used since week start for the active stats vendor
-      supabase
+      db
         .from('lead_purchases')
         .select('*', { count: 'planned', head: true })
         .eq('vendor_id', statsVendorId)
@@ -4371,7 +4371,7 @@ router.get('/me/lead-stats', requireAuth({ roles: ['VENDOR'] }), async (req, res
         .or(`purchase_datetime.gte.${weekIso},purchase_date.gte.${weekDate}`),
 
       // Direct leads: only non-expired or terminal status, minimal columns
-      supabase
+      db
         .from('leads')
         .select('id, status, created_at, expires_at')
         .in('vendor_id', vendorIds)
@@ -4385,14 +4385,14 @@ router.get('/me/lead-stats', requireAuth({ roles: ['VENDOR'] }), async (req, res
         ),
 
       // Contacts: only lead_id column
-      supabase
+      db
         .from('lead_contacts')
         .select('lead_id')
         .in('vendor_id', vendorIds),
 
       // Quota row for the active stats vendor
       statsVendorId
-        ? supabase
+        ? db
             .from('vendor_lead_quota')
             .select('*')
             .eq('vendor_id', statsVendorId)
@@ -4415,7 +4415,7 @@ router.get('/me/lead-stats', requireAuth({ roles: ['VENDOR'] }), async (req, res
 
     let activePlan = null;
     if (activeVendorEntry?.subscription?.plan_id) {
-      const { data: planRow, error: planError } = await supabase
+      const { data: planRow, error: planError } = await db
         .from('vendor_plans')
         .select('id, name, daily_limit, weekly_limit, yearly_limit, features')
         .eq('id', activeVendorEntry.subscription.plan_id)
@@ -4518,7 +4518,7 @@ router.get('/me/dashboard-stats', requireAuth({ roles: ['VENDOR'] }), async (req
         if (userEmail) identityFilters.push(`user_email.ilike.${userEmail}`);
         if (!identityFilters.length) return 0;
 
-        let query = supabase
+        let query = db
           .from('notifications')
           .select('id', { count: 'planned', head: true })
           .eq('is_read', false)
@@ -4561,7 +4561,7 @@ router.get('/me/recent-products', requireAuth({ roles: ['VENDOR'] }), async (req
     const hit = _getCached(_cacheRecent, ck);
     if (hit) return res.json({ success: true, products: hit });
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('products')
       .select('*')
       .eq('vendor_id', vendor.id)
@@ -4585,7 +4585,7 @@ router.get('/me/recent-leads', requireAuth({ roles: ['VENDOR'] }), async (req, r
     const hit = _getCached(_cacheRecentLeads, ck);
     if (hit) return res.json({ success: true, leads: hit });
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('leads')
       .select('*')
       .eq('vendor_id', vendor.id)
@@ -4611,8 +4611,8 @@ router.get('/me/support-stats', requireAuth({ roles: ['VENDOR'] }), async (req, 
     if (hit) return res.json({ success: true, stats: hit });
 
     const [total, open] = await Promise.all([
-      supabase.from('support_tickets').select('*', { count: 'planned', head: true }).eq('vendor_id', vendor.id),
-      supabase.from('support_tickets').select('*', { count: 'planned', head: true }).eq('vendor_id', vendor.id).neq('status', 'CLOSED'),
+      db.from('support_tickets').select('*', { count: 'planned', head: true }).eq('vendor_id', vendor.id),
+      db.from('support_tickets').select('*', { count: 'planned', head: true }).eq('vendor_id', vendor.id).neq('status', 'CLOSED'),
     ]);
 
     const stats = { total: total.count || 0, open: open.count || 0 };
@@ -4630,7 +4630,7 @@ router.get('/me/products', requireAuth({ roles: ['VENDOR'] }), async (req, res) 
     if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
 
     const includeArchived = String(req.query?.includeArchived || '').toLowerCase() === 'true';
-    let query = supabase
+    let query = db
       .from('products')
       .select('id, name, category, category_path, category_other, extra_micro_categories, is_service, metadata, status, head_category_id, sub_category_id, micro_category_id, created_at, updated_at')
       .eq('vendor_id', vendor.id)
@@ -4659,7 +4659,7 @@ router.patch('/me/products/:productId/metadata', requireAuth({ roles: ['VENDOR']
       : null;
     if (!metadata) return res.status(400).json({ success: false, error: 'metadata object required' });
 
-    const { data: product } = await supabase
+    const { data: product } = await db
       .from('products')
       .select('id, vendor_id')
       .eq('id', productId)
@@ -4668,7 +4668,7 @@ router.patch('/me/products/:productId/metadata', requireAuth({ roles: ['VENDOR']
     if (!product) return res.status(404).json({ success: false, error: 'Product not found' });
     if (product.vendor_id !== vendor.id) return res.status(403).json({ success: false, error: 'Not your product' });
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('products')
       .update({ metadata, updated_at: new Date().toISOString() })
       .eq('id', productId)
@@ -4691,7 +4691,7 @@ router.delete('/me/products/:productId', requireAuth({ roles: ['VENDOR'] }), asy
     if (!productId) return res.status(400).json({ success: false, error: 'Product ID required' });
 
     // Verify ownership
-    const { data: product } = await supabase
+    const { data: product } = await db
       .from('products')
       .select('id, vendor_id')
       .eq('id', productId)
@@ -4700,7 +4700,7 @@ router.delete('/me/products/:productId', requireAuth({ roles: ['VENDOR'] }), asy
     if (!product) return res.status(404).json({ success: false, error: 'Product not found' });
     if (product.vendor_id !== vendor.id) return res.status(403).json({ success: false, error: 'Not your product' });
 
-    const { error } = await supabase.from('products').delete().eq('id', productId);
+    const { error } = await db.from('products').delete().eq('id', productId);
     if (error) return res.status(500).json({ success: false, error: error.message });
 
     return res.json({ success: true });
@@ -4722,7 +4722,7 @@ router.patch('/me/products/:productId/status', requireAuth({ roles: ['VENDOR'] }
     if (!productId) return res.status(400).json({ success: false, error: 'Product ID required' });
     if (!validStatuses.includes(status)) return res.status(400).json({ success: false, error: `Invalid status: ${status}` });
 
-    const { data: product } = await supabase
+    const { data: product } = await db
       .from('products')
       .select('id, vendor_id')
       .eq('id', productId)
@@ -4731,7 +4731,7 @@ router.patch('/me/products/:productId/status', requireAuth({ roles: ['VENDOR'] }
     if (!product) return res.status(404).json({ success: false, error: 'Product not found' });
     if (product.vendor_id !== vendor.id) return res.status(403).json({ success: false, error: 'Not your product' });
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('products')
       .update({ status, updated_at: new Date().toISOString() })
       .eq('id', productId)
@@ -4754,7 +4754,7 @@ router.delete('/me/contact-persons/:contactId', requireAuth({ roles: ['VENDOR'] 
     const contactId = String(req.params.contactId || '').trim();
     if (!contactId) return res.status(400).json({ success: false, error: 'Contact ID required' });
 
-    const { data: contact } = await supabase
+    const { data: contact } = await db
       .from('vendor_contact_persons')
       .select('id, vendor_id')
       .eq('id', contactId)
@@ -4763,7 +4763,7 @@ router.delete('/me/contact-persons/:contactId', requireAuth({ roles: ['VENDOR'] 
     if (!contact) return res.status(404).json({ success: false, error: 'Contact not found' });
     if (contact.vendor_id !== vendor.id) return res.status(403).json({ success: false, error: 'Not your contact' });
 
-    const { error } = await supabase.from('vendor_contact_persons').delete().eq('id', contactId);
+    const { error } = await db.from('vendor_contact_persons').delete().eq('id', contactId);
     if (error) return res.status(500).json({ success: false, error: error.message });
 
     return res.json({ success: true });
@@ -4846,7 +4846,7 @@ router.patch('/me/leads/:leadId', requireAuth({ roles: ['VENDOR'] }), async (req
     const leadId = String(req.params.leadId || '').trim();
     if (!leadId) return res.status(400).json({ success: false, error: 'leadId required' });
 
-    const { data: existing } = await supabase.from('leads').select('id, vendor_id').eq('id', leadId).maybeSingle();
+    const { data: existing } = await db.from('leads').select('id, vendor_id').eq('id', leadId).maybeSingle();
     if (!existing) return res.status(404).json({ success: false, error: 'Lead not found' });
     if (!vendorIds.includes(existing.vendor_id)) return res.status(403).json({ success: false, error: 'Not your lead' });
 
@@ -4858,7 +4858,7 @@ router.patch('/me/leads/:leadId', requireAuth({ roles: ['VENDOR'] }), async (req
     }
     updates.updated_at = new Date().toISOString();
 
-    const { data: lead, error } = await supabase.from('leads').update(updates).eq('id', leadId).select('*').maybeSingle();
+    const { data: lead, error } = await db.from('leads').update(updates).eq('id', leadId).select('*').maybeSingle();
     if (error) return res.status(500).json({ success: false, error: error.message });
 
     return res.json({ success: true, lead });
@@ -4876,11 +4876,11 @@ router.delete('/me/leads/:leadId', requireAuth({ roles: ['VENDOR'] }), async (re
     const leadId = String(req.params.leadId || '').trim();
     if (!leadId) return res.status(400).json({ success: false, error: 'leadId required' });
 
-    const { data: existing } = await supabase.from('leads').select('id, vendor_id').eq('id', leadId).maybeSingle();
+    const { data: existing } = await db.from('leads').select('id, vendor_id').eq('id', leadId).maybeSingle();
     if (!existing) return res.status(404).json({ success: false, error: 'Lead not found' });
     if (!vendorIds.includes(existing.vendor_id)) return res.status(403).json({ success: false, error: 'Not your lead' });
 
-    const { error } = await supabase.from('leads').delete().eq('id', leadId);
+    const { error } = await db.from('leads').delete().eq('id', leadId);
     if (error) return res.status(500).json({ success: false, error: error.message });
 
     return res.json({ success: true });
@@ -4898,11 +4898,11 @@ router.delete('/me/purchases/:purchaseId', requireAuth({ roles: ['VENDOR'] }), a
     const purchaseId = String(req.params.purchaseId || '').trim();
     if (!purchaseId) return res.status(400).json({ success: false, error: 'purchaseId required' });
 
-    const { data: existing } = await supabase.from('lead_purchases').select('id, vendor_id').eq('id', purchaseId).maybeSingle();
+    const { data: existing } = await db.from('lead_purchases').select('id, vendor_id').eq('id', purchaseId).maybeSingle();
     if (!existing) return res.status(404).json({ success: false, error: 'Purchase not found' });
     if (!vendorIds.includes(existing.vendor_id)) return res.status(403).json({ success: false, error: 'Not your purchase' });
 
-    const { error } = await supabase.from('lead_purchases').delete().eq('id', purchaseId);
+    const { error } = await db.from('lead_purchases').delete().eq('id', purchaseId);
     if (error) return res.status(500).json({ success: false, error: error.message });
 
     return res.json({ success: true });
@@ -4920,7 +4920,7 @@ router.delete('/me/contacts/:contactId', requireAuth({ roles: ['VENDOR'] }), asy
     const contactId = String(req.params.contactId || '').trim();
     if (!contactId) return res.status(400).json({ success: false, error: 'contactId required' });
 
-    const { data: contact } = await supabase
+    const { data: contact } = await db
       .from('vendor_contact_persons')
       .select('id, vendor_id')
       .eq('id', contactId)
@@ -4929,7 +4929,7 @@ router.delete('/me/contacts/:contactId', requireAuth({ roles: ['VENDOR'] }), asy
     if (!contact) return res.status(404).json({ success: false, error: 'Contact not found' });
     if (contact.vendor_id !== vendor.id) return res.status(403).json({ success: false, error: 'Not your contact' });
 
-    const { error } = await supabase.from('vendor_contact_persons').delete().eq('id', contactId);
+    const { error } = await db.from('vendor_contact_persons').delete().eq('id', contactId);
     if (error) return res.status(500).json({ success: false, error: error.message });
 
     return res.json({ success: true });
@@ -4947,7 +4947,7 @@ router.delete('/me/messages/:messageId', requireAuth({ roles: ['VENDOR'] }), asy
     const messageId = String(req.params.messageId || '').trim();
     if (!messageId) return res.status(400).json({ success: false, error: 'Message ID required' });
 
-    const { data: message } = await supabase
+    const { data: message } = await db
       .from('vendor_messages')
       .select('id, vendor_id')
       .eq('id', messageId)
@@ -4956,7 +4956,7 @@ router.delete('/me/messages/:messageId', requireAuth({ roles: ['VENDOR'] }), asy
     if (!message) return res.status(404).json({ success: false, error: 'Message not found' });
     if (message.vendor_id !== vendor.id) return res.status(403).json({ success: false, error: 'Not your message' });
 
-    const { error } = await supabase.from('vendor_messages').delete().eq('id', messageId);
+    const { error } = await db.from('vendor_messages').delete().eq('id', messageId);
     if (error) return res.status(500).json({ success: false, error: error.message });
 
     return res.json({ success: true });

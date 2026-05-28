@@ -1,4 +1,4 @@
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 
 const DEFAULT_PASSWORD = process.env.REPAIR_EMPLOYEE_DEFAULT_PASSWORD || 'Abcd@321';
 const NOW = () => new Date().toISOString();
@@ -12,7 +12,7 @@ async function listAllAuthUsersByEmail() {
 
   for (let page = 1; page <= maxPages; page += 1) {
     // eslint-disable-next-line no-await-in-loop
-    const { data, error } = await supabase.auth.admin.listUsers({ page, perPage });
+    const { data, error } = await db.auth.admin.listUsers({ page, perPage });
     if (error) {
       throw new Error(`auth.admin.listUsers failed on page ${page}: ${error.message}`);
     }
@@ -43,7 +43,7 @@ async function upsertPublicUser(userId, employee) {
     created_at: NOW(),
   };
 
-  const { error } = await supabase.from('users').upsert([payload], { onConflict: 'id' });
+  const { error } = await db.from('users').upsert([payload], { onConflict: 'id' });
   if (error) {
     throw new Error(`users upsert failed for ${email}: ${error.message}`);
   }
@@ -52,7 +52,7 @@ async function upsertPublicUser(userId, employee) {
 async function run() {
   console.log('🔧 Repairing employee auth links...');
 
-  const { data: employees, error: empError } = await supabase
+  const { data: employees, error: empError } = await db
     .from('employees')
     .select('id, user_id, full_name, email, phone, role, department, status, created_at')
     .order('created_at', { ascending: false });
@@ -96,7 +96,7 @@ async function run() {
     // Create auth user if not present.
     if (!authUser) {
       // eslint-disable-next-line no-await-in-loop
-      const { data, error } = await supabase.auth.admin.createUser({
+      const { data, error } = await db.auth.admin.createUser({
         email,
         password: DEFAULT_PASSWORD,
         email_confirm: true,
@@ -126,7 +126,7 @@ async function run() {
 
     // Link employee -> auth user.
     // eslint-disable-next-line no-await-in-loop
-    const { error: linkError } = await supabase
+    const { error: linkError } = await db
       .from('employees')
       .update({ user_id: authUser.id })
       .eq('id', emp.id);

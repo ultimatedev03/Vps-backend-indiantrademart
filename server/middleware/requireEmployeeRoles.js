@@ -1,4 +1,4 @@
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import { normalizeRole } from '../lib/auth.js';
 import { requireAuth } from './requireAuth.js';
 
@@ -14,7 +14,7 @@ export function requireEmployeeRoles(allowedRoles = []) {
           return res.status(401).json({ success: false, error: 'Unauthorized' });
         }
 
-        const { data: employee, error: empError } = await supabase
+        const { data: employee, error: empError } = await db
           .from('employees')
           .select('*')
           .or(
@@ -75,7 +75,7 @@ export function requireEmployeeRoles(allowedRoles = []) {
         }
 
         if (!employee.user_id && authUser.id) {
-          await supabase.from('employees').update({ user_id: authUser.id }).eq('id', employee.id);
+          await db.from('employees').update({ user_id: authUser.id }).eq('id', employee.id);
         }
 
         req.employee = employee;

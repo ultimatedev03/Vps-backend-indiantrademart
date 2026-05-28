@@ -1,6 +1,6 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
-import { supabase } from './supabaseClient.js';
+import { db } from './dbClient.js';
 import { assertCaptchaForExpressRequest } from './captcha.js';
 import { writeAuditLog } from './audit.js';
 
@@ -8,13 +8,10 @@ const SUPERADMIN_TOKEN_KEY = 'superadmin_token';
 let warnedMissingSuperadminSecret = false;
 
 function getJwtSecret() {
-  const secret =
-    process.env.SUPERADMIN_JWT_SECRET ||
-    process.env.SUPABASE_JWT_SECRET ||
-    process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const secret = process.env.SUPERADMIN_JWT_SECRET || process.env.MYSQL_JWT_SECRET || process.env.JWT_SECRET;
 
   if (!secret) {
-    throw new Error('Missing SUPERADMIN_JWT_SECRET (or fallback secret) in environment');
+    throw new Error('Missing SUPERADMIN_JWT_SECRET in environment');
   }
 
   if (!process.env.SUPERADMIN_JWT_SECRET && !warnedMissingSuperadminSecret) {
@@ -55,7 +52,7 @@ async function maybeUpgradePasswordHash(superadmin, password) {
     if (isBcryptHash(superadmin.password_hash)) return;
 
     const newHash = await bcrypt.hash(password, 10);
-    await supabase
+    await db
       .from('superadmin_users')
       .update({
         password_hash: newHash,
@@ -102,7 +99,7 @@ export async function loginSuperAdmin(req, res) {
       return res.status(400).json({ success: false, error: 'Email and password are required' });
     }
 
-    const { data: superadmin, error } = await supabase
+    const { data: superadmin, error } = await db
       .from('superadmin_users')
       .select('*')
       .eq('email', email)
@@ -125,7 +122,7 @@ export async function loginSuperAdmin(req, res) {
 
     const token = signSuperAdminToken(superadmin);
 
-    await supabase
+    await db
       .from('superadmin_users')
       .update({
         last_login: new Date().toISOString(),
@@ -195,7 +192,7 @@ export function requireSuperAdmin(req, res, next) {
         return res.status(401).json({ success: false, error: 'Invalid superadmin token payload' });
       }
 
-      const { data: superadmin, error } = await supabase
+      const { data: superadmin, error } = await db
         .from('superadmin_users')
         .select('*')
         .eq('id', superadminId)
@@ -250,7 +247,7 @@ export function requireGodMode(req, res, next) {
         return res.status(401).json({ success: false, error: 'Invalid superadmin token payload' });
       }
 
-      const { data: superadmin, error } = await supabase
+      const { data: superadmin, error } = await db
         .from('superadmin_users')
         .select('*')
         .eq('id', superadminId)
@@ -315,7 +312,7 @@ export async function changeSuperAdminPassword(req, res) {
 
     const newHash = await bcrypt.hash(newPassword, 10);
 
-    const { error } = await supabase
+    const { error } = await db
       .from('superadmin_users')
       .update({
         password_hash: newHash,

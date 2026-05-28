@@ -1,4 +1,4 @@
-import { supabase } from './supabaseClient.js';
+import { db } from './dbClient.js';
 
 function getIpAddress(req) {
   const forwardedFor = req?.headers?.['x-forwarded-for'];
@@ -68,7 +68,7 @@ export async function writeAuditLog({
   };
 
   try {
-    await supabase.from('audit_logs').insert([payload]);
+    await db.from('audit_logs').insert([payload]);
   } catch (error) {
     // Audit failures should never break business flows.
     // Keep this noisy for debugging but non-fatal.

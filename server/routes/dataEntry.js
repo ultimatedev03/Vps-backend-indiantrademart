@@ -11,7 +11,7 @@
  */
 
 import express from 'express';
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 import { writeAuditLog } from '../lib/audit.js';
 import { invalidateDirCache } from '../lib/cacheMiddleware.js';
@@ -41,21 +41,21 @@ async function resolveEmployee(req, res) {
     return null;
   }
 
-  let { data: emp } = await supabase
+  let { data: emp } = await db
     .from('employees')
     .select('*')
     .eq('user_id', user.id)
     .maybeSingle();
 
   if (!emp && user.email) {
-    const { data: byEmail } = await supabase
+    const { data: byEmail } = await db
       .from('employees')
       .select('*')
       .ilike('email', user.email)
       .maybeSingle();
     emp = byEmail || null;
     if (emp && !emp.user_id) {
-      await supabase.from('employees').update({ user_id: user.id }).eq('id', emp.id).catch(() => {});
+      await db.from('employees').update({ user_id: user.id }).eq('id', emp.id).catch(() => {});
       emp = { ...emp, user_id: user.id };
     }
   }
@@ -73,7 +73,7 @@ async function resolveEmployee(req, res) {
   return emp;
 }
 
-/** Build a Supabase OR filter scoped to the employee's assigned vendors. */
+/** Build an OR filter scoped to the employee's assigned vendors. */
 function buildVendorFilter(userId, employeeId) {
   const parts = [];
   if (userId) {
@@ -137,8 +137,8 @@ async function ensureVendorAuthUser({ email, password, fullName, phone }) {
   const existing = await getPublicUserByEmail(email);
 
   if (existing?.id) {
-    if (supabase?.auth?.admin?.updateUserById) {
-      supabase.auth.admin
+    if (db?.auth?.admin?.updateUserById) {
+      db.auth.admin
         .updateUserById(existing.id, {
           password,
           email_confirm: true,
@@ -146,9 +146,9 @@ async function ensureVendorAuthUser({ email, password, fullName, phone }) {
           app_metadata: { role: 'VENDOR' },
         })
         .then(({ error }) => {
-          if (error) logger.warn('[DataEntry] Supabase auth password update failed:', error.message);
+          if (error) logger.warn('[DataEntry] MySQL auth password update failed:', error.message);
         })
-        .catch((error) => logger.warn('[DataEntry] Supabase auth password update failed:', error?.message || error));
+        .catch((error) => logger.warn('[DataEntry] MySQL auth password update failed:', error?.message || error));
     }
 
     return upsertPublicUser({
@@ -163,8 +163,8 @@ async function ensureVendorAuthUser({ email, password, fullName, phone }) {
   }
 
   let authUserId = null;
-  if (supabase?.auth?.admin?.createUser) {
-    const { data, error } = await supabase.auth.admin.createUser({
+  if (db?.auth?.admin?.createUser) {
+    const { data, error } = await db.auth.admin.createUser({
       email,
       password,
       email_confirm: true,
@@ -220,26 +220,26 @@ router.get('/dashboard/stats', requireAuth(), async (req, res) => {
     const KYC_PENDING = ['PENDING', 'SUBMITTED'];
     const KYC_APPROVED = ['APPROVED', 'VERIFIED'];
 
-    let qs = supabase.from('vendors').select('*', { count: 'exact', head: true });
+    let qs = db.from('vendors').select('*', { count: 'exact', head: true });
     if (filter) qs = qs.or(filter);
     const { count: totalVendors } = await qs;
 
-    let idQ = supabase.from('vendors').select('id');
+    let idQ = db.from('vendors').select('id');
     if (filter) idQ = idQ.or(filter);
     const { data: vendorRows } = await idQ;
     const ids = (vendorRows || []).map(v => v.id);
 
     let totalProducts = 0;
     if (ids.length > 0) {
-      const { count } = await supabase.from('products').select('*', { count: 'exact', head: true }).in('vendor_id', ids);
+      const { count } = await db.from('products').select('*', { count: 'exact', head: true }).in('vendor_id', ids);
       totalProducts = count || 0;
     }
 
-    let pQ = supabase.from('vendors').select('*', { count: 'exact', head: true }).in('kyc_status', KYC_PENDING);
+    let pQ = db.from('vendors').select('*', { count: 'exact', head: true }).in('kyc_status', KYC_PENDING);
     if (filter) pQ = pQ.or(filter);
     const { count: pendingKyc } = await pQ;
 
-    let aQ = supabase.from('vendors').select('*', { count: 'exact', head: true }).in('kyc_status', KYC_APPROVED);
+    let aQ = db.from('vendors').select('*', { count: 'exact', head: true }).in('kyc_status', KYC_APPROVED);
     if (filter) aQ = aQ.or(filter);
     const { count: approvedKyc } = await aQ;
 
@@ -264,7 +264,7 @@ router.get('/dashboard/recent-activities', requireAuth(), async (req, res) => {
     if (!emp) return;
 
     const filter = buildVendorFilter(emp.user_id, emp.id);
-    let q = supabase.from('vendors')
+    let q = db.from('vendors')
       .select('id, company_name, created_at, kyc_status')
       .order('created_at', { ascending: false })
       .limit(10);
@@ -290,7 +290,7 @@ router.get('/dashboard/category-requests', requireAuth(), async (req, res) => {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
     const limit = Math.min(Number(req.query.limit || 6), 50);
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('support_tickets')
       .select('id, subject, description, status, priority, created_at, vendor_id, vendors(company_name), attachments')
       .eq('category', 'Category Request')
@@ -315,7 +315,7 @@ router.get('/vendors', requireAuth(), async (req, res) => {
     const KYC_PENDING = ['PENDING', 'SUBMITTED'];
     const KYC_APPROVED = ['APPROVED', 'VERIFIED'];
 
-    let q = supabase.from('vendors').select('*, products(count)').order('created_at', { ascending: false });
+    let q = db.from('vendors').select('*, products(count)').order('created_at', { ascending: false });
 
     if (mine === 'true') {
       const filter = buildVendorFilter(emp.user_id, emp.id);
@@ -347,7 +347,7 @@ router.get('/vendors/:vendorId', requireAuth(), async (req, res) => {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
 
-    const { data, error } = await supabase.from('vendors').select('*').eq('id', req.params.vendorId).maybeSingle();
+    const { data, error } = await db.from('vendors').select('*').eq('id', req.params.vendorId).maybeSingle();
     if (error) return res.status(500).json({ success: false, error: error.message });
     if (!data) return res.status(404).json({ success: false, error: 'Vendor not found' });
     return res.json({ success: true, vendor: data });
@@ -384,7 +384,7 @@ router.post('/vendors', requireAuth(), async (req, res) => {
       return res.status(400).json({ success: false, error: 'State and city are required' });
     }
 
-    const existingVendorByEmail = await supabase
+    const existingVendorByEmail = await db
       .from('vendors')
       .select('id, vendor_id, company_name, email')
       .eq('email', vendorData.email)
@@ -447,7 +447,7 @@ router.post('/vendors', requireAuth(), async (req, res) => {
       is_password_temporary: true,
     };
 
-    const { data, error } = await supabase.from('vendors').insert([payload]).select().single();
+    const { data, error } = await db.from('vendors').insert([payload]).select().single();
     if (error) return res.status(500).json({ success: false, error: error.message });
 
     await writeAuditLog({ action: 'VENDOR_CREATED', entity_type: 'vendor', entity_id: data.id, actor_id: actorId }).catch(() => {});
@@ -483,7 +483,7 @@ router.get('/vendors/:vendorId/documents', requireAuth(), async (req, res) => {
   try {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendor_documents')
       .select('*')
       .eq('vendor_id', req.params.vendorId)
@@ -501,7 +501,7 @@ router.post('/vendors/:vendorId/documents', requireAuth(), async (req, res) => {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
     const { document_type, document_url, original_name } = req.body || {};
-    const { data, error } = await supabase.from('vendor_documents').insert([{
+    const { data, error } = await db.from('vendor_documents').insert([{
       vendor_id: req.params.vendorId,
       document_type,
       document_url,
@@ -521,12 +521,12 @@ router.get('/vendors/:vendorId/kyc-grouped', requireAuth(), async (req, res) => 
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
     const KYC_PENDING = ['PENDING', 'SUBMITTED'];
-    const { data: vendors, error: vErr } = await supabase
+    const { data: vendors, error: vErr } = await db
       .from('vendors').select('*').in('kyc_status', KYC_PENDING).order('created_at', { ascending: false });
     if (vErr) return res.status(500).json({ success: false, error: vErr.message });
     if (!vendors?.length) return res.json({ success: true, withDocuments: [], withoutDocuments: [] });
 
-    const { data: allDocs } = await supabase
+    const { data: allDocs } = await db
       .from('vendor_documents').select('vendor_id').in('vendor_id', vendors.map(v => v.id));
     const withDocs = new Set((allDocs || []).map(d => d.vendor_id));
 
@@ -547,14 +547,14 @@ router.get('/vendors/:vendorId/products', requireAuth(), async (req, res) => {
   try {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
-    const { data: products, error } = await supabase
+    const { data: products, error } = await db
       .from('products').select('*').eq('vendor_id', req.params.vendorId).order('created_at', { ascending: false });
     if (error) return res.status(500).json({ success: false, error: error.message });
 
     if (!products?.length) return res.json({ success: true, products: [] });
 
     const ids = products.map(p => p.id);
-    const { data: images } = await supabase.from('product_images').select('*').in('product_id', ids);
+    const { data: images } = await db.from('product_images').select('*').in('product_id', ids);
     const imgMap = {};
     (images || []).forEach(img => { imgMap[img.product_id] = imgMap[img.product_id] || []; imgMap[img.product_id].push(img); });
 
@@ -569,11 +569,11 @@ router.get('/products/:productId', requireAuth(), async (req, res) => {
   try {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
-    const { data, error } = await supabase.from('products').select('*').eq('id', req.params.productId).maybeSingle();
+    const { data, error } = await db.from('products').select('*').eq('id', req.params.productId).maybeSingle();
     if (error) return res.status(500).json({ success: false, error: error.message });
     if (!data) return res.status(404).json({ success: false, error: 'Product not found' });
 
-    const { data: images } = await supabase.from('product_images').select('*').eq('product_id', req.params.productId);
+    const { data: images } = await db.from('product_images').select('*').eq('product_id', req.params.productId);
     return res.json({ success: true, product: { ...data, product_images: images || [] } });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });
@@ -601,7 +601,7 @@ router.post('/products', requireAuth(), async (req, res) => {
 
     let data = null, lastError = null;
     for (const payload of candidates) {
-      const { data: d, error: e } = await supabase.from('products').insert([payload]).select().single();
+      const { data: d, error: e } = await db.from('products').insert([payload]).select().single();
       if (!e) { data = d; break; }
       const isColMissing =
         isMissingSchemaColumnError(e, 'created_by') ||
@@ -623,7 +623,7 @@ router.put('/products/:productId', requireAuth(), async (req, res) => {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
     const updatePayload = sanitizeProductPayload(req.body);
-    const { error } = await supabase.from('products').update(updatePayload).eq('id', req.params.productId);
+    const { error } = await db.from('products').update(updatePayload).eq('id', req.params.productId);
     if (error) return res.status(500).json({ success: false, error: error.message });
     invalidateDirCache();
     return res.json({ success: true, product: { id: req.params.productId, ...updatePayload } });
@@ -638,7 +638,7 @@ router.post('/products/:productId/images', requireAuth(), async (req, res) => {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
     const { image_url } = req.body || {};
-    const { data, error } = await supabase.from('product_images')
+    const { data, error } = await db.from('product_images')
       .insert([{ product_id: req.params.productId, image_url }]).select().single();
     if (error) return res.status(500).json({ success: false, error: error.message });
     return res.status(201).json({ success: true, image: data });
@@ -652,7 +652,7 @@ router.post('/products/:productId/images', requireAuth(), async (req, res) => {
 // GET /api/data-entry/categories/tree
 router.get('/categories/tree', requireAuth(), async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('head_categories')
       .select('id, name, slug, image_url, sub_categories(id, name, slug, micro_categories(id, name, slug))')
       .order('name');
@@ -668,7 +668,7 @@ router.get('/categories/head', requireAuth(), async (req, res) => {
   try {
     const withSubs = req.query.withSubs === 'true';
     const select = withSubs ? '*, sub_categories(count)' : '*';
-    const { data, error } = await supabase.from('head_categories').select(select).order('name');
+    const { data, error } = await db.from('head_categories').select(select).order('name');
     if (error) return res.status(500).json({ success: false, error: error.message });
     return res.json({ success: true, categories: data || [] });
   } catch (e) {
@@ -682,7 +682,7 @@ router.post('/categories/head', requireAuth(), async (req, res) => {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
     const payload = { ...req.body, slug: req.body.slug || makeSlug(req.body.name) };
-    const { data, error } = await supabase.from('head_categories').insert([payload]).select().single();
+    const { data, error } = await db.from('head_categories').insert([payload]).select().single();
     if (error) return res.status(500).json({ success: false, error: error.message });
     invalidateDirCache();
     return res.status(201).json({ success: true, category: data });
@@ -696,7 +696,7 @@ router.put('/categories/head/:id', requireAuth(), async (req, res) => {
   try {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
-    const { data, error } = await supabase.from('head_categories').update(req.body).eq('id', req.params.id).select().single();
+    const { data, error } = await db.from('head_categories').update(req.body).eq('id', req.params.id).select().single();
     if (error) return res.status(500).json({ success: false, error: error.message });
     invalidateDirCache();
     return res.json({ success: true, category: data });
@@ -710,7 +710,7 @@ router.delete('/categories/head/:id', requireAuth(), async (req, res) => {
   try {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
-    const { error } = await supabase.from('head_categories').delete().eq('id', req.params.id);
+    const { error } = await db.from('head_categories').delete().eq('id', req.params.id);
     if (error) return res.status(500).json({ success: false, error: error.message });
     invalidateDirCache();
     return res.json({ success: true });
@@ -723,7 +723,7 @@ router.delete('/categories/head/:id', requireAuth(), async (req, res) => {
 router.get('/categories/sub', requireAuth(), async (req, res) => {
   try {
     const { headId } = req.query;
-    let q = supabase.from('sub_categories').select('*, micro_categories(count)').order('name');
+    let q = db.from('sub_categories').select('*, micro_categories(count)').order('name');
     if (headId) q = q.eq('head_category_id', headId);
     const { data, error } = await q;
     if (error) return res.status(500).json({ success: false, error: error.message });
@@ -739,7 +739,7 @@ router.post('/categories/sub', requireAuth(), async (req, res) => {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
     const payload = { ...req.body, slug: req.body.slug || makeSlug(req.body.name) };
-    const { data, error } = await supabase.from('sub_categories').insert([payload]).select().single();
+    const { data, error } = await db.from('sub_categories').insert([payload]).select().single();
     if (error) return res.status(500).json({ success: false, error: error.message });
     invalidateDirCache();
     return res.status(201).json({ success: true, category: data });
@@ -753,7 +753,7 @@ router.put('/categories/sub/:id', requireAuth(), async (req, res) => {
   try {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
-    const { data, error } = await supabase.from('sub_categories').update(req.body).eq('id', req.params.id).select().single();
+    const { data, error } = await db.from('sub_categories').update(req.body).eq('id', req.params.id).select().single();
     if (error) return res.status(500).json({ success: false, error: error.message });
     invalidateDirCache();
     return res.json({ success: true, category: data });
@@ -767,7 +767,7 @@ router.delete('/categories/sub/:id', requireAuth(), async (req, res) => {
   try {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
-    const { error } = await supabase.from('sub_categories').delete().eq('id', req.params.id);
+    const { error } = await db.from('sub_categories').delete().eq('id', req.params.id);
     if (error) return res.status(500).json({ success: false, error: error.message });
     invalidateDirCache();
     return res.json({ success: true });
@@ -780,7 +780,7 @@ router.delete('/categories/sub/:id', requireAuth(), async (req, res) => {
 router.get('/categories/micro', requireAuth(), async (req, res) => {
   try {
     const { subId } = req.query;
-    let q = supabase.from('micro_categories').select('*').order('name');
+    let q = db.from('micro_categories').select('*').order('name');
     if (subId) q = q.eq('sub_category_id', subId);
     const { data, error } = await q;
     if (error) return res.status(500).json({ success: false, error: error.message });
@@ -796,7 +796,7 @@ router.post('/categories/micro', requireAuth(), async (req, res) => {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
     const payload = { ...req.body, slug: req.body.slug || makeSlug(req.body.name) };
-    const { data, error } = await supabase.from('micro_categories').insert([payload]).select().single();
+    const { data, error } = await db.from('micro_categories').insert([payload]).select().single();
     if (error) return res.status(500).json({ success: false, error: error.message });
     invalidateDirCache();
     return res.status(201).json({ success: true, category: data });
@@ -810,7 +810,7 @@ router.put('/categories/micro/:id', requireAuth(), async (req, res) => {
   try {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
-    const { data, error } = await supabase.from('micro_categories').update(req.body).eq('id', req.params.id).select().single();
+    const { data, error } = await db.from('micro_categories').update(req.body).eq('id', req.params.id).select().single();
     if (error) return res.status(500).json({ success: false, error: error.message });
     invalidateDirCache();
     return res.json({ success: true, category: data });
@@ -824,7 +824,7 @@ router.delete('/categories/micro/:id', requireAuth(), async (req, res) => {
   try {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
-    const { error } = await supabase.from('micro_categories').delete().eq('id', req.params.id);
+    const { error } = await db.from('micro_categories').delete().eq('id', req.params.id);
     if (error) return res.status(500).json({ success: false, error: error.message });
     invalidateDirCache();
     return res.json({ success: true });
@@ -849,25 +849,25 @@ router.post('/categories/import-csv', requireAuth(), async (req, res) => {
         if (!headName || !subName || !microName) throw new Error('Missing names');
 
         const headSlug = makeSlug(headName);
-        let { data: head } = await supabase.from('head_categories').select('id').eq('slug', headSlug).maybeSingle();
+        let { data: head } = await db.from('head_categories').select('id').eq('slug', headSlug).maybeSingle();
         if (!head) {
-          const { data: nh, error } = await supabase.from('head_categories').insert([{ name: headName, slug: headSlug, is_active: true }]).select().single();
+          const { data: nh, error } = await db.from('head_categories').insert([{ name: headName, slug: headSlug, is_active: true }]).select().single();
           if (error) throw error;
           head = nh;
         }
 
         const subSlug = makeSlug(subName);
-        let { data: sub } = await supabase.from('sub_categories').select('id').eq('slug', subSlug).eq('head_category_id', head.id).maybeSingle();
+        let { data: sub } = await db.from('sub_categories').select('id').eq('slug', subSlug).eq('head_category_id', head.id).maybeSingle();
         if (!sub) {
-          const { data: ns, error } = await supabase.from('sub_categories').insert([{ head_category_id: head.id, name: subName, slug: subSlug, is_active: true }]).select().single();
+          const { data: ns, error } = await db.from('sub_categories').insert([{ head_category_id: head.id, name: subName, slug: subSlug, is_active: true }]).select().single();
           if (error) throw error;
           sub = ns;
         }
 
         const microSlug = makeSlug(microName);
-        const { data: existing } = await supabase.from('micro_categories').select('id').eq('slug', microSlug).eq('sub_category_id', sub.id).maybeSingle();
+        const { data: existing } = await db.from('micro_categories').select('id').eq('slug', microSlug).eq('sub_category_id', sub.id).maybeSingle();
         if (!existing) {
-          const { error } = await supabase.from('micro_categories').insert([{
+          const { error } = await db.from('micro_categories').insert([{
             sub_category_id: sub.id, name: microName, slug: microSlug,
             description: row.description, meta_tags: row.meta_tags, is_active: true,
           }]);
@@ -888,7 +888,7 @@ router.post('/categories/import-csv', requireAuth(), async (req, res) => {
 // GET /api/data-entry/locations/states
 router.get('/locations/states', requireAuth(), async (req, res) => {
   try {
-    const { data, error } = await supabase.from('states').select('*').order('name');
+    const { data, error } = await db.from('states').select('*').order('name');
     if (error) return res.status(500).json({ success: false, error: error.message });
     return res.json({ success: true, states: data || [] });
   } catch (e) {
@@ -903,7 +903,7 @@ router.post('/locations/states', requireAuth(), async (req, res) => {
     if (!emp) return;
     const { name } = req.body || {};
     const slug = makeSlug(name);
-    const { error } = await supabase.from('states').insert([{ name, slug, is_active: true }]);
+    const { error } = await db.from('states').insert([{ name, slug, is_active: true }]);
     if (error) return res.status(500).json({ success: false, error: error.message });
     invalidateDirCache();
     return res.status(201).json({ success: true });
@@ -918,7 +918,7 @@ router.put('/locations/states/:id', requireAuth(), async (req, res) => {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
     const { name } = req.body || {};
-    const { error } = await supabase.from('states').update({ name }).eq('id', req.params.id);
+    const { error } = await db.from('states').update({ name }).eq('id', req.params.id);
     if (error) return res.status(500).json({ success: false, error: error.message });
     invalidateDirCache();
     return res.json({ success: true });
@@ -932,7 +932,7 @@ router.delete('/locations/states/:id', requireAuth(), async (req, res) => {
   try {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
-    const { error } = await supabase.from('states').delete().eq('id', req.params.id);
+    const { error } = await db.from('states').delete().eq('id', req.params.id);
     if (error) return res.status(500).json({ success: false, error: error.message });
     invalidateDirCache();
     return res.json({ success: true });
@@ -945,7 +945,7 @@ router.delete('/locations/states/:id', requireAuth(), async (req, res) => {
 router.get('/locations/cities', requireAuth(), async (req, res) => {
   try {
     const { stateId } = req.query;
-    let q = supabase.from('cities').select('*').order('name');
+    let q = db.from('cities').select('*').order('name');
     if (stateId) q = q.eq('state_id', stateId);
     const { data, error } = await q;
     if (error) return res.status(500).json({ success: false, error: error.message });
@@ -962,7 +962,7 @@ router.post('/locations/cities', requireAuth(), async (req, res) => {
     if (!emp) return;
     const { state_id, name } = req.body || {};
     const slug = makeSlug(name);
-    const { error } = await supabase.from('cities').insert([{ state_id, name, slug, is_active: true }]);
+    const { error } = await db.from('cities').insert([{ state_id, name, slug, is_active: true }]);
     if (error) return res.status(500).json({ success: false, error: error.message });
     invalidateDirCache();
     return res.status(201).json({ success: true });
@@ -977,7 +977,7 @@ router.put('/locations/cities/:id', requireAuth(), async (req, res) => {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
     const { name } = req.body || {};
-    const { error } = await supabase.from('cities').update({ name }).eq('id', req.params.id);
+    const { error } = await db.from('cities').update({ name }).eq('id', req.params.id);
     if (error) return res.status(500).json({ success: false, error: error.message });
     invalidateDirCache();
     return res.json({ success: true });
@@ -991,7 +991,7 @@ router.delete('/locations/cities/:id', requireAuth(), async (req, res) => {
   try {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
-    const { error } = await supabase.from('cities').delete().eq('id', req.params.id);
+    const { error } = await db.from('cities').delete().eq('id', req.params.id);
     if (error) return res.status(500).json({ success: false, error: error.message });
     invalidateDirCache();
     return res.json({ success: true });
@@ -1014,13 +1014,13 @@ router.post('/locations/import-csv', requireAuth(), async (req, res) => {
         const cName = row.city_name || row.City;
         if (!sName || !cName) { failed++; continue; }
 
-        let { data: s } = await supabase.from('states').select('id').ilike('name', sName).maybeSingle();
+        let { data: s } = await db.from('states').select('id').ilike('name', sName).maybeSingle();
         if (!s) {
-          const { data: ns } = await supabase.from('states').insert([{ name: sName, slug: makeSlug(sName), is_active: true }]).select().single();
+          const { data: ns } = await db.from('states').insert([{ name: sName, slug: makeSlug(sName), is_active: true }]).select().single();
           s = ns;
         }
         if (s?.id) {
-          await supabase.from('cities').insert([{ state_id: s.id, name: cName, slug: makeSlug(cName), is_active: true }]);
+          await db.from('cities').insert([{ state_id: s.id, name: cName, slug: makeSlug(cName), is_active: true }]);
           success++;
         } else { failed++; }
       } catch { failed++; }
@@ -1039,7 +1039,7 @@ router.get('/vendors/:vendorId/bank-details', requireAuth(), async (req, res) =>
   try {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
-    const { data, error } = await supabase.from('vendor_bank_details').select('*').eq('vendor_id', req.params.vendorId);
+    const { data, error } = await db.from('vendor_bank_details').select('*').eq('vendor_id', req.params.vendorId);
     if (error) return res.status(500).json({ success: false, error: error.message });
     return res.json({ success: true, bankDetails: data || [] });
   } catch (e) {
@@ -1052,7 +1052,7 @@ router.post('/vendors/:vendorId/bank-details', requireAuth(), async (req, res) =
   try {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
-    const { data, error } = await supabase.from('vendor_bank_details')
+    const { data, error } = await db.from('vendor_bank_details')
       .insert([{ vendor_id: req.params.vendorId, ...req.body }]).select().single();
     if (error) return res.status(500).json({ success: false, error: error.message });
     return res.status(201).json({ success: true, bankDetail: data });
@@ -1066,7 +1066,7 @@ router.get('/vendors/:vendorId/contacts', requireAuth(), async (req, res) => {
   try {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
-    const { data, error } = await supabase.from('vendor_contact_persons').select('*').eq('vendor_id', req.params.vendorId);
+    const { data, error } = await db.from('vendor_contact_persons').select('*').eq('vendor_id', req.params.vendorId);
     if (error) return res.status(500).json({ success: false, error: error.message });
     return res.json({ success: true, contacts: data || [] });
   } catch (e) {
@@ -1079,7 +1079,7 @@ router.post('/vendors/:vendorId/contacts', requireAuth(), async (req, res) => {
   try {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
-    const { data, error } = await supabase.from('vendor_contact_persons')
+    const { data, error } = await db.from('vendor_contact_persons')
       .insert([{ vendor_id: req.params.vendorId, ...req.body }]).select().single();
     if (error) return res.status(500).json({ success: false, error: error.message });
     return res.status(201).json({ success: true, contact: data });
@@ -1093,7 +1093,7 @@ router.get('/vendors/:vendorId/subscriptions', requireAuth(), async (req, res) =
   try {
     const emp = await resolveEmployee(req, res);
     if (!emp) return;
-    const { data, error } = await supabase.from('vendor_plan_subscriptions')
+    const { data, error } = await db.from('vendor_plan_subscriptions')
       .select('*, vendor_plans(*)').eq('vendor_id', req.params.vendorId);
     if (error) return res.status(500).json({ success: false, error: error.message });
     return res.json({ success: true, subscriptions: data || [] });
@@ -1105,7 +1105,7 @@ router.get('/vendors/:vendorId/subscriptions', requireAuth(), async (req, res) =
 // GET /api/data-entry/vendor-plans
 router.get('/vendor-plans', requireAuth(), async (req, res) => {
   try {
-    const { data, error } = await supabase.from('vendor_plans').select('*').eq('is_active', true).order('price');
+    const { data, error } = await db.from('vendor_plans').select('*').eq('is_active', true).order('price');
     if (error) return res.status(500).json({ success: false, error: error.message });
     return res.json({ success: true, plans: data || [] });
   } catch (e) {

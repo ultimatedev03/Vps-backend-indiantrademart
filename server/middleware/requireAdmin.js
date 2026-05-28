@@ -1,4 +1,4 @@
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import { normalizeRole } from '../lib/auth.js';
 import { requireAuth } from './requireAuth.js';
 
@@ -9,7 +9,7 @@ export const requireAdmin = async (req, res, next) => {
       const authUser = req.user;
       if (!authUser?.id) return res.status(401).json({ error: 'Unauthorized' });
 
-      const { data: emp } = await supabase
+      const { data: emp } = await db
         .from('employees')
         .select('role,status,email')
         .or(
@@ -40,7 +40,7 @@ export const requireAdmin = async (req, res, next) => {
       };
 
       if (!emp.user_id && authUser.id) {
-        await supabase.from('employees').update({ user_id: authUser.id }).eq('email', emp.email);
+        await db.from('employees').update({ user_id: authUser.id }).eq('email', emp.email);
       }
 
       return next();

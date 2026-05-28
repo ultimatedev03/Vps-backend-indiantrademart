@@ -1,6 +1,6 @@
 import { logger } from '../utils/logger.js';
 import express from 'express';
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import { notifyUser } from '../lib/notify.js';
 import { writeAuditLog } from '../lib/audit.js';
 import {
@@ -31,7 +31,7 @@ async function findPublicUserByEmail(email) {
   const target = normalizeEmail(email);
   if (!target) return null;
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('users')
     .select('id, email')
     .eq('email', target)
@@ -54,7 +54,7 @@ async function findAuthUserByEmail(email) {
 async function ensureEmployeeAuthUser(employee, password) {
   const existingId = employee?.user_id || null;
   if (existingId) {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('users')
       .select('id')
       .eq('id', existingId)
@@ -111,7 +111,7 @@ async function ensureEmployeeAuthUser(employee, password) {
 
   const userId = publicUser.id;
 
-  await supabase
+  await db
     .from('employees')
     .update({ user_id: userId })
     .eq('id', employee.id);
@@ -120,7 +120,7 @@ async function ensureEmployeeAuthUser(employee, password) {
 }
 
 async function insertSuperadminWithFallback(payload) {
-  const first = await supabase
+  const first = await db
     .from('superadmin_users')
     .insert([payload])
     .select('id, email, role, is_active, created_at')
@@ -142,7 +142,7 @@ async function insertSuperadminWithFallback(payload) {
   const retryPayload = { ...payload };
   delete retryPayload.full_name;
 
-  return supabase
+  return db
     .from('superadmin_users')
     .insert([retryPayload])
     .select('id, email, role, is_active, created_at')
@@ -291,7 +291,7 @@ function isMissingVendorPlanColumnError(error, columnName) {
 }
 
 async function insertVendorPlanWithFallback(payload) {
-  const first = await supabase
+  const first = await db
     .from('vendor_plans')
     .insert([payload])
     .select('*')
@@ -308,7 +308,7 @@ async function insertVendorPlanWithFallback(payload) {
   const retryPayload = { ...payload };
   delete retryPayload.description;
 
-  const retry = await supabase
+  const retry = await db
     .from('vendor_plans')
     .insert([retryPayload])
     .select('*')
@@ -321,7 +321,7 @@ async function insertVendorPlanWithFallback(payload) {
 }
 
 async function updateVendorPlanWithFallback(planId, updates) {
-  const first = await supabase
+  const first = await db
     .from('vendor_plans')
     .update(updates)
     .eq('id', planId)
@@ -349,7 +349,7 @@ async function updateVendorPlanWithFallback(planId, updates) {
     };
   }
 
-  const retry = await supabase
+  const retry = await db
     .from('vendor_plans')
     .update(retryUpdates)
     .eq('id', planId)
@@ -365,7 +365,7 @@ async function updateVendorPlanWithFallback(planId, updates) {
 async function syncActivePlanQuota(planId, limits) {
   if (!planId) return;
 
-  const { data: subscriptions, error: subError } = await supabase
+  const { data: subscriptions, error: subError } = await db
     .from('vendor_plan_subscriptions')
     .select('vendor_id')
     .eq('plan_id', planId)
@@ -385,7 +385,7 @@ async function syncActivePlanQuota(planId, limits) {
 
   if (vendorIds.length === 0) return;
 
-  const { error: quotaError } = await supabase
+  const { error: quotaError } = await db
     .from('vendor_lead_quota')
     .update({
       plan_id: planId,
@@ -403,7 +403,7 @@ async function syncActivePlanQuota(planId, limits) {
 
 async function ensureSystemConfigRow(superadminId) {
   const key = 'maintenance_mode';
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('system_config')
     .select('*')
     .eq('config_key', key)
@@ -429,7 +429,7 @@ async function ensureSystemConfigRow(superadminId) {
     updated_by: superadminId || null,
   };
 
-  const { data: inserted, error: insertError } = await supabase
+  const { data: inserted, error: insertError } = await db
     .from('system_config')
     .upsert(payload, { onConflict: 'config_key' })
     .select('*')
@@ -443,7 +443,7 @@ async function ensureSystemConfigRow(superadminId) {
 }
 
 async function deleteVendorCascade(vendorId) {
-  const { data: vendor, error: vendorError } = await supabase
+  const { data: vendor, error: vendorError } = await db
     .from('vendors')
     .select('id, user_id, company_name, email, vendor_id')
     .eq('id', vendorId)
@@ -459,29 +459,29 @@ async function deleteVendorCascade(vendorId) {
   const vendorUserId = vendor.user_id || null;
 
   // Products and product images
-  const { data: products } = await supabase
+  const { data: products } = await db
     .from('products')
     .select('id')
     .eq('vendor_id', vendorId);
   const productIds = (products || []).map((p) => p.id).filter(Boolean);
   if (productIds.length > 0) {
-    await supabase.from('product_images').delete().in('product_id', productIds);
+    await db.from('product_images').delete().in('product_id', productIds);
   }
-  await supabase.from('products').delete().eq('vendor_id', vendorId);
+  await db.from('products').delete().eq('vendor_id', vendorId);
 
   // Ticket messages -> support tickets
-  const { data: tickets } = await supabase
+  const { data: tickets } = await db
     .from('support_tickets')
     .select('id')
     .eq('vendor_id', vendorId);
   const ticketIds = (tickets || []).map((t) => t.id).filter(Boolean);
   if (ticketIds.length > 0) {
-    await supabase.from('ticket_messages').delete().in('ticket_id', ticketIds);
+    await db.from('ticket_messages').delete().in('ticket_id', ticketIds);
   }
-  await supabase.from('support_tickets').delete().eq('vendor_id', vendorId);
+  await db.from('support_tickets').delete().eq('vendor_id', vendorId);
 
   // Leads referencing vendor must be detached to avoid FK errors.
-  await supabase
+  await db
     .from('leads')
     .update({ vendor_id: null, status: 'AVAILABLE' })
     .eq('vendor_id', vendorId);
@@ -509,11 +509,11 @@ async function deleteVendorCascade(vendorId) {
 
   for (const table of tablesToDeleteByVendor) {
     // eslint-disable-next-line no-await-in-loop
-    await supabase.from(table).delete().eq('vendor_id', vendorId);
+    await db.from(table).delete().eq('vendor_id', vendorId);
   }
 
   // Finally delete vendor row.
-  const { error: deleteVendorError } = await supabase.from('vendors').delete().eq('id', vendorId);
+  const { error: deleteVendorError } = await db.from('vendors').delete().eq('id', vendorId);
   if (deleteVendorError) {
     throw new Error(deleteVendorError.message);
   }
@@ -521,7 +521,7 @@ async function deleteVendorCascade(vendorId) {
   // Best-effort delete of the auth user tied to this vendor.
   if (vendorUserId) {
     try {
-      await supabase.from('users').delete().eq('id', vendorUserId);
+      await db.from('users').delete().eq('id', vendorUserId);
     } catch (error) {
       logger.warn('[SuperAdmin] Failed to delete vendor public user:', error?.message || error);
     }
@@ -576,7 +576,7 @@ router.get('/states', async (req, res) => {
 
 router.get('/employees', async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('employees')
       .select('*')
       .order('created_at', { ascending: false });
@@ -656,7 +656,7 @@ router.post('/employees', async (req, res) => {
       created_at: nowIso(),
     };
 
-    const { data: employee, error: empError } = await supabase
+    const { data: employee, error: empError } = await db
       .from('employees')
       .insert([empPayload])
       .select('*')
@@ -664,7 +664,7 @@ router.post('/employees', async (req, res) => {
 
     if (empError) {
         try {
-          await supabase.from('users').delete().eq('id', userId);
+          await db.from('users').delete().eq('id', userId);
         } catch (error) {
           logger.warn('[SuperAdmin] Failed to rollback public user:', error?.message || error);
         }
@@ -709,7 +709,7 @@ router.delete('/employees/:employeeId', async (req, res) => {
       return res.status(400).json({ success: false, error: 'employeeId is required' });
     }
 
-    const { data: employee, error: empError } = await supabase
+    const { data: employee, error: empError } = await db
       .from('employees')
       .select('id, user_id, email, full_name, role')
       .eq('id', employeeId)
@@ -723,10 +723,10 @@ router.delete('/employees/:employeeId', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Employee not found' });
     }
 
-    await supabase.from('employees').delete().eq('id', employeeId);
+    await db.from('employees').delete().eq('id', employeeId);
 
       if (employee.user_id) {
-        await supabase.from('users').delete().eq('id', employee.user_id);
+        await db.from('users').delete().eq('id', employee.user_id);
       }
 
     await writeAuditLog({
@@ -761,7 +761,7 @@ router.put('/employees/:employeeId/password', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Password must be at least 6 characters' });
     }
 
-    const { data: employee, error: empError } = await supabase
+    const { data: employee, error: empError } = await db
       .from('employees')
       .select('id, user_id, email, full_name, role, department, phone')
       .eq('id', employeeId)
@@ -820,7 +820,7 @@ router.get('/vendors', async (req, res) => {
   try {
     const limit = clampLimit(req.query?.limit, 500, 2000);
     const offset = Math.max(0, Math.floor(Number(req.query?.offset) || 0));
-    const { data, error, count } = await supabase
+    const { data, error, count } = await db
       .from('vendors')
       .select(
         'id, vendor_id, company_name, owner_name, email, phone, kyc_status, created_at, is_active, is_verified, city, state',
@@ -897,7 +897,7 @@ router.get('/plans', async (req, res) => {
     const includeInactive = req.query?.include_inactive !== 'false';
     const limit = clampLimit(req.query?.limit, 200, 1000);
 
-    let query = supabase
+    let query = db
       .from('vendor_plans')
       .select('*')
       .order('price', { ascending: true })
@@ -989,7 +989,7 @@ router.put('/plans/:planId', async (req, res) => {
       return res.status(400).json({ success: false, error: 'planId is required' });
     }
 
-    const { data: existing, error: existingError } = await supabase
+    const { data: existing, error: existingError } = await db
       .from('vendor_plans')
       .select('*')
       .eq('id', planId)
@@ -1068,7 +1068,7 @@ router.delete('/plans/:planId', async (req, res) => {
       return res.status(400).json({ success: false, error: 'planId is required' });
     }
 
-    const { data: existing, error: existingError } = await supabase
+    const { data: existing, error: existingError } = await db
       .from('vendor_plans')
       .select('*')
       .eq('id', planId)
@@ -1086,16 +1086,16 @@ router.delete('/plans/:planId', async (req, res) => {
       { count: subscriptionHistoryCount, error: subHistoryError },
       { count: paymentHistoryCount, error: paymentHistoryError },
     ] = await Promise.all([
-      supabase
+      db
         .from('vendor_plan_subscriptions')
         .select('id', { head: true, count: 'exact' })
         .eq('plan_id', planId)
         .eq('status', 'ACTIVE'),
-      supabase
+      db
         .from('vendor_plan_subscriptions')
         .select('id', { head: true, count: 'exact' })
         .eq('plan_id', planId),
-      supabase
+      db
         .from('vendor_payments')
         .select('id', { head: true, count: 'exact' })
         .eq('plan_id', planId),
@@ -1126,7 +1126,7 @@ router.delete('/plans/:planId', async (req, res) => {
       });
     }
 
-    const { error: deleteError } = await supabase
+    const { error: deleteError } = await db
       .from('vendor_plans')
       .delete()
       .eq('id', planId);
@@ -1158,7 +1158,7 @@ router.delete('/plans/:planId', async (req, res) => {
 // -----------------------
 router.get('/finance/summary', async (req, res) => {
   try {
-    const { data: payments, error } = await supabase
+    const { data: payments, error } = await db
       .from('vendor_payments')
       .select('amount, net_amount, payment_date');
     if (error) return res.status(500).json({ success: false, error: error.message });
@@ -1201,7 +1201,7 @@ router.get('/finance/summary', async (req, res) => {
 router.get('/finance/payments', async (req, res) => {
   try {
     const { vendor_id, plan_id, from, to, limit = 200 } = req.query;
-    let query = supabase
+    let query = db
       .from('vendor_payments')
       .select(
         '*, vendor:vendors(id, vendor_id, company_name, email), plan:vendor_plans(id, name, price)'
@@ -1271,7 +1271,7 @@ router.put('/system-config', async (req, res) => {
       updated_by: req.superadmin?.id || null,
     };
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('system_config')
       .upsert(payload, { onConflict: 'config_key' })
       .select('*')
@@ -1306,7 +1306,7 @@ router.put('/system-config', async (req, res) => {
 // -----------------------
 router.get('/page-status', async (_req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('page_status')
       .select('*')
       .order('page_name', { ascending: true });
@@ -1339,7 +1339,7 @@ router.post('/page-status', async (req, res) => {
       updated_at: nowIso(),
     };
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('page_status')
       .insert([payload])
       .select('*')
@@ -1380,7 +1380,7 @@ router.put('/page-status/:pageId', async (req, res) => {
     if (req.body?.page_title != null) updates.page_title = String(req.body.page_title || '');
     if (req.body?.page_description != null) updates.page_description = String(req.body.page_description || '');
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('page_status')
       .update(updates)
       .eq('id', pageId)
@@ -1413,13 +1413,13 @@ router.delete('/page-status/:pageId', async (req, res) => {
       return res.status(400).json({ success: false, error: 'pageId is required' });
     }
 
-    const { data: existing } = await supabase
+    const { data: existing } = await db
       .from('page_status')
       .select('id, page_name, page_route')
       .eq('id', pageId)
       .maybeSingle();
 
-    const { error } = await supabase.from('page_status').delete().eq('id', pageId);
+    const { error } = await db.from('page_status').delete().eq('id', pageId);
     if (error) {
       return res.status(500).json({ success: false, error: error.message });
     }
@@ -1452,7 +1452,7 @@ router.get('/audit-logs', async (req, res) => {
 
     const cutoff = Number.isFinite(hoursBack) && hoursBack > 0 ? new Date(Date.now() - hoursBack * 60 * 60 * 1000) : null;
 
-    let query = supabase
+    let query = db
       .from('audit_logs')
       .select('*')
       .order('created_at', { ascending: false })
@@ -1508,7 +1508,7 @@ function normalizeText(value) {
   return String(value ?? '').trim();
 }
 
-// Supabase REST responses are capped per request, so monitoring queries must page through large tables.
+// Monitoring queries page through large tables to avoid capped API responses.
 async function fetchAllRows(buildQuery, pageSize = MONITORING_BATCH_SIZE) {
   const rows = [];
 
@@ -1526,11 +1526,11 @@ async function fetchAllRows(buildQuery, pageSize = MONITORING_BATCH_SIZE) {
 
 async function loadStateCatalog() {
   const [{ data: states, error: statesErr }, { data: regions, error: regionsErr }] = await Promise.all([
-    supabase
+    db
       .from('states')
       .select('id, name, slug, region_code')
       .order('name', { ascending: true }),
-    supabase
+    db
       .from('regions')
       .select('code, name, sort_order')
       .eq('is_active', true)
@@ -1642,7 +1642,7 @@ async function loadEmployeeScopeRows(employeeIds = []) {
   const ids = [...new Set((employeeIds || []).map((id) => normalizeText(id)).filter(Boolean))];
   if (!ids.length) return [];
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('employee_state_scope')
     .select('employee_id, state_id')
     .in('employee_id', ids);
@@ -1687,7 +1687,7 @@ async function syncEmployeeStateScope(employeeId, rawScope, stateCatalog = null)
   const catalog = stateCatalog || await loadStateCatalog();
   const { stateIds, stateNames } = normalizeRequestedStateScope(rawScope, catalog);
 
-  const { error: deleteError } = await supabase
+  const { error: deleteError } = await db
     .from('employee_state_scope')
     .delete()
     .eq('employee_id', employeeId);
@@ -1695,7 +1695,7 @@ async function syncEmployeeStateScope(employeeId, rawScope, stateCatalog = null)
   if (deleteError) throw new Error(deleteError.message || 'Failed to clear employee state scope');
 
   if (stateIds.length > 0) {
-    const { error: insertError } = await supabase
+    const { error: insertError } = await db
       .from('employee_state_scope')
       .insert(
         stateIds.map((stateId) => ({
@@ -1709,7 +1709,7 @@ async function syncEmployeeStateScope(employeeId, rawScope, stateCatalog = null)
     if (insertError) throw new Error(insertError.message || 'Failed to save employee state scope');
   }
 
-  const { error: employeeUpdateError } = await supabase
+  const { error: employeeUpdateError } = await db
     .from('employees')
     .update({ states_scope: stateNames, updated_at: nowIso() })
     .eq('id', employeeId);
@@ -1730,26 +1730,26 @@ router.get('/monitoring/overview', requireSuperAdmin, async (req, res) => {
       payments,
       tickets,
     ] = await Promise.all([
-      supabase
+      db
         .from('employees')
         .select('id, full_name, email, role, status, states_scope, last_login, created_at')
         .eq('role', 'ADMIN')
         .order('created_at', { ascending: false }),
       loadStateCatalog(),
       fetchAllRows(() =>
-        supabase
+        db
           .from('vendors')
           .select('id, state_id, state, kyc_status, is_active')
           .order('id', { ascending: true })
       ),
       fetchAllRows(() =>
-        supabase
+        db
           .from('vendor_payments')
           .select('id, vendor_id, amount, net_amount, payment_date')
           .order('id', { ascending: true })
       ),
       fetchAllRows(() =>
-        supabase
+        db
           .from('support_tickets')
           .select('id, status, vendor_id, created_at')
           .not('status', 'eq', 'RESOLVED')
@@ -1903,14 +1903,14 @@ router.get('/monitoring/admin-activity', requireSuperAdmin, async (req, res) => 
 
     const [logs, { data: adminsRaw, error: adminsErr }, stateCatalog] = await Promise.all([
       fetchAllRows(() =>
-        supabase
+        db
           .from('audit_logs')
           .select('id, user_id, action, details, created_at')
           .gte('created_at', cutoff)
           .order('created_at', { ascending: false })
           .order('id', { ascending: false })
       ),
-      supabase
+      db
         .from('employees')
         .select('id, full_name, email, role, states_scope, last_login, status')
         .eq('role', 'ADMIN'),
@@ -1969,13 +1969,13 @@ router.get('/monitoring/revenue-by-state', requireSuperAdmin, async (req, res) =
     const [stateCatalog, vendors, payments] = await Promise.all([
       loadStateCatalog(),
       fetchAllRows(() =>
-        supabase
+        db
           .from('vendors')
           .select('id, state_id, state')
           .order('id', { ascending: true })
       ),
       fetchAllRows(() =>
-        supabase
+        db
           .from('vendor_payments')
           .select('id, vendor_id, amount, net_amount, payment_date')
           .order('payment_date', { ascending: false })
@@ -2035,7 +2035,7 @@ router.put('/employees/:id/states-scope', requireSuperAdmin, async (req, res) =>
       return res.status(400).json({ success: false, error: 'state_scope_ids or states_scope must be an array' });
     }
 
-    const { data: emp } = await supabase
+    const { data: emp } = await db
       .from('employees')
       .select('id, role, full_name, email')
       .eq('id', id)
@@ -2071,7 +2071,7 @@ router.put('/employees/:id/states-scope', requireSuperAdmin, async (req, res) =>
 // List all superadmin accounts (GOD MODE sees everyone)
 router.get('/godmode/superadmins', requireGodMode, async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('superadmin_users')
       .select('id, email, role, is_active, last_login, created_at')
       .order('created_at', { ascending: false });
@@ -2106,7 +2106,7 @@ router.post('/godmode/superadmins', requireGodMode, async (req, res) => {
     // Only SUPERADMIN role can be created here (not GODMODE — there can only be 1 GOD MODE)
     const role = 'SUPERADMIN';
 
-    const { data: existing } = await supabase
+    const { data: existing } = await db
       .from('superadmin_users')
       .select('id')
       .eq('email', email)
@@ -2152,7 +2152,7 @@ router.put('/godmode/superadmins/:id/toggle-active', requireGodMode, async (req,
     const id = req.params.id;
     if (!id) return res.status(400).json({ success: false, error: 'id is required' });
 
-    const { data: target, error: fetchError } = await supabase
+    const { data: target, error: fetchError } = await db
       .from('superadmin_users')
       .select('id, email, role, is_active')
       .eq('id', id)
@@ -2168,7 +2168,7 @@ router.put('/godmode/superadmins/:id/toggle-active', requireGodMode, async (req,
 
     const newStatus = !target.is_active;
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('superadmin_users')
       .update({ is_active: newStatus, updated_at: nowIso() })
       .eq('id', id)
@@ -2198,7 +2198,7 @@ router.delete('/godmode/superadmins/:id', requireGodMode, async (req, res) => {
     const id = req.params.id;
     if (!id) return res.status(400).json({ success: false, error: 'id is required' });
 
-    const { data: target, error: fetchError } = await supabase
+    const { data: target, error: fetchError } = await db
       .from('superadmin_users')
       .select('id, email, role')
       .eq('id', id)
@@ -2212,7 +2212,7 @@ router.delete('/godmode/superadmins/:id', requireGodMode, async (req, res) => {
       return res.status(403).json({ success: false, error: 'Cannot delete GOD MODE account' });
     }
 
-    const { error } = await supabase.from('superadmin_users').delete().eq('id', id);
+    const { error } = await db.from('superadmin_users').delete().eq('id', id);
     if (error) return res.status(500).json({ success: false, error: error.message });
 
     await writeAuditLog({
@@ -2241,7 +2241,7 @@ router.put('/godmode/superadmins/:id/password', requireGodMode, async (req, res)
       return res.status(400).json({ success: false, error: 'Password must be at least 8 characters' });
     }
 
-    const { data: target } = await supabase
+    const { data: target } = await db
       .from('superadmin_users')
       .select('id, email, role')
       .eq('id', id)
@@ -2255,7 +2255,7 @@ router.put('/godmode/superadmins/:id/password', requireGodMode, async (req, res)
     const bcrypt = await import('bcryptjs');
     const password_hash = await bcrypt.default.hash(newPassword, 10);
 
-    const { error } = await supabase
+    const { error } = await db
       .from('superadmin_users')
       .update({ password_hash, updated_at: nowIso() })
       .eq('id', id);

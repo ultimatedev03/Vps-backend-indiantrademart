@@ -1,6 +1,6 @@
 import { logger } from '../utils/logger.js';
 import express from 'express';
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import { writeAuditLog } from '../lib/audit.js';
 import { requireEmployeeRoles } from '../middleware/requireEmployeeRoles.js';
 import { getReferralSettings } from '../lib/referralProgram.js';
@@ -160,7 +160,7 @@ const syncExpiredCouponsByRowScan = async () => {
 
   for (const table of COUPON_EXPIRY_SCAN_TABLES) {
     try {
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from(table)
         .select('*')
         .in('status', ACTIVE_COUPON_STATUSES)
@@ -182,7 +182,7 @@ const syncExpiredCouponsByRowScan = async () => {
 
       if (expiredIds.length === 0) continue;
 
-      await supabase.from(table).update({ status: 'EXPIRED' }).in('id', expiredIds);
+      await db.from(table).update({ status: 'EXPIRED' }).in('id', expiredIds);
     } catch {
       // Ignore schema mismatches here; another deployed table shape may match.
     }
@@ -197,7 +197,7 @@ const syncExpiredCoupons = async () => {
   couponExpirySyncInFlight = (async () => {
     for (const attempt of COUPON_EXPIRY_SYNC_ATTEMPTS) {
       try {
-        const { error } = await supabase
+        const { error } = await db
           .from(attempt.table)
           .update({ status: 'EXPIRED' })
           .lte(attempt.expiresColumn, new Date().toISOString())
@@ -289,7 +289,7 @@ async function resolveVendorScopeId(vendorRef) {
   if (isGlobalScopeValue(ref)) return null;
 
   if (looksLikeUuid(ref)) {
-    const { data: byId, error: byIdError } = await supabase
+    const { data: byId, error: byIdError } = await db
       .from('vendors')
       .select('id')
       .eq('id', ref)
@@ -298,7 +298,7 @@ async function resolveVendorScopeId(vendorRef) {
     if (byId?.id) return byId.id;
   }
 
-  const { data: byPublicId, error: byPublicIdError } = await supabase
+  const { data: byPublicId, error: byPublicIdError } = await db
     .from('vendors')
     .select('id')
     .ilike('vendor_id', ref)
@@ -309,7 +309,7 @@ async function resolveVendorScopeId(vendorRef) {
     throw new Error('Multiple vendors matched this vendor ID. Use vendor UUID.');
   }
 
-  const { data: byEmail, error: byEmailError } = await supabase
+  const { data: byEmail, error: byEmailError } = await db
     .from('vendors')
     .select('id')
     .ilike('email', ref)
@@ -328,7 +328,7 @@ async function resolveVendorScopeId(vendorRef) {
 router.get('/payments', async (req, res) => {
   try {
     const { vendor_id, plan_id, from, to, limit = 200 } = req.query;
-    let query = supabase
+    let query = db
       .from('vendor_payments')
       .select('*, vendor:vendors(id, vendor_id, company_name, email), plan:vendor_plans(id, name, price)')
       .order('payment_date', { ascending: false })
@@ -367,12 +367,12 @@ router.get('/payments', async (req, res) => {
 // GET /api/finance/summary
 router.get('/summary', async (_req, res) => {
   try {
-    const { data: payments, error } = await supabase
+    const { data: payments, error } = await db
       .from('vendor_payments')
       .select('amount, net_amount, payment_date');
     if (error) return res.status(500).json({ success: false, error: error.message });
 
-    const { data: leads, error: leadErr } = await supabase
+    const { data: leads, error: leadErr } = await db
       .from('lead_purchases')
       .select('amount, purchase_date, created_at');
     if (leadErr) {
@@ -432,7 +432,7 @@ router.get('/summary', async (_req, res) => {
 // GET /api/finance/coupons/pending — FINANCE sees their own pending submissions
 router.get('/coupons/pending', async (_req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendor_plan_coupons')
       .select('*')
       .eq('approval_status', 'PENDING_APPROVAL')
@@ -447,7 +447,7 @@ router.get('/coupons/pending', async (_req, res) => {
 // GET /api/finance/coupons
 router.get('/coupons', async (_req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendor_plan_coupons')
       .select('*')
       .order('created_at', { ascending: false });
@@ -465,7 +465,7 @@ router.get('/coupons', async (_req, res) => {
     let vendorMap = {};
 
     if (planIds.length) {
-      const { data: plans, error: planErr } = await supabase
+      const { data: plans, error: planErr } = await db
         .from('vendor_plans')
         .select('id, name')
         .in('id', planIds);
@@ -480,7 +480,7 @@ router.get('/coupons', async (_req, res) => {
     }
 
     if (vendorIds.length) {
-      const { data: vendors, error: vendorErr } = await supabase
+      const { data: vendors, error: vendorErr } = await db
         .from('vendors')
         .select('id, company_name, owner_name, vendor_id')
         .in('id', vendorIds);
@@ -582,7 +582,7 @@ router.post('/coupons', async (req, res) => {
       created_at: new Date().toISOString(),
     };
 
-    const { data, error } = await supabase.from('vendor_plan_coupons').insert([payload]).select().single();
+    const { data, error } = await db.from('vendor_plan_coupons').insert([payload]).select().single();
     if (error) {
       const normalizedMessage = String(error.message || '').toLowerCase();
       const status = error.code === '23505' ? 409 : 500;
@@ -631,7 +631,7 @@ router.put('/coupons/:id', async (req, res) => {
     const { id } = req.params;
     if (!id) return res.status(400).json({ success: false, error: 'id is required' });
 
-    const { data: existing, error: findErr } = await supabase
+    const { data: existing, error: findErr } = await db
       .from('vendor_plan_coupons')
       .select('id, code')
       .eq('id', id)
@@ -688,7 +688,7 @@ router.put('/coupons/:id', async (req, res) => {
 
     updates.updated_at = new Date().toISOString();
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendor_plan_coupons')
       .update(updates)
       .eq('id', id)
@@ -716,7 +716,7 @@ router.put('/coupons/:id', async (req, res) => {
 router.post('/coupons/:code/deactivate', async (req, res) => {
   try {
     const { code } = req.params;
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendor_plan_coupons')
       .update({ is_active: false })
       .eq('code', code.toUpperCase())
@@ -745,7 +745,7 @@ router.delete('/coupons/:id', async (req, res) => {
     const { id } = req.params;
     if (!id) return res.status(400).json({ success: false, error: 'Missing coupon id' });
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendor_plan_coupons')
       .delete()
       .eq('id', id)
@@ -773,14 +773,14 @@ router.delete('/coupons/:id', async (req, res) => {
 // GET /api/finance/referrals/settings
 router.get('/referrals/settings', async (_req, res) => {
   try {
-    const settings = await getReferralSettings(supabase);
+    const settings = await getReferralSettings(db);
 
     const [{ data: rules, error: rulesErr }, { data: plans, error: plansErr }] = await Promise.all([
-      supabase
+      db
         .from('referral_plan_rules')
         .select('*')
         .order('updated_at', { ascending: false }),
-      supabase
+      db
         .from('vendor_plans')
         .select('id, name, price, is_active')
         .order('price', { ascending: true }),
@@ -816,7 +816,7 @@ router.put('/referrals/settings', async (req, res) => {
       updated_at: new Date().toISOString(),
     };
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('referral_program_settings')
       .upsert([{ config_key: 'GLOBAL', ...update }], { onConflict: 'config_key' })
       .select('*')
@@ -897,7 +897,7 @@ router.put('/referrals/plan-rules/:planId', async (req, res) => {
       updated_at: new Date().toISOString(),
     };
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('referral_plan_rules')
       .upsert([payload], { onConflict: 'plan_id' })
       .select('*')
@@ -925,7 +925,7 @@ router.get('/referrals/cashouts', async (req, res) => {
     const status = asUpper(req.query.status || '');
     const limit = Math.max(1, Math.min(500, Number(req.query.limit || 200)));
 
-    let query = supabase
+    let query = db
       .from('vendor_referral_cashout_requests')
       .select('*, vendor:vendors(id, vendor_id, company_name, owner_name, email, phone)')
       .order('created_at', { ascending: false })
@@ -946,7 +946,7 @@ const revertCashoutAmount = async ({ requestRow, actorUserId }) => {
   const amount = Number(requestRow.requested_amount || 0);
   if (!vendorId || amount <= 0) return;
 
-  const { data: wallet, error: walletErr } = await supabase
+  const { data: wallet, error: walletErr } = await db
     .from('vendor_referral_wallets')
     .select('*')
     .eq('vendor_id', vendorId)
@@ -962,7 +962,7 @@ const revertCashoutAmount = async ({ requestRow, actorUserId }) => {
   };
 
   const nextAvailable = Number(current.available_balance || 0) + amount;
-  const { error: upErr } = await supabase
+  const { error: upErr } = await db
     .from('vendor_referral_wallets')
     .upsert(
       [
@@ -980,7 +980,7 @@ const revertCashoutAmount = async ({ requestRow, actorUserId }) => {
   if (upErr) throw new Error(upErr.message || 'Failed to update wallet balance');
 
   const referenceKey = `cashout_revert:${requestRow.id}`;
-  const { error: ledgerErr } = await supabase.from('vendor_referral_wallet_ledger').insert([
+  const { error: ledgerErr } = await db.from('vendor_referral_wallet_ledger').insert([
     {
       vendor_id: vendorId,
       cashout_request_id: requestRow.id,
@@ -1009,7 +1009,7 @@ router.post('/referrals/cashouts/:id/approve', async (req, res) => {
     const id = String(req.params.id || '').trim();
     if (!looksLikeUuid(id)) return res.status(400).json({ success: false, error: 'Invalid cashout id' });
 
-    const { data: row, error: rowErr } = await supabase
+    const { data: row, error: rowErr } = await db
       .from('vendor_referral_cashout_requests')
       .select('*')
       .eq('id', id)
@@ -1020,7 +1020,7 @@ router.post('/referrals/cashouts/:id/approve', async (req, res) => {
       return res.status(400).json({ success: false, error: `Cannot approve cashout in status ${row.status}` });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendor_referral_cashout_requests')
       .update({
         status: 'APPROVED',
@@ -1059,7 +1059,7 @@ router.post('/referrals/cashouts/:id/reject', async (req, res) => {
     if (!looksLikeUuid(id)) return res.status(400).json({ success: false, error: 'Invalid cashout id' });
     const rejectionReason = normalizeScopeToken(req.body?.rejection_reason || 'Rejected by finance');
 
-    const { data: row, error: rowErr } = await supabase
+    const { data: row, error: rowErr } = await db
       .from('vendor_referral_cashout_requests')
       .select('*')
       .eq('id', id)
@@ -1072,7 +1072,7 @@ router.post('/referrals/cashouts/:id/reject', async (req, res) => {
 
     await revertCashoutAmount({ requestRow: row, actorUserId: req.actor?.id || null });
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendor_referral_cashout_requests')
       .update({
         status: 'REJECTED',
@@ -1117,7 +1117,7 @@ router.post('/referrals/cashouts/:id/mark-paid', async (req, res) => {
 
     if (!utr) return res.status(400).json({ success: false, error: 'utr_number is required' });
 
-    const { data: row, error: rowErr } = await supabase
+    const { data: row, error: rowErr } = await db
       .from('vendor_referral_cashout_requests')
       .select('*')
       .eq('id', id)
@@ -1128,7 +1128,7 @@ router.post('/referrals/cashouts/:id/mark-paid', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Cashout must be APPROVED before mark-paid' });
     }
 
-    const { data: wallet, error: walletErr } = await supabase
+    const { data: wallet, error: walletErr } = await db
       .from('vendor_referral_wallets')
       .select('*')
       .eq('vendor_id', row.vendor_id)
@@ -1136,7 +1136,7 @@ router.post('/referrals/cashouts/:id/mark-paid', async (req, res) => {
     if (walletErr) return res.status(500).json({ success: false, error: walletErr.message });
 
     const nextPaidOut = Number(wallet?.lifetime_paid_out || 0) + Number(row.requested_amount || 0);
-    const { error: walletUpdateErr } = await supabase
+    const { error: walletUpdateErr } = await db
       .from('vendor_referral_wallets')
       .upsert(
         [
@@ -1153,7 +1153,7 @@ router.post('/referrals/cashouts/:id/mark-paid', async (req, res) => {
       );
     if (walletUpdateErr) return res.status(500).json({ success: false, error: walletUpdateErr.message });
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendor_referral_cashout_requests')
       .update({
         status: 'PAID',

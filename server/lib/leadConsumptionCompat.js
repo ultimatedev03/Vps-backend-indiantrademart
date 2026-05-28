@@ -97,9 +97,9 @@ const buildResultEnvelope = (result = {}) => {
   };
 };
 
-const readActiveSubscription = async (supabase, vendorId) => {
+const readActiveSubscription = async (db, vendorId) => {
   const nowIso = new Date().toISOString();
-  const { data: rows, error } = await supabase
+  const { data: rows, error } = await db
     .from("vendor_plan_subscriptions")
     .select("id, plan_id, status, start_date, end_date")
     .eq("vendor_id", vendorId)
@@ -125,7 +125,7 @@ const readActiveSubscription = async (supabase, vendorId) => {
 
   let plan = null;
   if (active.plan_id) {
-    const { data: planRow, error: planError } = await supabase
+    const { data: planRow, error: planError } = await db
       .from("vendor_plans")
       .select("id, name, daily_limit, weekly_limit, yearly_limit")
       .eq("id", active.plan_id)
@@ -151,12 +151,12 @@ const readActiveSubscription = async (supabase, vendorId) => {
   };
 };
 
-const readIncludedUsage = async (supabase, vendorId, now = new Date()) => {
+const readIncludedUsage = async (db, vendorId, now = new Date()) => {
   const dayStartIso = toIsoUtcDayStart(now);
   const weekStartIso = toIsoUtcWeekStart(now);
 
   // Only fetch included-quota purchases from this week (covers both daily & weekly).
-  const { data: rows, error } = await supabase
+  const { data: rows, error } = await db
     .from("lead_purchases")
     .select("consumption_type, purchase_datetime, purchase_date")
     .eq("vendor_id", vendorId)
@@ -171,7 +171,7 @@ const readIncludedUsage = async (supabase, vendorId, now = new Date()) => {
     }
 
     // Retry with purchase_date for legacy schemas.
-    const { data: legacyRows, error: legacyError } = await supabase
+    const { data: legacyRows, error: legacyError } = await db
       .from("lead_purchases")
       .select("consumption_type, purchase_date")
       .eq("vendor_id", vendorId)
@@ -207,8 +207,8 @@ const countIncludedUsage = (rows, dayStartIso, weekStartIso) => {
   return usage;
 };
 
-const readExistingPurchase = async (supabase, vendorId, leadId) => {
-  const { data: rows, error } = await supabase
+const readExistingPurchase = async (db, vendorId, leadId) => {
+  const { data: rows, error } = await db
     .from("lead_purchases")
     .select("*")
     .eq("vendor_id", vendorId)
@@ -223,7 +223,7 @@ const readExistingPurchase = async (supabase, vendorId, leadId) => {
 };
 
 const insertPurchaseCompat = async ({
-  supabase,
+  db,
   vendorId,
   leadId,
   consumptionType,
@@ -245,12 +245,12 @@ const insertPurchaseCompat = async ({
     updated_at: nowIso,
   };
 
-  const richInsert = await supabase.from("lead_purchases").insert([richPayload]).select("*").limit(1);
+  const richInsert = await db.from("lead_purchases").insert([richPayload]).select("*").limit(1);
   if (!richInsert.error) {
     const inserted = Array.isArray(richInsert.data) && richInsert.data.length ? richInsert.data[0] : null;
     if (inserted) return inserted;
   } else if (isUniqueViolationError(richInsert.error)) {
-    const existing = await readExistingPurchase(supabase, vendorId, leadId);
+    const existing = await readExistingPurchase(db, vendorId, leadId);
     if (existing) return existing;
   }
 
@@ -271,7 +271,7 @@ const insertPurchaseCompat = async ({
     purchase_date: nowIso,
   };
 
-  const legacyInsert = await supabase
+  const legacyInsert = await db
     .from("lead_purchases")
     .insert([legacyPayload])
     .select("*")
@@ -284,7 +284,7 @@ const insertPurchaseCompat = async ({
   }
 
   if (isUniqueViolationError(legacyInsert.error)) {
-    const existing = await readExistingPurchase(supabase, vendorId, leadId);
+    const existing = await readExistingPurchase(db, vendorId, leadId);
     if (existing) return existing;
   }
 
@@ -292,7 +292,7 @@ const insertPurchaseCompat = async ({
 };
 
 const syncQuotaSnapshot = async ({
-  supabase,
+  db,
   vendorId,
   planId,
   limits,
@@ -311,7 +311,7 @@ const syncQuotaSnapshot = async ({
       updated_at: nowIso,
     };
 
-    const { data: quotaRow, error: quotaReadError } = await supabase
+    const { data: quotaRow, error: quotaReadError } = await db
       .from("vendor_lead_quota")
       .select("*")
       .eq("vendor_id", vendorId)
@@ -322,11 +322,11 @@ const syncQuotaSnapshot = async ({
     }
 
     if (quotaRow) {
-      await supabase.from("vendor_lead_quota").update(payload).eq("vendor_id", vendorId);
+      await db.from("vendor_lead_quota").update(payload).eq("vendor_id", vendorId);
       return;
     }
 
-    await supabase
+    await db
       .from("vendor_lead_quota")
       .insert([{ vendor_id: vendorId, ...payload }]);
   } catch {
@@ -335,7 +335,7 @@ const syncQuotaSnapshot = async ({
 };
 
 const consumeLeadForVendorLegacy = async ({
-  supabase,
+  db,
   vendorId,
   leadId,
   mode = "AUTO",
@@ -353,7 +353,7 @@ const consumeLeadForVendorLegacy = async ({
   const now = new Date();
   const nowIso = now.toISOString();
 
-  const { data: lead, error: leadError } = await supabase
+  const { data: lead, error: leadError } = await db
     .from("leads")
     .select("*")
     .eq("id", leadId)
@@ -387,7 +387,7 @@ const consumeLeadForVendorLegacy = async ({
     };
   }
 
-  const subscriptionData = await readActiveSubscription(supabase, vendorId);
+  const subscriptionData = await readActiveSubscription(db, vendorId);
   const { subscription, limits, planName } = subscriptionData;
 
   if (!subscription) {
@@ -399,11 +399,11 @@ const consumeLeadForVendorLegacy = async ({
     };
   }
 
-  const usage = await readIncludedUsage(supabase, vendorId, now);
+  const usage = await readIncludedUsage(db, vendorId, now);
   let dailyRemaining = Math.max(0, limits.daily - usage.daily);
   let weeklyRemaining = Math.max(0, limits.weekly - usage.weekly);
 
-  const existingPurchase = await readExistingPurchase(supabase, vendorId, leadId);
+  const existingPurchase = await readExistingPurchase(db, vendorId, leadId);
   if (existingPurchase) {
     return {
       success: true,
@@ -432,7 +432,7 @@ const consumeLeadForVendorLegacy = async ({
     };
   }
 
-  const { count: leadPurchaseCount, error: countError } = await supabase
+  const { count: leadPurchaseCount, error: countError } = await db
     .from("lead_purchases")
     .select("id", { count: "exact", head: true })
     .eq("lead_id", leadId);
@@ -479,7 +479,7 @@ const consumeLeadForVendorLegacy = async ({
     : 0;
 
   const purchaseRow = await insertPurchaseCompat({
-    supabase,
+    db,
     vendorId,
     leadId,
     consumptionType,
@@ -499,7 +499,7 @@ const consumeLeadForVendorLegacy = async ({
   weeklyRemaining = Math.max(0, limits.weekly - usage.weekly);
 
   await syncQuotaSnapshot({
-    supabase,
+    db,
     vendorId,
     planId: subscription?.plan_id || null,
     limits,
@@ -507,7 +507,7 @@ const consumeLeadForVendorLegacy = async ({
     nowIso,
   });
 
-  await supabase
+  await db
     .from("leads")
     .update({ status: "PURCHASED" })
     .eq("id", leadId);
@@ -534,7 +534,7 @@ const consumeLeadForVendorLegacy = async ({
 };
 
 export async function consumeLeadForVendorWithCompat({
-  supabase,
+  db,
   vendorId,
   leadId,
   mode = "AUTO",
@@ -547,7 +547,7 @@ export async function consumeLeadForVendorWithCompat({
   // Prefer the JS compatibility path so behavior stays consistent
   // even if an older database RPC still enforces yearly limits.
   const fallbackResult = await consumeLeadForVendorLegacy({
-    supabase,
+    db,
     vendorId,
     leadId,
     mode: normalizedMode,

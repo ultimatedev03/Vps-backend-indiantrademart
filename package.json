@@ -5,10 +5,15 @@
   "description": "Backend (Express API) wrapper for local dev/start after FE/BE separation.",
   "scripts": {
     "dev": "node --watch server/server.js",
-    "start": "node server/server.js"
+    "start": "node server/server.js",
+    "db:setup": "node server/scripts/setupMysqlSchema.js",
+    "db:migrate:supabase": "node server/scripts/migrateSupabaseToMysql.js",
+    "db:migrate:postgres": "node server/scripts/migratePostgresToMysql.js",
+    "storage:migrate:supabase": "node server/scripts/migrateSupabaseStorageToLocal.js",
+    "admin:create": "node server/scripts/createAdmin.js",
+    "admin:password": "node server/scripts/changeAdminPassword.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "2.30.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
@@ -18,10 +23,12 @@
     "groq-sdk": "^0.6.0",
     "jsonwebtoken": "^9.0.3",
     "jspdf": "^4.0.0",
+    "mysql2": "^3.22.4",
     "node-cron": "^4.2.1",
     "nodemailer": "^8.0.7",
     "openai": "^4.77.4",
     "papaparse": "^5.4.1",
+    "pg": "^8.21.0",
     "razorpay": "^2.9.6",
     "ws": "^8.20.1"
   }

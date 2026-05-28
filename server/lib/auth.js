@@ -1,7 +1,7 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { randomBytes, randomUUID } from 'crypto';
-import { supabase } from './supabaseClient.js';
+import { db } from './dbClient.js';
 
 const AUTH_COOKIE_NAME = process.env.AUTH_COOKIE_NAME || 'itm_access';
 const CSRF_COOKIE_NAME = process.env.AUTH_CSRF_COOKIE || 'itm_csrf';
@@ -12,19 +12,14 @@ const AUTH_COOKIE_MAX_AGE_DAYS = Number(process.env.AUTH_COOKIE_MAX_AGE_DAYS || 
 let warnedMissingJwtSecret = false;
 
 function getJwtSecret() {
-  const secret =
-    process.env.JWT_SECRET ||
-    process.env.SUPABASE_JWT_SECRET ||
-    process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const secret = process.env.JWT_SECRET || process.env.MYSQL_JWT_SECRET;
 
   if (!secret) {
-    throw new Error('Missing JWT_SECRET (or fallback secret) in environment');
+    throw new Error('Missing JWT_SECRET in environment');
   }
 
   if (!process.env.JWT_SECRET && !warnedMissingJwtSecret) {
-    console.warn(
-      '[Auth] JWT_SECRET missing. Falling back to another secret. Configure a dedicated JWT_SECRET.'
-    );
+    console.warn('[Auth] JWT_SECRET missing. Falling back to MYSQL_JWT_SECRET.');
     warnedMissingJwtSecret = true;
   }
 
@@ -74,7 +69,7 @@ function buildCookieOptions({ httpOnly }) {
     secure: isProd,
     path: '/',
   };
-  if (AUTH_COOKIE_DOMAIN) {
+  if (isProd && AUTH_COOKIE_DOMAIN) {
     options.domain = AUTH_COOKIE_DOMAIN;
   }
   return options;
@@ -106,9 +101,8 @@ export function signAuthToken(payload) {
 
 function getAllJwtSecrets() {
   const s1 = process.env.JWT_SECRET || '';
-  const s2 = process.env.SUPABASE_JWT_SECRET || '';
-  const s3 = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-  return [s1, s2, s3].filter((v, i, a) => v && a.indexOf(v) === i);
+  const s2 = process.env.MYSQL_JWT_SECRET || '';
+  return [s1, s2].filter((v, i, a) => v && a.indexOf(v) === i);
 }
 
 export function verifyAuthToken(token) {
@@ -146,7 +140,7 @@ export async function getPublicUserByEmail(email) {
   const target = normalizeEmail(email);
   if (!target) return null;
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('users')
     .select('*')
     .eq('email', target)
@@ -162,7 +156,7 @@ export async function getPublicUserByEmail(email) {
 export async function getPublicUserById(userId) {
   if (!userId) return null;
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('users')
     .select('*')
     .eq('id', userId)
@@ -210,7 +204,7 @@ export async function upsertPublicUser({
     }
 
     if (Object.keys(updates).length > 1) {
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from('users')
         .update(updates)
         .eq('id', existing.id)
@@ -236,7 +230,7 @@ export async function upsertPublicUser({
     updated_at: nowIso,
   };
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('users')
     .insert([payload])
     .select('*')
@@ -259,7 +253,7 @@ export async function upsertPublicUser({
         }
 
         if (Object.keys(updates).length > 1) {
-          const { data: mergedData, error: mergeError } = await supabase
+          const { data: mergedData, error: mergeError } = await db
             .from('users')
             .update(updates)
             .eq('id', recovered.id)
@@ -284,7 +278,7 @@ export async function setPublicUserPassword(userId, password) {
   if (!password) throw new Error('Missing password');
 
   const password_hash = await hashPassword(password);
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('users')
     .update({
       password_hash,
@@ -319,7 +313,7 @@ export async function resolveRoleForUser({ userId, email, fallbackRole }) {
   const targetEmail = normalizeEmail(email);
 
   if (userId || targetEmail) {
-    const { data: emp } = await supabase
+    const { data: emp } = await db
       .from('employees')
       .select('role')
       .or(
@@ -336,7 +330,7 @@ export async function resolveRoleForUser({ userId, email, fallbackRole }) {
   }
 
   if (userId || targetEmail) {
-    const { data: vendor } = await supabase
+    const { data: vendor } = await db
       .from('vendors')
       .select('id')
       .or(
@@ -353,7 +347,7 @@ export async function resolveRoleForUser({ userId, email, fallbackRole }) {
   }
 
   if (userId || targetEmail) {
-    const { data: buyer } = await supabase
+    const { data: buyer } = await db
       .from('buyers')
       .select('id')
       .or(
@@ -377,21 +371,21 @@ export async function syncProfileUserId(userId, email) {
   const targetEmail = normalizeEmail(email);
 
   // Employees
-  await supabase
+  await db
     .from('employees')
     .update({ user_id: userId })
     .eq('email', targetEmail)
     .is('user_id', null);
 
   // Vendors
-  await supabase
+  await db
     .from('vendors')
     .update({ user_id: userId })
     .eq('email', targetEmail)
     .is('user_id', null);
 
   // Buyers
-  await supabase
+  await db
     .from('buyers')
     .update({ user_id: userId })
     .eq('email', targetEmail)

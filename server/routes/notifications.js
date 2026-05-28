@@ -1,5 +1,5 @@
 import express from 'express';
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import { buildAuthLookupMap, loadAuthLookupCache } from '../lib/authLookupCache.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 
@@ -53,14 +53,14 @@ const loadAuthLookupByEmail = async ({ force = false } = {}) => {
         let errorPages = 0;
 
         while (true) {
-          const paged = await supabase.auth.admin.listUsers({ page, perPage });
+          const paged = await db.auth.admin.listUsers({ page, perPage });
           const pagedError = paged?.error || null;
           const pagedUsers = Array.isArray(paged?.data?.users) ? paged.data.users : [];
 
           if (pagedError) {
             errorPages += 1;
             if (page === 1) {
-              const fallback = await supabase.auth.admin.listUsers();
+              const fallback = await db.auth.admin.listUsers();
               if (!fallback?.error && Array.isArray(fallback?.data?.users)) {
                 return buildAuthLookupMap(fallback.data.users);
               }
@@ -137,7 +137,7 @@ const resolveCurrentUserIds = async (reqUser = {}) => {
   if (authUserId) {
     idSet.add(authUserId);
 
-    const { data: byId } = await supabase
+    const { data: byId } = await db
       .from('users')
       .select('id, email')
       .eq('id', authUserId)
@@ -150,7 +150,7 @@ const resolveCurrentUserIds = async (reqUser = {}) => {
   if (email) {
     emailSet.add(email);
 
-    const { data: byEmail } = await supabase
+    const { data: byEmail } = await db
       .from('users')
       .select('id, email')
       .ilike('email', email)
@@ -172,7 +172,7 @@ const resolveCurrentUserIds = async (reqUser = {}) => {
 
   if (profileFilter) {
     const profileQueries = ['employees', 'vendors', 'buyers'].map((table) =>
-      supabase
+      db
         .from(table)
         .select('user_id, email')
         .or(profileFilter)
@@ -206,7 +206,7 @@ const resolveBuyerIdForUser = async (reqUser = {}, candidateUserIds = []) => {
   const ids = Array.from(new Set((candidateUserIds || []).map((v) => String(v || '').trim()).filter(Boolean)));
 
   if (ids.length > 0) {
-    const { data: rows } = await supabase
+    const { data: rows } = await db
       .from('buyers')
       .select('id')
       .in('user_id', ids)
@@ -216,7 +216,7 @@ const resolveBuyerIdForUser = async (reqUser = {}, candidateUserIds = []) => {
   }
 
   if (email) {
-    const { data: byEmailRows } = await supabase
+    const { data: byEmailRows } = await db
       .from('buyers')
       .select('id')
       .ilike('email', email)
@@ -239,7 +239,7 @@ router.get('/', requireAuth(), async (req, res) => {
     const userIds = await resolveCurrentUserIds(req.user);
     if (!userIds.length) return res.json({ success: true, notifications: [] });
 
-    let query = supabase
+    let query = db
       .from('notifications')
       .select('*')
       .order('created_at', { ascending: false })
@@ -265,7 +265,7 @@ router.get('/unread-count', requireAuth(), async (req, res) => {
     const userIds = await resolveCurrentUserIds(req.user);
     if (!userIds.length) return res.json({ success: true, count: 0 });
 
-    let query = supabase
+    let query = db
       .from('notifications')
       .select('*', { count: 'exact', head: true })
       .eq('is_read', false);
@@ -290,7 +290,7 @@ router.post('/read-all', requireAuth(), async (req, res) => {
     const userIds = await resolveCurrentUserIds(req.user);
     if (!userIds.length) return res.json({ success: true });
 
-    let query = supabase
+    let query = db
       .from('notifications')
       .update({ is_read: true })
       .eq('is_read', false);
@@ -318,7 +318,7 @@ router.patch('/:id/read', requireAuth(), async (req, res) => {
     const userIds = await resolveCurrentUserIds(req.user);
     if (!userIds.length) return res.status(403).json({ success: false, error: 'Forbidden' });
 
-    let query = supabase
+    let query = db
       .from('notifications')
       .update({ is_read: true })
       .eq('id', notifId);
@@ -346,7 +346,7 @@ router.delete('/:id', requireAuth(), async (req, res) => {
     const userIds = await resolveCurrentUserIds(req.user);
     if (!userIds.length) return res.status(403).json({ success: false, error: 'Forbidden' });
 
-    let query = supabase
+    let query = db
       .from('notifications')
       .delete()
       .eq('id', notifId);
@@ -377,7 +377,7 @@ router.get('/list', requireAuth(), async (req, res) => {
       return res.json({ success: true, notifications: [] });
     }
 
-    let query = supabase
+    let query = db
       .from('notifications')
       .select('*')
       .order('created_at', { ascending: false })
@@ -398,7 +398,7 @@ router.get('/list', requireAuth(), async (req, res) => {
     const buyerId = await resolveBuyerIdForUser(req.user, userIds);
 
     if (buyerId) {
-      const { data: buyerRows, error: buyerError } = await supabase
+      const { data: buyerRows, error: buyerError } = await db
         .from('buyer_notifications')
         .select('*')
         .eq('buyer_id', buyerId)
@@ -436,7 +436,7 @@ router.patch('/read', requireAuth(), async (req, res) => {
     const normalIds = normalizedIds.filter((id) => !isBuyerNotifId(id));
 
     if (normalIds.length > 0) {
-      let query = supabase
+      let query = db
         .from('notifications')
         .update({ is_read: true })
         .in('id', normalIds);
@@ -454,7 +454,7 @@ router.patch('/read', requireAuth(), async (req, res) => {
     }
 
     if (buyerIds.length > 0 && buyerId) {
-      const { error } = await supabase
+      const { error } = await db
         .from('buyer_notifications')
         .update({ is_read: true })
         .eq('buyer_id', buyerId)
@@ -488,7 +488,7 @@ router.delete('/', requireAuth(), async (req, res) => {
     const normalIds = normalizedIds.filter((id) => !isBuyerNotifId(id));
 
     if (normalIds.length > 0) {
-      let query = supabase
+      let query = db
         .from('notifications')
         .delete()
         .in('id', normalIds);
@@ -506,7 +506,7 @@ router.delete('/', requireAuth(), async (req, res) => {
     }
 
     if (buyerIds.length > 0 && buyerId) {
-      const { error } = await supabase
+      const { error } = await db
         .from('buyer_notifications')
         .delete()
         .eq('buyer_id', buyerId)

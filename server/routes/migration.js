@@ -1,6 +1,6 @@
 import { logger } from '../utils/logger.js';
 import express from 'express';
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 
 const router = express.Router();
 
@@ -41,7 +41,7 @@ router.post('/vendor-ids/migrate-single', async (req, res) => {
     }
 
     // Get vendor data
-    const { data: vendor, error: vendorError } = await supabase
+    const { data: vendor, error: vendorError } = await db
       .from('vendors')
       .select('id, owner_name, company_name, phone, vendor_id')
       .eq('id', vendorId)
@@ -68,7 +68,7 @@ router.post('/vendor-ids/migrate-single', async (req, res) => {
 
     // Ensure uniqueness
     while (!isUnique && attempts < 10) {
-      const { data: existing } = await supabase
+      const { data: existing } = await db
         .from('vendors')
         .select('id')
         .eq('vendor_id', newVendorId)
@@ -87,7 +87,7 @@ router.post('/vendor-ids/migrate-single', async (req, res) => {
     }
 
     // Update vendor in database
-    const { error: updateError } = await supabase
+    const { error: updateError } = await db
       .from('vendors')
       .update({ vendor_id: newVendorId })
       .eq('id', vendorId);
@@ -115,7 +115,7 @@ router.post('/vendor-ids/migrate-single', async (req, res) => {
 router.post('/vendor-ids/migrate-all', async (req, res) => {
   try {
     // Get all vendors without proper vendor_id
-    const { data: vendors, error: vendorsError } = await supabase
+    const { data: vendors, error: vendorsError } = await db
       .from('vendors')
       .select('id, owner_name, company_name, phone, vendor_id')
       .order('created_at', { ascending: false });
@@ -150,7 +150,7 @@ router.post('/vendor-ids/migrate-all', async (req, res) => {
 
         // Ensure uniqueness
         while (!isUnique && attempts < 10) {
-          const { data: existing } = await supabase
+          const { data: existing } = await db
             .from('vendors')
             .select('id')
             .eq('vendor_id', newVendorId)
@@ -169,7 +169,7 @@ router.post('/vendor-ids/migrate-all', async (req, res) => {
         }
 
         // Update vendor in database
-        const { error: updateError } = await supabase
+        const { error: updateError } = await db
           .from('vendors')
           .update({ vendor_id: newVendorId })
           .eq('id', vendor.id);

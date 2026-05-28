@@ -1,6 +1,6 @@
 import { logger } from '../utils/logger.js';
 import express from 'express';
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 import { sendEmail } from '../lib/emailService.js';
 import { notifyUser } from '../lib/notify.js';
@@ -49,14 +49,14 @@ const insertNotification = async (payload) => {
 
   // Prefer direct insert first (keeps extended columns like reference_id when schema allows).
   if (safeUserId) {
-    let { error } = await supabase
+    let { error } = await db
       .from('notifications')
       .insert([{ ...payload, user_id: safeUserId }]);
 
     if (error && String(error?.message || '').toLowerCase().includes('reference_id')) {
       const fallbackPayload = { ...payload, user_id: safeUserId };
       delete fallbackPayload.reference_id;
-      ({ error } = await supabase.from('notifications').insert([fallbackPayload]));
+      ({ error } = await db.from('notifications').insert([fallbackPayload]));
     }
 
     if (!error) return true;
@@ -86,7 +86,7 @@ async function resolveVendorForUser(user = {}) {
   const email = normalizeEmail(user?.email || '');
 
   if (userId) {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendors')
       .select('*')
       .eq('user_id', userId)
@@ -95,7 +95,7 @@ async function resolveVendorForUser(user = {}) {
   }
 
   if (email) {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vendors')
       .select('*')
       .eq('email', email)
@@ -113,7 +113,7 @@ async function resolveBuyerForUser(user = {}) {
   const email = normalizeEmail(user?.email || '');
 
   if (userId) {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('buyers')
       .select('*')
       .eq('user_id', userId)
@@ -122,7 +122,7 @@ async function resolveBuyerForUser(user = {}) {
   }
 
   if (email) {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('buyers')
       .select('*')
       .eq('email', email)
@@ -146,7 +146,7 @@ const enrichBuyers = async (rows = []) => {
 
   if (!buyerIds.length) return rows || [];
 
-  const { data: buyers, error } = await supabase
+  const { data: buyers, error } = await db
     .from('buyers')
     .select('id, full_name, company_name, email, phone, avatar_url, is_active')
     .in('id', buyerIds);
@@ -184,7 +184,7 @@ const enrichVendors = async (rows = []) => {
 
   if (!vendorIds.length) return rows || [];
 
-  const { data: vendors, error } = await supabase
+  const { data: vendors, error } = await db
     .from('vendors')
     .select('id, company_name, owner_name, phone, email, profile_image, is_verified, verification_badge, kyc_status, is_active')
     .in('id', vendorIds);
@@ -382,7 +382,7 @@ async function applyMessageAcks(rows = [], actorRole = 'buyer', actorPublicUserI
 
     const storedMessage = composeStoredMessage(parsed.text, nextMeta);
 
-    const { data: updatedRow, error } = await supabase
+    const { data: updatedRow, error } = await db
       .from('proposal_messages')
       .update({ message: storedMessage })
       .eq('id', row.id)
@@ -405,7 +405,7 @@ async function resolvePublicUserIdForActor(user = {}) {
   const email = normalizeEmail(user?.email || '');
 
   if (userId) {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('users')
       .select('id')
       .eq('id', userId)
@@ -414,7 +414,7 @@ async function resolvePublicUserIdForActor(user = {}) {
   }
 
   if (email) {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('users')
       .select('id')
       .eq('email', email)
@@ -430,7 +430,7 @@ async function resolvePublicUserIdForActor(user = {}) {
 async function resolveProposalForMessaging(proposalId) {
   if (!proposalId) return null;
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('proposals')
     .select('id, vendor_id, buyer_id, buyer_email, title, product_name')
     .eq('id', proposalId)
@@ -453,7 +453,7 @@ async function resolveProposalParticipantUserIds(proposal = {}) {
   const buyerEmail = normalizeEmail(proposal?.buyer_email || '');
 
   if (buyerId) {
-    const { data: buyerRow } = await supabase
+    const { data: buyerRow } = await db
       .from('buyers')
       .select('user_id, email')
       .eq('id', buyerId)
@@ -463,7 +463,7 @@ async function resolveProposalParticipantUserIds(proposal = {}) {
   }
 
   if (!participantIds.buyer_user_id && buyerEmail) {
-    const { data: buyerByEmail } = await supabase
+    const { data: buyerByEmail } = await db
       .from('buyers')
       .select('user_id')
       .eq('email', buyerEmail)
@@ -477,7 +477,7 @@ async function resolveProposalParticipantUserIds(proposal = {}) {
   }
 
   if (!participantIds.buyer_user_id && buyerEmail) {
-    const { data: buyerUserByEmail } = await supabase
+    const { data: buyerUserByEmail } = await db
       .from('users')
       .select('id')
       .eq('email', buyerEmail)
@@ -491,7 +491,7 @@ async function resolveProposalParticipantUserIds(proposal = {}) {
   }
 
   if (vendorId) {
-    const { data: vendorRow } = await supabase
+    const { data: vendorRow } = await db
       .from('vendors')
       .select('user_id, email')
       .eq('id', vendorId)
@@ -501,7 +501,7 @@ async function resolveProposalParticipantUserIds(proposal = {}) {
 
     const vendorEmail = normalizeEmail(vendorRow?.email || '');
     if (!participantIds.vendor_user_id && vendorEmail) {
-      const { data: vendorUserByEmail } = await supabase
+      const { data: vendorUserByEmail } = await db
         .from('users')
         .select('id')
         .eq('email', vendorEmail)
@@ -577,7 +577,7 @@ async function resolveChatBlockStatusForProposal(proposal = {}, actorPublicUserI
   }
 
   const filter = `and(blocker_user_id.eq.${actorUserId},blocked_user_id.eq.${counterpartUserId}),and(blocker_user_id.eq.${counterpartUserId},blocked_user_id.eq.${actorUserId})`;
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('chat_blocks')
     .select('blocker_user_id, blocked_user_id')
     .or(filter);
@@ -628,7 +628,7 @@ async function applyChatBlockActionForProposal({ proposal = {}, actorPublicUserI
   const safeAction = String(action || '').trim().toLowerCase();
 
   if (safeAction === 'block') {
-    const { error } = await supabase
+    const { error } = await db
       .from('chat_blocks')
       .upsert(
         [
@@ -647,7 +647,7 @@ async function applyChatBlockActionForProposal({ proposal = {}, actorPublicUserI
       throw new Error(error.message || 'Failed to block user');
     }
   } else if (safeAction === 'unblock') {
-    const { error } = await supabase
+    const { error } = await db
       .from('chat_blocks')
       .delete()
       .eq('blocker_user_id', actorUserId)
@@ -702,7 +702,7 @@ router.get('/sent', requireAuth(), async (req, res) => {
       return res.status(403).json({ success: false, error: 'Vendor access required' });
     }
 
-    let query = supabase
+    let query = db
       .from('proposals')
       .select('*')
       .eq('vendor_id', vendor.id)
@@ -750,7 +750,7 @@ router.get('/received', requireAuth(), async (req, res) => {
     const hit = _getCached(_cacheReceived, ck);
     if (hit) return res.json(hit);
 
-    let query = supabase
+    let query = db
       .from('proposals')
       .select('*')
       .order('created_at', { ascending: false })
@@ -792,7 +792,7 @@ router.get('/received/:quotationId', requireAuth(), async (req, res) => {
       return res.status(403).json({ success: false, error: 'Buyer access required' });
     }
 
-    const { data: quotation, error } = await supabase
+    const { data: quotation, error } = await db
       .from('proposals')
       .select('*')
       .eq('id', quotationId)
@@ -815,7 +815,7 @@ router.get('/received/:quotationId', requireAuth(), async (req, res) => {
 
     const [enrichedQuotation] = await enrichVendors([quotation]);
 
-    const { data: messages, error: msgError } = await supabase
+    const { data: messages, error: msgError } = await db
       .from('proposal_messages')
       .select('*')
       .eq('proposal_id', quotationId)
@@ -876,7 +876,7 @@ router.post('/messages/ack-delivered', requireAuth(), async (req, res) => {
       if (!access.isAllowed) continue;
 
       const actorRole = resolveActorMessagingRole(access, req.user);
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from('proposal_messages')
         .select('*')
         .eq('proposal_id', proposalId)
@@ -924,7 +924,7 @@ router.get('/unread-count', requireAuth(), async (req, res) => {
     const proposalIdSet = new Set();
 
     if (buyerId) {
-      const { data: byIdRows } = await supabase
+      const { data: byIdRows } = await db
         .from('proposals')
         .select('id')
         .eq('buyer_id', buyerId)
@@ -938,7 +938,7 @@ router.get('/unread-count', requireAuth(), async (req, res) => {
     }
 
     if (buyerEmail) {
-      const { data: byEmailRows } = await supabase
+      const { data: byEmailRows } = await db
         .from('proposals')
         .select('id')
         .eq('buyer_email', buyerEmail)
@@ -956,7 +956,7 @@ router.get('/unread-count', requireAuth(), async (req, res) => {
       return res.json({ success: true, unread: 0 });
     }
 
-    const { data: messages, error } = await supabase
+    const { data: messages, error } = await db
       .from('proposal_messages')
       .select('id, proposal_id, sender_id, message')
       .in('proposal_id', proposalIds);
@@ -1082,7 +1082,7 @@ router.get('/:proposalId/messages', requireAuth(), async (req, res) => {
     const actorPublicUserId = await resolvePublicUserIdForActor(req.user);
     const actorRole = resolveActorMessagingRole(access, req.user);
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('proposal_messages')
       .select('*')
       .eq('proposal_id', proposalId)
@@ -1169,7 +1169,7 @@ router.post('/:proposalId/messages', requireAuth(), async (req, res) => {
       return res.status(400).json({ success: false, error: 'Message is required' });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('proposal_messages')
       .insert([
         {
@@ -1217,7 +1217,7 @@ router.post('/:proposalId/messages', requireAuth(), async (req, res) => {
       if (actorRole === 'vendor') {
         const buyerId = String(proposal?.buyer_id || '').trim();
         if (buyerId) {
-          await supabase.from('buyer_notifications').insert([
+          await db.from('buyer_notifications').insert([
             {
               buyer_id: buyerId,
               type: 'PROPOSAL_MESSAGE',
@@ -1278,7 +1278,7 @@ router.patch('/:proposalId/messages/:messageId', requireAuth(), async (req, res)
       return res.status(403).json({ success: false, error: 'User profile not found for messaging' });
     }
 
-    const { data: existingRow, error: existingError } = await supabase
+    const { data: existingRow, error: existingError } = await db
       .from('proposal_messages')
       .select('*')
       .eq('id', messageId)
@@ -1299,7 +1299,7 @@ router.patch('/:proposalId/messages/:messageId', requireAuth(), async (req, res)
       return res.status(400).json({ success: false, error: 'Message is required' });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('proposal_messages')
       .update({ message: storedMessage })
       .eq('id', existingRow.id)
@@ -1340,7 +1340,7 @@ router.delete('/:proposalId/messages', requireAuth(), async (req, res) => {
       return res.status(403).json({ success: false, error: 'Forbidden' });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('proposal_messages')
       .delete()
       .eq('proposal_id', proposalId)
@@ -1384,7 +1384,7 @@ router.delete('/:proposalId/messages/:messageId', requireAuth(), async (req, res
       return res.status(403).json({ success: false, error: 'User profile not found for messaging' });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('proposal_messages')
       .delete()
       .eq('id', messageId)
@@ -1547,7 +1547,7 @@ router.post('/send', validateQuotationRequest, async (req, res) => {
     }
 
     // Check if buyer exists (handle duplicate legacy rows safely).
-    const { data: buyerRows, error: buyerErr } = await supabase
+    const { data: buyerRows, error: buyerErr } = await db
       .from('buyers')
       .select('id, user_id, full_name, email, created_at')
       .eq('email', buyerEmail)
@@ -1561,7 +1561,7 @@ router.post('/send', validateQuotationRequest, async (req, res) => {
 
     let buyerUserId = buyerCheck?.user_id || null;
     if (!buyerUserId) {
-      const { data: userRow, error: userErr } = await supabase
+      const { data: userRow, error: userErr } = await db
         .from('users')
         .select('id')
         .eq('email', buyerEmail)
@@ -1586,7 +1586,7 @@ router.post('/send', validateQuotationRequest, async (req, res) => {
 
     // Optional legacy: if buyer_id provided and exists in buyers, accept it as candidate
     if (buyer_id) {
-      const { data: buyerById } = await supabase.from('buyers').select('id').eq('id', buyer_id).maybeSingle();
+      const { data: buyerById } = await db.from('buyers').select('id').eq('id', buyer_id).maybeSingle();
       if (buyerById?.id) buyerCandidateSet.add(buyerById.id);
     }
     const buyerCandidates = Array.from(buyerCandidateSet);
@@ -1637,7 +1637,7 @@ router.post('/send', validateQuotationRequest, async (req, res) => {
           payload[field] = value;
         });
 
-        const result = await supabase.from('proposals').insert([payload]).select('*').single();
+        const result = await db.from('proposals').insert([payload]).select('*').single();
         const missingField = extractMissingOptionalField(result?.error);
         if (missingField && !omittedOptionalFields.has(missingField)) {
           omittedOptionalFields.add(missingField);
@@ -1710,7 +1710,7 @@ router.post('/send', validateQuotationRequest, async (req, res) => {
         isRegistered
       );
 
-      await supabase.from('quotation_emails').insert([
+      await db.from('quotation_emails').insert([
         {
           quotation_id: savedQuotation.id,
           recipient_email: buyerEmail,
@@ -1721,7 +1721,7 @@ router.post('/send', validateQuotationRequest, async (req, res) => {
     } catch (emailError) {
       logger.error('Email sending error (non-blocking):', emailError);
       try {
-        await supabase.from('quotation_emails').insert([
+        await db.from('quotation_emails').insert([
           {
             quotation_id: savedQuotation.id,
             recipient_email: buyerEmail,
@@ -1737,7 +1737,7 @@ router.post('/send', validateQuotationRequest, async (req, res) => {
     if (isRegistered) {
       try {
         if (buyerCheck?.id) {
-          await supabase.from('buyer_notifications').insert([
+          await db.from('buyer_notifications').insert([
             {
               buyer_id: buyerCheck.id,
               type: 'QUOTATION_RECEIVED',
@@ -1770,7 +1770,7 @@ router.post('/send', validateQuotationRequest, async (req, res) => {
     } else {
       // Track unregistered buyer
       try {
-        await supabase.from('quotation_unregistered').insert([
+        await db.from('quotation_unregistered').insert([
           {
             email: buyerEmail,
             quotation_id: savedQuotation.id,
@@ -1785,7 +1785,7 @@ router.post('/send', validateQuotationRequest, async (req, res) => {
 
     // Also notify vendor bell so sent quotations reflect in dashboard activity.
     try {
-      const { data: vendorRow } = await supabase
+      const { data: vendorRow } = await db
         .from('vendors')
         .select('user_id, email')
         .eq('id', vendor_id)
@@ -1795,7 +1795,7 @@ router.post('/send', validateQuotationRequest, async (req, res) => {
       if (!vendorUserId) {
         const vendorEmail = String(vendor_email || vendorRow?.email || '').toLowerCase().trim();
         if (vendorEmail) {
-          const { data: vendorUserRow } = await supabase
+          const { data: vendorUserRow } = await db
             .from('users')
             .select('id')
             .eq('email', vendorEmail)
@@ -1843,7 +1843,7 @@ router.get('/admin/quotes', requireAuth(), async (req, res) => {
     const { limit = 50, page = 1, status } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
 
-    let query = supabase
+    let query = db
       .from('proposals')
       .select('id, title, product_name, status, buyer_email, vendor_id, created_at, budget, quantity')
       .order('created_at', { ascending: false })

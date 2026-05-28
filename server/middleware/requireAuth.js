@@ -4,7 +4,7 @@ import {
   normalizeRole,
   verifyAuthToken,
 } from '../lib/auth.js';
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 
 function parseBearerToken(req) {
   const header = req.headers?.authorization || req.headers?.Authorization;
@@ -46,7 +46,7 @@ const normalizeIdentityEmail = (email) => {
 
 async function findFirstByIdentity({ table, select, userId, email }) {
   if (userId) {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from(table)
       .select(select)
       .eq('user_id', userId)
@@ -58,7 +58,7 @@ async function findFirstByIdentity({ table, select, userId, email }) {
   const normalizedEmail = normalizeIdentityEmail(email);
   if (!normalizedEmail) return null;
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from(table)
     .select(select)
     .ilike('email', normalizedEmail)
@@ -124,7 +124,7 @@ export function requireAuth({ roles = [] } = {}) {
       const tokenFromBearer = parseBearerToken(req);
       // Prefer bearer token when both cookie + bearer are present.
       // This prevents stale cross-portal cookie sessions from overriding
-      // the currently authenticated Supabase session in frontend API calls.
+      // the currently authenticated backend session in frontend API calls.
       const token = tokenFromBearer || tokenFromCookie;
       const tokenSource = tokenFromBearer ? 'bearer' : tokenFromCookie ? 'cookie' : null;
 

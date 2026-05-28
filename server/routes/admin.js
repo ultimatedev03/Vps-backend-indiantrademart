@@ -1,6 +1,6 @@
 import { logger } from '../utils/logger.js';
 import express from "express";
-import { supabase } from "../lib/supabaseClient.js";
+import { db } from "../lib/dbClient.js";
 import { notifyRole, notifyUser } from "../lib/notify.js";
 import { writeAuditLog } from "../lib/audit.js";
 import { requireEmployeeRoles } from "../middleware/requireEmployeeRoles.js";
@@ -29,6 +29,42 @@ function getAdminScope(req) {
   const raw = req.employee?.states_scope;
   const arr = Array.isArray(raw) ? raw.map((s) => String(s).trim()).filter(Boolean) : [];
   return arr.length > 0 ? arr : null;
+}
+
+const SYSTEM_CONFIG_KEY = "maintenance_mode";
+
+async function ensureAdminSystemConfigRow(adminId) {
+  const { data, error } = await db
+    .from("system_config")
+    .select("*")
+    .eq("config_key", SYSTEM_CONFIG_KEY)
+    .maybeSingle();
+
+  if (error) throw new Error(error.message);
+  if (data) return data;
+
+  const payload = {
+    config_key: SYSTEM_CONFIG_KEY,
+    maintenance_mode: false,
+    maintenance_message: "",
+    allow_vendor_registration: true,
+    commission_rate: 5,
+    max_upload_size_mb: 10,
+    public_notice_enabled: false,
+    public_notice_message: "",
+    public_notice_variant: "info",
+    updated_at: new Date().toISOString(),
+    updated_by: adminId || null,
+  };
+
+  const { data: inserted, error: insertError } = await db
+    .from("system_config")
+    .upsert(payload, { onConflict: "config_key" })
+    .select("*")
+    .maybeSingle();
+
+  if (insertError) throw new Error(insertError.message);
+  return inserted || payload;
 }
 
 /**
@@ -63,6 +99,69 @@ function roleToDepartment(role) {
       return "";
   }
 }
+
+const safeNum = (value) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+};
+
+const startOfLocalDay = (date = new Date()) => {
+  const next = new Date(date);
+  next.setHours(0, 0, 0, 0);
+  return next;
+};
+
+const addDays = (date, days) => {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+};
+
+const startOfLocalWeek = (date = new Date()) => {
+  const next = startOfLocalDay(date);
+  next.setDate(next.getDate() - next.getDay());
+  return next;
+};
+
+const startOfLocalMonth = (date = new Date()) =>
+  new Date(date.getFullYear(), date.getMonth(), 1);
+
+const addMonths = (date, months) =>
+  new Date(date.getFullYear(), date.getMonth() + months, 1);
+
+const buildTrend = (current, previous, periodLabel) => {
+  const currentValue = safeNum(current);
+  const previousValue = safeNum(previous);
+
+  if (previousValue > 0) {
+    const percent = Math.round(((currentValue - previousValue) / previousValue) * 100);
+    return {
+      value: percent,
+      label: `${percent > 0 ? "+" : ""}${percent}% ${periodLabel}`,
+      trendUp: percent > 0 ? true : percent < 0 ? false : null,
+      current: currentValue,
+      previous: previousValue,
+    };
+  }
+
+  if (currentValue > 0) {
+    return {
+      value: null,
+      label: `+${currentValue} ${periodLabel}`,
+      trendUp: true,
+      current: currentValue,
+      previous: previousValue,
+    };
+  }
+
+  return {
+    value: 0,
+    label: `0% ${periodLabel}`,
+    trendUp: null,
+    current: currentValue,
+    previous: previousValue,
+  };
+};
 
 const EMAIL_SEARCH_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const UUID_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -144,7 +243,7 @@ async function resolveEmployeeUser(employee) {
   }
 
   if (publicUser?.id && publicUser.id !== employee.user_id) {
-    await supabase
+    await db
       .from("employees")
       .update({ user_id: publicUser.id })
       .eq("id", employee.id);
@@ -184,7 +283,7 @@ async function ensureEmployeeUser(employee, password) {
   }
 
   if (publicUser?.id && publicUser.id !== employee.user_id) {
-    await supabase.from("employees").update({ user_id: publicUser.id }).eq("id", employee.id);
+    await db.from("employees").update({ user_id: publicUser.id }).eq("id", employee.id);
   }
 
   return publicUser;
@@ -194,11 +293,11 @@ async function resolveBuyerRecordForAdmin(buyerId) {
   const id = String(buyerId || "").trim();
   if (!id) return { data: null, error: null };
 
-  const byId = await supabase.from("buyers").select("*").eq("id", id).maybeSingle();
+  const byId = await db.from("buyers").select("*").eq("id", id).maybeSingle();
   if (byId.error) return { data: null, error: byId.error };
   if (byId.data) return { data: byId.data, error: null };
 
-  const byUserId = await supabase.from("buyers").select("*").eq("user_id", id).maybeSingle();
+  const byUserId = await db.from("buyers").select("*").eq("user_id", id).maybeSingle();
   if (byUserId.error) return { data: null, error: byUserId.error };
   if (byUserId.data) return { data: byUserId.data, error: null };
 
@@ -209,17 +308,17 @@ async function resolveVendorRecordForAdmin(vendorId) {
   const id = String(vendorId || "").trim();
   if (!id) return { data: null, error: null };
 
-  const byId = await supabase.from("vendors").select("*").eq("id", id).maybeSingle();
+  const byId = await db.from("vendors").select("*").eq("id", id).maybeSingle();
   if (byId.error) return { data: null, error: byId.error };
   if (byId.data) return { data: byId.data, error: null };
 
-  const byUserId = await supabase.from("vendors").select("*").eq("user_id", id).maybeSingle();
+  const byUserId = await db.from("vendors").select("*").eq("user_id", id).maybeSingle();
   if (byUserId.error) return { data: null, error: byUserId.error };
   if (byUserId.data) return { data: byUserId.data, error: null };
 
   const normalizedIdEmail = normalizeIdentityEmail(id);
   if (normalizedIdEmail) {
-    const byEmail = await supabase
+    const byEmail = await db
       .from("vendors")
       .select("*")
       .ilike("email", normalizedIdEmail)
@@ -395,7 +494,7 @@ async function createSupportStatusTicket({
   };
 
   try {
-    const { error } = await supabase.from("support_tickets").insert([payload]);
+    const { error } = await db.from("support_tickets").insert([payload]);
     if (error) {
       logger.warn(
         `[admin] support ticket create failed for ${normalizedEntity} ${normalizedAction}:`,
@@ -410,6 +509,70 @@ async function createSupportStatusTicket({
   }
 }
 
+router.get("/system-config", async (req, res) => {
+  try {
+    const row = await ensureAdminSystemConfigRow(req.employee?.id || req.user?.id);
+    return res.json({ success: true, config: row });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message || "Failed to load settings" });
+  }
+});
+
+router.put("/system-config", async (req, res) => {
+  try {
+    const existing = await ensureAdminSystemConfigRow(req.employee?.id || req.user?.id);
+    const commissionRate = Number(req.body?.commission_rate ?? existing.commission_rate ?? 5);
+    const maxUploadSizeMb = Number(req.body?.max_upload_size_mb ?? existing.max_upload_size_mb ?? 10);
+
+    const payload = {
+      config_key: SYSTEM_CONFIG_KEY,
+      maintenance_mode: req.body?.maintenance_mode === true,
+      maintenance_message: String(req.body?.maintenance_message ?? existing.maintenance_message ?? ""),
+      allow_vendor_registration:
+        typeof req.body?.allow_vendor_registration === "boolean"
+          ? req.body.allow_vendor_registration
+          : existing.allow_vendor_registration ?? true,
+      commission_rate: Number.isFinite(commissionRate)
+        ? Math.min(Math.max(commissionRate, 0), 100)
+        : existing.commission_rate ?? 5,
+      max_upload_size_mb: Number.isFinite(maxUploadSizeMb)
+        ? Math.min(Math.max(maxUploadSizeMb, 1), 100)
+        : existing.max_upload_size_mb ?? 10,
+      public_notice_enabled: existing.public_notice_enabled === true,
+      public_notice_message: existing.public_notice_message || "",
+      public_notice_variant: existing.public_notice_variant || "info",
+      updated_at: new Date().toISOString(),
+      updated_by: req.employee?.id || req.user?.id || null,
+    };
+
+    const { data, error } = await db
+      .from("system_config")
+      .upsert(payload, { onConflict: "config_key" })
+      .select("*")
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ success: false, error: error.message });
+
+    await writeAuditLog({
+      req,
+      actor: req.actor,
+      action: "SYSTEM_CONFIG_UPDATED",
+      entityType: "system_config",
+      entityId: existing?.id || null,
+      details: {
+        maintenance_mode: payload.maintenance_mode,
+        allow_vendor_registration: payload.allow_vendor_registration,
+        commission_rate: payload.commission_rate,
+        max_upload_size_mb: payload.max_upload_size_mb,
+      },
+    });
+
+    return res.json({ success: true, config: data || payload });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message || "Failed to save settings" });
+  }
+});
+
 /**
  * =========================
  * COUPON APPROVALS (ADMIN)
@@ -419,7 +582,7 @@ async function createSupportStatusTicket({
 // GET /api/admin/coupons/pending — list all coupons awaiting approval
 router.get("/coupons/pending", async (_req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from("vendor_plan_coupons")
       .select("*")
       .eq("approval_status", "PENDING_APPROVAL")
@@ -447,7 +610,7 @@ router.post("/coupons/:id/decision", async (req, res) => {
       return res.status(400).json({ success: false, error: "reason is required when rejecting" });
     }
 
-    const { data: existing, error: fetchErr } = await supabase
+    const { data: existing, error: fetchErr } = await db
       .from("vendor_plan_coupons")
       .select("id, code, approval_status")
       .eq("id", id)
@@ -479,7 +642,7 @@ router.post("/coupons/:id/decision", async (req, res) => {
             approved_at: new Date().toISOString(),
           };
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from("vendor_plan_coupons")
       .update(updates)
       .eq("id", id)
@@ -519,7 +682,7 @@ router.post("/coupons/:id/decision", async (req, res) => {
  */
 router.get("/audit-logs", async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from("audit_logs")
       .select("id, user_id, action, entity_type, entity_id, details, ip_address, created_at")
       .order("created_at", { ascending: false })
@@ -575,6 +738,8 @@ router.get("/vendors", async (req, res) => {
     const activeRaw = String(req.query?.active || req.query?.status || "all").trim();
     const joinedFromRaw = String(req.query?.joined_from || "").trim();
     const joinedToRaw = String(req.query?.joined_to || "").trim();
+    const creatorId = String(req.query?.creatorId || req.query?.creator_id || "").trim();
+    const creatorEmployeeId = String(req.query?.creatorEmployeeId || req.query?.creator_employee_id || "").trim();
     const parsedLimit = Number(req.query?.limit);
     const parsedOffset = Number(req.query?.offset);
     const parsedJoinedFrom = joinedFromRaw ? new Date(joinedFromRaw) : null;
@@ -589,7 +754,7 @@ router.get("/vendors", async (req, res) => {
       ? parsedOffset
       : 0;
 
-    let vendorQuery = supabase
+    let vendorQuery = db
       .from("vendors")
       .select(
         "id, vendor_id, company_name, owner_name, email, phone, kyc_status, created_at, is_active",
@@ -602,6 +767,16 @@ router.get("/vendors", async (req, res) => {
     const adminScope = getAdminScope(req);
     if (adminScope) {
       vendorQuery = vendorQuery.in("state", adminScope);
+    }
+
+    if (creatorId || creatorEmployeeId) {
+      const creatorFilter = [
+        creatorId ? `created_by_user_id.eq.${creatorId}` : null,
+        creatorId ? `assigned_to.eq.${creatorId}` : null,
+        creatorId ? `user_id.eq.${creatorId}` : null,
+        creatorEmployeeId ? `assigned_to.eq.${creatorEmployeeId}` : null,
+      ].filter(Boolean).join(",");
+      vendorQuery = vendorQuery.or(creatorFilter);
     }
 
     const kyc = kycRaw.toUpperCase();
@@ -650,9 +825,10 @@ router.get("/vendors", async (req, res) => {
       return out;
     };
     const countMap = {};
-    if (vendorIds.length) {
-      for (const ids of chunk(vendorIds)) {
-        const { data: pRows, error: pErr } = await supabase
+    if (vendorIds.length || publicVendorIds.length) {
+      const productVendorKeys = Array.from(new Set([...vendorIds, ...publicVendorIds].filter(Boolean)));
+      for (const ids of chunk(productVendorKeys)) {
+        const { data: pRows, error: pErr } = await db
           .from("products")
           .select("vendor_id")
           .in("vendor_id", ids);
@@ -663,7 +839,8 @@ router.get("/vendors", async (req, res) => {
 
         (pRows || []).forEach((r) => {
           if (!r.vendor_id) return;
-          countMap[r.vendor_id] = (countMap[r.vendor_id] || 0) + 1;
+          const vendorId = vendorLookupMap.get(String(r.vendor_id || "").trim()) || r.vendor_id;
+          countMap[vendorId] = (countMap[vendorId] || 0) + 1;
         });
       }
     }
@@ -685,7 +862,7 @@ router.get("/vendors", async (req, res) => {
 
     if (vendorIds.length) {
       for (const ids of chunk(vendorIds)) {
-        const { data: vendorDocs, error: vendorDocsError } = await supabase
+        const { data: vendorDocs, error: vendorDocsError } = await db
           .from("vendor_documents")
           .select("*")
           .in("vendor_id", ids);
@@ -703,7 +880,7 @@ router.get("/vendors", async (req, res) => {
       const legacyPublicKeys = legacyLookupKeys.filter((value) => !UUID_LIKE_RE.test(value));
 
       for (const ids of chunk(legacyUuidKeys)) {
-        const { data: legacyDocs, error: legacyDocsError } = await supabase
+        const { data: legacyDocs, error: legacyDocsError } = await db
           .from("kyc_documents")
           .select("*")
           .in("vendor_id", ids);
@@ -714,7 +891,7 @@ router.get("/vendors", async (req, res) => {
       }
 
       for (const ids of chunk(legacyPublicKeys)) {
-        const { data: legacyDocs, error: legacyDocsError } = await supabase
+        const { data: legacyDocs, error: legacyDocsError } = await db
           .from("kyc_documents")
           .select("*")
           .in("vendor_id", ids);
@@ -731,7 +908,7 @@ router.get("/vendors", async (req, res) => {
     if (vendorIds.length) {
       const subRows = [];
       for (const ids of chunk(vendorIds)) {
-        const { data: subs, error: sErr } = await supabase
+        const { data: subs, error: sErr } = await db
           .from("vendor_plan_subscriptions")
           .select("vendor_id, plan_id, status, start_date, end_date")
           .in("vendor_id", ids)
@@ -766,7 +943,7 @@ router.get("/vendors", async (req, res) => {
       if (planIds.length) {
         planMap = {};
         for (const ids of chunk(planIds)) {
-          const { data: plans, error: pErr2 } = await supabase
+          const { data: plans, error: pErr2 } = await db
             .from("vendor_plans")
             .select("id, name, price")
             .in("id", ids);
@@ -834,7 +1011,7 @@ router.get("/vendors/:vendorId", async (req, res) => {
       return res.status(400).json({ success: false, error: "Invalid vendorId" });
     }
 
-    const { data: vendor, error } = await supabase
+    const { data: vendor, error } = await db
       .from("vendors")
       .select("*")
       .eq("id", vendorId)
@@ -856,7 +1033,7 @@ router.get("/vendors/:vendorId/products", async (req, res) => {
       return res.status(400).json({ success: false, error: "vendorId missing" });
     }
 
-    const { data: vendor, error: vErr } = await supabase
+    const { data: vendor, error: vErr } = await db
       .from("vendors")
       .select("id, vendor_id, company_name, owner_name, email, phone, kyc_status, is_active")
       .eq("id", vendorId)
@@ -869,7 +1046,7 @@ router.get("/vendors/:vendorId/products", async (req, res) => {
       return res.status(404).json({ success: false, error: "Vendor not found" });
     }
 
-    let query = supabase
+    let query = db
       .from("products")
       .select("*")
       .eq("vendor_id", vendorId)
@@ -891,7 +1068,7 @@ router.get("/vendors/:vendorId/products", async (req, res) => {
     const ids = (products || []).map((p) => p.id);
     let imagesByProduct = {};
     if (ids.length) {
-      const { data: imgs, error: imgErr } = await supabase
+      const { data: imgs, error: imgErr } = await db
         .from("product_images")
         .select("*")
         .in("product_id", ids);
@@ -930,7 +1107,7 @@ router.post("/vendors/:vendorId/terminate", async (req, res) => {
 
     const updates = buildVendorStatusUpdates(existing, { isActive: false, reason });
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from("vendors")
       .update(updates)
       .eq("id", existing.id)
@@ -1023,7 +1200,7 @@ router.post("/vendors/:vendorId/activate", async (req, res) => {
 
     const updates = buildVendorStatusUpdates(existing, { isActive: true });
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from("vendors")
       .update(updates)
       .eq("id", existing.id)
@@ -1104,7 +1281,7 @@ router.post("/vendors/:vendorId/activate", async (req, res) => {
  */
 router.get("/buyers", async (req, res) => {
   try {
-    let buyerQuery = supabase
+    let buyerQuery = db
       .from("buyers")
       .select("*")
       .order("created_at", { ascending: false });
@@ -1155,7 +1332,7 @@ router.put("/buyers/:buyerId", async (req, res) => {
       if (value !== undefined) updates[key] = value;
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from("buyers")
       .update(updates)
       .eq("id", existing.id)
@@ -1198,7 +1375,7 @@ router.post("/buyers/:buyerId/terminate", async (req, res) => {
 
     const updates = buildBuyerStatusUpdates(existing, { isActive: false, reason });
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from("buyers")
       .update(updates)
       .eq("id", existing.id)
@@ -1279,7 +1456,7 @@ router.post("/buyers/:buyerId/activate", async (req, res) => {
 
     const updates = buildBuyerStatusUpdates(existing, { isActive: true });
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from("buyers")
       .update(updates)
       .eq("id", existing.id)
@@ -1351,7 +1528,7 @@ router.put("/products/:productId", async (req, res) => {
   try {
     const { productId } = req.params;
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from("products")
       .update(req.body)
       .eq("id", productId)
@@ -1380,8 +1557,8 @@ router.delete("/products/:productId", async (req, res) => {
   try {
     const { productId } = req.params;
 
-    await supabase.from("product_images").delete().eq("product_id", productId);
-    await supabase.from("products").delete().eq("id", productId);
+    await db.from("product_images").delete().eq("product_id", productId);
+    await db.from("products").delete().eq("id", productId);
 
     await writeAuditLog({
       req,
@@ -1404,7 +1581,7 @@ router.delete("/products/:productId", async (req, res) => {
  */
 router.get("/staff", async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from("employees")
       .select("*")
       .order("created_at", { ascending: false });
@@ -1473,7 +1650,7 @@ router.post("/staff", async (req, res) => {
       updated_at: new Date().toISOString(),
     };
 
-    const { data: existingByUserId, error: existingByUserIdError } = await supabase
+    const { data: existingByUserId, error: existingByUserIdError } = await db
       .from("employees")
       .select("*")
       .eq("user_id", userId)
@@ -1485,7 +1662,7 @@ router.post("/staff", async (req, res) => {
     let existingEmployee = existingByUserId || null;
 
     if (!existingEmployee) {
-      const { data: existingByEmail, error: existingByEmailError } = await supabase
+      const { data: existingByEmail, error: existingByEmailError } = await db
         .from("employees")
         .select("*")
         .ilike("email", email)
@@ -1499,7 +1676,7 @@ router.post("/staff", async (req, res) => {
 
     let emp = null;
     if (existingEmployee?.id) {
-      const { data: updatedEmployee, error: updateEmployeeError } = await supabase
+      const { data: updatedEmployee, error: updateEmployeeError } = await db
         .from("employees")
         .update(employeePayload)
         .eq("id", existingEmployee.id)
@@ -1510,7 +1687,7 @@ router.post("/staff", async (req, res) => {
       }
       emp = updatedEmployee || { ...existingEmployee, ...employeePayload };
     } else {
-      const { data: insertedEmployee, error: insertEmployeeError } = await supabase
+      const { data: insertedEmployee, error: insertEmployeeError } = await db
         .from("employees")
         .insert([
           {
@@ -1559,15 +1736,15 @@ router.delete("/staff/:employeeId", async (req, res) => {
   try {
     const { employeeId } = req.params;
 
-    const { data: emp } = await supabase
+    const { data: emp } = await db
       .from("employees")
       .select("*")
       .eq("id", employeeId)
       .single();
 
-    await supabase.from("employees").delete().eq("id", employeeId);
+    await db.from("employees").delete().eq("id", employeeId);
     if (emp?.user_id) {
-      await supabase.from("users").delete().eq("id", emp.user_id);
+      await db.from("users").delete().eq("id", emp.user_id);
     }
 
     await writeAuditLog({
@@ -1594,7 +1771,7 @@ router.put("/staff/:employeeId/password", async (req, res) => {
       return res.status(400).json({ success: false, error: passwordValidation.error });
     }
 
-    const { data: emp, error: empErr } = await supabase
+    const { data: emp, error: empErr } = await db
       .from("employees")
       .select("id, user_id, email")
       .eq("id", employeeId)
@@ -1617,8 +1794,8 @@ router.put("/staff/:employeeId/password", async (req, res) => {
     }
     await setPublicUserPassword(publicUser.id, password);
 
-    // Keep Supabase auth credential in sync for any auth-provider based login flows.
-    if (supabase?.auth?.admin?.updateUserById) {
+    // Keep MySQL auth credential in sync for provider-based login flows.
+    if (db?.auth?.admin?.updateUserById) {
       const authIds = [emp?.user_id, publicUser?.id].filter(Boolean);
       const seen = new Set();
       for (const authUserId of authIds) {
@@ -1626,7 +1803,7 @@ router.put("/staff/:employeeId/password", async (req, res) => {
         seen.add(authUserId);
         // best-effort: if candidate id is not an auth user id, continue silently
         // eslint-disable-next-line no-await-in-loop
-        const { error: authErr } = await supabase.auth.admin.updateUserById(authUserId, { password });
+        const { error: authErr } = await db.auth.admin.updateUserById(authUserId, { password });
         if (!authErr) break;
       }
     }
@@ -1650,13 +1827,22 @@ router.put("/staff/:employeeId/password", async (req, res) => {
 router.get("/dashboard/overview", async (req, res) => {
   try {
     const scope = getAdminScope(req);
+    const now = new Date();
+    const todayStart = startOfLocalDay(now);
+    const tomorrowStart = addDays(todayStart, 1);
+    const yesterdayStart = addDays(todayStart, -1);
+    const weekStart = startOfLocalWeek(now);
+    const previousWeekStart = addDays(weekStart, -7);
+    const monthStart = startOfLocalMonth(now);
+    const nextMonthStart = addMonths(monthStart, 1);
+    const previousMonthStart = addMonths(monthStart, -1);
 
     // Base queries — scoped by admin's states if assigned
-    let vendorsActiveQ = supabase.from("vendors").select("*", { count: "exact", head: true }).eq("is_active", true);
-    let buyersQ        = supabase.from("buyers").select("*", { count: "exact", head: true });
-    let pendingKycQ    = supabase.from("vendors").select("*", { count: "exact", head: true }).in("kyc_status", ["PENDING", "SUBMITTED"]);
-    let recentVendorsQ = supabase.from("vendors").select("id");
-    let openTicketsQ   = supabase.from("support_tickets").select("*", { count: "exact", head: true }).in("status", ["OPEN", "IN_PROGRESS"]);
+    let vendorsActiveQ = db.from("vendors").select("*", { count: "exact", head: true }).eq("is_active", true);
+    let buyersQ        = db.from("buyers").select("*", { count: "exact", head: true });
+    let pendingKycQ    = db.from("vendors").select("*", { count: "exact", head: true }).in("kyc_status", ["PENDING", "SUBMITTED"]);
+    let recentVendorsQ = db.from("vendors").select("id");
+    let openTicketsQ   = db.from("support_tickets").select("*", { count: "exact", head: true }).in("status", ["OPEN", "IN_PROGRESS"]);
 
     if (scope) {
       vendorsActiveQ = vendorsActiveQ.in("state", scope);
@@ -1664,7 +1850,7 @@ router.get("/dashboard/overview", async (req, res) => {
       pendingKycQ    = pendingKycQ.in("state", scope);
       recentVendorsQ = recentVendorsQ.in("state", scope);
       // tickets: filter via vendor state join
-      openTicketsQ   = supabase
+      openTicketsQ   = db
         .from("support_tickets")
         .select("id, vendors!inner(state)", { count: "exact", head: true })
         .in("status", ["OPEN", "IN_PROGRESS"])
@@ -1679,15 +1865,67 @@ router.get("/dashboard/overview", async (req, res) => {
     }
 
     // Revenue queries — scoped by vendorIds when admin is region-restricted
-    let leadPurchasesAmtQ = supabase.from("lead_purchases").select("amount");
-    let vendorPaymentsQ   = supabase.from("vendor_payments").select("amount, net_amount");
-    let ordersCountQ      = supabase.from("lead_purchases").select("*", { count: "exact", head: true });
+    let leadPurchasesAmtQ = db.from("lead_purchases").select("amount");
+    let vendorPaymentsQ   = db.from("vendor_payments").select("amount, net_amount");
+    let ordersCountQ      = db.from("lead_purchases").select("*", { count: "exact", head: true });
 
     if (scopedVendorIdList && scopedVendorIdList.length > 0) {
       leadPurchasesAmtQ = leadPurchasesAmtQ.in("vendor_id", scopedVendorIdList);
       vendorPaymentsQ   = vendorPaymentsQ.in("vendor_id", scopedVendorIdList);
       ordersCountQ      = ordersCountQ.in("vendor_id", scopedVendorIdList);
     }
+
+    const countCreatedInRange = async ({ table, from, to, stateScoped = false, vendorScoped = false }) => {
+      if (vendorScoped && scopedVendorIdList && scopedVendorIdList.length === 0) return 0;
+
+      let query = db
+        .from(table)
+        .select("*", { count: "exact", head: true })
+        .gte("created_at", from.toISOString())
+        .lt("created_at", to.toISOString());
+
+      if (stateScoped && scope) query = query.in("state", scope);
+      if (vendorScoped && scopedVendorIdList?.length) query = query.in("vendor_id", scopedVendorIdList);
+
+      const { count, error } = await query;
+      if (error) throw error;
+      return count || 0;
+    };
+
+    const sumLeadRevenueInRange = async (from, to) => {
+      if (scopedVendorIdList && scopedVendorIdList.length === 0) return 0;
+
+      let query = db
+        .from("lead_purchases")
+        .select("amount")
+        .gte("purchase_date", from.toISOString())
+        .lt("purchase_date", to.toISOString());
+
+      if (scopedVendorIdList?.length) query = query.in("vendor_id", scopedVendorIdList);
+
+      const { data, error } = await query;
+      if (error) throw error;
+      return (data || []).reduce((sum, row) => sum + safeNum(row?.amount), 0);
+    };
+
+    const sumVendorRevenueInRange = async (from, to) => {
+      if (scopedVendorIdList && scopedVendorIdList.length === 0) return 0;
+
+      let query = db
+        .from("vendor_payments")
+        .select("amount, net_amount")
+        .gte("payment_date", from.toISOString())
+        .lt("payment_date", to.toISOString());
+
+      if (scopedVendorIdList?.length) query = query.in("vendor_id", scopedVendorIdList);
+
+      const { data, error } = await query;
+      if (error) throw error;
+      return (data || []).reduce(
+        (sum, row) => sum + safeNum(row?.net_amount ?? row?.amount),
+        0
+      );
+    };
 
     const [
       usersRes,
@@ -1699,16 +1937,36 @@ router.get("/dashboard/overview", async (req, res) => {
       leadPurchasesRes,
       vendorPaymentsRes,
       openTicketsRes,
+      currentMonthLeadRevenue,
+      previousMonthLeadRevenue,
+      currentMonthVendorRevenue,
+      previousMonthVendorRevenue,
+      currentWeekVendors,
+      previousWeekVendors,
+      currentWeekBuyers,
+      previousWeekBuyers,
+      todayProducts,
+      yesterdayProducts,
     ] = await Promise.all([
-      supabase.from("users").select("*", { count: "exact", head: true }),
+      db.from("users").select("*", { count: "exact", head: true }),
       vendorsActiveQ,
       buyersQ,
-      supabase.from("products").select("*", { count: "exact", head: true }),
+      db.from("products").select("*", { count: "exact", head: true }),
       pendingKycQ,
       ordersCountQ,
       leadPurchasesAmtQ,
       vendorPaymentsQ,
       openTicketsQ,
+      sumLeadRevenueInRange(monthStart, nextMonthStart),
+      sumLeadRevenueInRange(previousMonthStart, monthStart),
+      sumVendorRevenueInRange(monthStart, nextMonthStart),
+      sumVendorRevenueInRange(previousMonthStart, monthStart),
+      countCreatedInRange({ table: "vendors", from: weekStart, to: tomorrowStart, stateScoped: true }),
+      countCreatedInRange({ table: "vendors", from: previousWeekStart, to: weekStart, stateScoped: true }),
+      countCreatedInRange({ table: "buyers", from: weekStart, to: tomorrowStart, stateScoped: true }),
+      countCreatedInRange({ table: "buyers", from: previousWeekStart, to: weekStart, stateScoped: true }),
+      countCreatedInRange({ table: "products", from: todayStart, to: tomorrowStart }),
+      countCreatedInRange({ table: "products", from: yesterdayStart, to: todayStart }),
     ]);
 
     const countErrors = [
@@ -1735,6 +1993,8 @@ router.get("/dashboard/overview", async (req, res) => {
       (sum, row) => sum + Number(row?.net_amount ?? row?.amount ?? 0),
       0
     );
+    const currentMonthRevenue = currentMonthLeadRevenue + currentMonthVendorRevenue;
+    const previousMonthRevenue = previousMonthLeadRevenue + previousMonthVendorRevenue;
 
     return res.json({
       success: true,
@@ -1747,6 +2007,12 @@ router.get("/dashboard/overview", async (req, res) => {
         totalProducts: productsRes.count || 0,
         pendingKyc: pendingKycRes.count || 0,
         openTickets: openTicketsRes.count || 0,
+        trends: {
+          totalRevenue: buildTrend(currentMonthRevenue, previousMonthRevenue, "this month"),
+          activeVendors: buildTrend(currentWeekVendors, previousWeekVendors, "this week"),
+          totalBuyers: buildTrend(currentWeekBuyers, previousWeekBuyers, "this week"),
+          totalProducts: buildTrend(todayProducts, yesterdayProducts, "today"),
+        },
         scopedToStates: scope || null,
       },
     });
@@ -1761,8 +2027,8 @@ router.get("/dashboard/counts", async (req, res) => {
   try {
     const scope = getAdminScope(req);
 
-    let buyersQ     = supabase.from("buyers").select("*", { count: "exact", head: true });
-    let pendingKycQ = supabase.from("vendors").select("*", { count: "exact", head: true }).in("kyc_status", ["PENDING", "SUBMITTED"]);
+    let buyersQ     = db.from("buyers").select("*", { count: "exact", head: true });
+    let pendingKycQ = db.from("vendors").select("*", { count: "exact", head: true }).in("kyc_status", ["PENDING", "SUBMITTED"]);
 
     if (scope) {
       buyersQ     = buyersQ.in("state", scope);
@@ -1771,7 +2037,7 @@ router.get("/dashboard/counts", async (req, res) => {
 
     const [buyersRes, productsRes, pendingKycRes] = await Promise.all([
       buyersQ,
-      supabase.from("products").select("*", { count: "exact", head: true }),
+      db.from("products").select("*", { count: "exact", head: true }),
       pendingKycQ,
     ]);
 
@@ -1803,7 +2069,7 @@ router.get("/dashboard/recent-support-tickets", async (req, res) => {
 
     // When scoped: only show tickets whose vendor is in this admin's states
     // Tickets with no vendor (buyer-only) are included when unscoped, excluded when scoped
-    let q = supabase
+    let q = db
       .from("support_tickets")
       .select(
         "id, subject, priority, status, created_at, vendor_id, buyer_id, vendors(company_name, owner_name, state), buyers(full_name, company_name)"
@@ -1840,7 +2106,7 @@ router.get("/dashboard/recent-vendors", async (req, res) => {
     const limit = Math.min(Number(req.query?.limit || 5), 50);
     const scope = getAdminScope(req);
 
-    let q = supabase
+    let q = db
       .from("vendors")
       .select("id, company_name, kyc_status, created_at, owner_name, state")
       .not("created_at", "is", null)
@@ -1864,7 +2130,7 @@ router.get("/dashboard/recent-vendors", async (req, res) => {
 router.get("/dashboard/recent-lead-purchases", async (req, res) => {
   try {
     const limit = Math.min(Number(req.query?.limit || 10), 50);
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from("lead_purchases")
       .select("id, vendor_id, lead_id, amount, payment_status, purchase_date, purchase_datetime, updated_at, vendor:vendors(company_name)")
       .order("purchase_datetime", { ascending: false, nullsFirst: false })
@@ -1896,7 +2162,7 @@ router.get("/dashboard/recent-lead-purchases", async (req, res) => {
 
 router.get("/dashboard/data-entry-performance", async (req, res) => {
   try {
-    const { data: employees, error } = await supabase
+    const { data: employees, error } = await db
       .from("employees")
       .select("id, full_name, email, user_id, role")
       .in("role", ["DATA_ENTRY", "DATAENTRY"]);
@@ -1914,6 +2180,7 @@ router.get("/dashboard/data-entry-performance", async (req, res) => {
         if (!userId) {
           return {
             id: emp.id,
+            employeeId: emp.id,
             name: displayName,
             vendorsCreated: 0,
             productsListed: 0,
@@ -1927,26 +2194,33 @@ router.get("/dashboard/data-entry-performance", async (req, res) => {
           `user_id.eq.${userId}`,
           emp?.id ? `assigned_to.eq.${emp.id}` : null,
         ].filter(Boolean).join(',');
-        const { count: vendorCount } = await supabase
+        const { count: vendorCount } = await db
           .from("vendors")
           .select("*", { count: "exact", head: true })
           .or(vendorFilter);
 
-        const { data: vendors } = await supabase
+        const { data: vendors } = await db
           .from("vendors")
-          .select("id")
+          .select("id, vendor_id")
           .or(vendorFilter);
 
         let productCount = 0;
         if (vendors && vendors.length > 0) {
-          const vendorIds = vendors.map((v) => v.id);
-          const { count: pCount } = await supabase
+          const vendorIds = Array.from(
+            new Set(
+              vendors
+                .flatMap((v) => [v.id, v.vendor_id])
+                .map((id) => String(id || "").trim())
+                .filter(Boolean)
+            )
+          );
+          const { count: pCount } = await db
             .from("products")
             .select("*", { count: "exact", head: true })
             .in("vendor_id", vendorIds);
           productCount = pCount || 0;
         } else {
-          const { count: pCount, error: pErr } = await supabase
+          const { count: pCount, error: pErr } = await db
             .from("products")
             .select("*", { count: "exact", head: true })
             .eq("created_by", userId);
@@ -1955,6 +2229,7 @@ router.get("/dashboard/data-entry-performance", async (req, res) => {
 
         return {
           id: userId,
+          employeeId: emp.id,
           name: displayName,
           vendorsCreated: vendorCount || 0,
           productsListed: productCount,
@@ -1978,7 +2253,7 @@ router.get('/subscription-requests/pending', async (req, res) => {
   try {
     const adminScope = getAdminScope(req); // null = all India, array = specific states
 
-    let query = supabase
+    let query = db
       .from('subscription_extension_requests')
       .select('*')
       .eq('status', 'FORWARDED')
@@ -2019,7 +2294,7 @@ router.post('/subscription-requests/:id/resolve', async (req, res) => {
     }
 
     // Fetch the request
-    const { data: extReq, error: fetchErr } = await supabase
+    const { data: extReq, error: fetchErr } = await db
       .from('subscription_extension_requests')
       .select('*')
       .eq('id', id)
@@ -2045,7 +2320,7 @@ router.post('/subscription-requests/:id/resolve', async (req, res) => {
 
     if (decision === 'APPROVE') {
       // Extend vendor's active subscription end_date
-      const { data: sub, error: subErr } = await supabase
+      const { data: sub, error: subErr } = await db
         .from('vendor_plan_subscriptions')
         .select('id, end_date')
         .eq('vendor_id', extReq.vendor_id)
@@ -2063,7 +2338,7 @@ router.post('/subscription-requests/:id/resolve', async (req, res) => {
       currentEnd.setDate(currentEnd.getDate() + extension_granted_days);
       const newEndDate = currentEnd.toISOString();
 
-      const { error: subUpdateErr } = await supabase
+      const { error: subUpdateErr } = await db
         .from('vendor_plan_subscriptions')
         .update({ end_date: newEndDate })
         .eq('id', sub.id);
@@ -2071,7 +2346,7 @@ router.post('/subscription-requests/:id/resolve', async (req, res) => {
       if (subUpdateErr) throw subUpdateErr;
 
       // Mark request resolved
-      await supabase
+      await db
         .from('subscription_extension_requests')
         .update({
           status: 'RESOLVED',
@@ -2095,7 +2370,7 @@ router.post('/subscription-requests/:id/resolve', async (req, res) => {
       return res.json({ success: true, message: `Subscription extended by ${extension_granted_days} days`, new_end_date: newEndDate });
     } else {
       // REJECT
-      await supabase
+      await db
         .from('subscription_extension_requests')
         .update({
           status: 'REJECTED',
@@ -2125,7 +2400,7 @@ router.post('/subscription-requests/:id/resolve', async (req, res) => {
 
 router.get('/states', async (req, res) => {
   try {
-    const { data, error } = await supabase.from('states').select('*').order('name');
+    const { data, error } = await db.from('states').select('*').order('name');
     if (error) throw error;
     res.json({ success: true, data: data || [] });
   } catch (e) {
@@ -2138,7 +2413,7 @@ router.post('/states', async (req, res) => {
     const { name } = req.body;
     if (!name) return res.status(400).json({ success: false, error: 'Name is required' });
     const slug = name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-    const { data, error } = await supabase.from('states').insert([{ name, slug, is_active: true }]).select().single();
+    const { data, error } = await db.from('states').insert([{ name, slug, is_active: true }]).select().single();
     if (error) throw error;
     res.json({ success: true, data });
   } catch (e) {
@@ -2155,7 +2430,7 @@ router.put('/states/:id', async (req, res) => {
       updates.name = name;
       updates.slug = name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
     }
-    const { data, error } = await supabase.from('states').update(updates).eq('id', id).select().single();
+    const { data, error } = await db.from('states').update(updates).eq('id', id).select().single();
     if (error) throw error;
     res.json({ success: true, data });
   } catch (e) {
@@ -2165,7 +2440,7 @@ router.put('/states/:id', async (req, res) => {
 
 router.delete('/states/:id', async (req, res) => {
   try {
-    const { error } = await supabase.from('states').delete().eq('id', req.params.id);
+    const { error } = await db.from('states').delete().eq('id', req.params.id);
     if (error) throw error;
     res.json({ success: true });
   } catch (e) {
@@ -2175,7 +2450,7 @@ router.delete('/states/:id', async (req, res) => {
 
 router.get('/cities', async (req, res) => {
   try {
-    const { data, error } = await supabase.from('cities').select('*, states(name)').order('name');
+    const { data, error } = await db.from('cities').select('*, states(name)').order('name');
     if (error) throw error;
     res.json({ success: true, data: data || [] });
   } catch (e) {
@@ -2188,7 +2463,7 @@ router.post('/cities', async (req, res) => {
     const { state_id, name } = req.body;
     if (!name || !state_id) return res.status(400).json({ success: false, error: 'State ID and Name are required' });
     const slug = name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-    const { data, error } = await supabase.from('cities').insert([{ state_id, name, slug, is_active: true }]).select().single();
+    const { data, error } = await db.from('cities').insert([{ state_id, name, slug, is_active: true }]).select().single();
     if (error) throw error;
     res.json({ success: true, data });
   } catch (e) {
@@ -2205,7 +2480,7 @@ router.put('/cities/:id', async (req, res) => {
       updates.name = name;
       updates.slug = name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
     }
-    const { data, error } = await supabase.from('cities').update(updates).eq('id', id).select().single();
+    const { data, error } = await db.from('cities').update(updates).eq('id', id).select().single();
     if (error) throw error;
     res.json({ success: true, data });
   } catch (e) {
@@ -2215,7 +2490,7 @@ router.put('/cities/:id', async (req, res) => {
 
 router.delete('/cities/:id', async (req, res) => {
   try {
-    const { error } = await supabase.from('cities').delete().eq('id', req.params.id);
+    const { error } = await db.from('cities').delete().eq('id', req.params.id);
     if (error) throw error;
     res.json({ success: true });
   } catch (e) {
@@ -2227,7 +2502,7 @@ router.delete('/cities/:id', async (req, res) => {
 router.get('/users', async (req, res) => {
   try {
     const { role, search, limit = 100, offset = 0 } = req.query;
-    let query = supabase
+    let query = db
       .from('users')
       .select('id, email, full_name, phone, role, created_at, is_active')
       .order('created_at', { ascending: false })
@@ -2252,7 +2527,7 @@ router.get('/users', async (req, res) => {
 router.get('/users/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { data: user, error } = await supabase
+    const { data: user, error } = await db
       .from('users')
       .select('id, email, full_name, phone, role, created_at, is_active')
       .eq('id', id)
@@ -2271,7 +2546,7 @@ router.get('/users/:id', async (req, res) => {
 router.get('/products', async (req, res) => {
   try {
     const { vendorId, limit = 100, offset = 0 } = req.query;
-    let query = supabase
+    let query = db
       .from('products')
       .select('id, name, vendor_id, status, created_at, price, images, micro_category_id')
       .order('created_at', { ascending: false })
@@ -2296,7 +2571,7 @@ router.post('/vendors/:vendorId/assign', async (req, res) => {
 
     if (!employee_id) return res.status(400).json({ success: false, error: 'employee_id is required' });
 
-    const { data: vendor, error: vendorErr } = await supabase
+    const { data: vendor, error: vendorErr } = await db
       .from('vendors')
       .select('id, company_name, assigned_to')
       .eq('id', vendorId)
@@ -2305,7 +2580,7 @@ router.post('/vendors/:vendorId/assign', async (req, res) => {
     if (vendorErr) return res.status(500).json({ success: false, error: vendorErr.message });
     if (!vendor) return res.status(404).json({ success: false, error: 'Vendor not found' });
 
-    const { data: updated, error: updateErr } = await supabase
+    const { data: updated, error: updateErr } = await db
       .from('vendors')
       .update({ assigned_to: employee_id, updated_at: new Date().toISOString() })
       .eq('id', vendorId)
@@ -2333,7 +2608,7 @@ router.post('/vendors/:vendorId/assign', async (req, res) => {
 router.get('/categories/micro/:microId/meta', async (req, res) => {
   try {
     const { microId } = req.params;
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('micro_category_meta')
       .select('*')
       .eq('micro_category_id', microId)
@@ -2358,7 +2633,7 @@ router.post('/categories/micro/meta', async (req, res) => {
       return res.status(400).json({ success: false, error: 'micro_category_id is required' });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('micro_category_meta')
       .insert([{ ...payload, created_at: new Date().toISOString() }])
       .select('*')
@@ -2381,7 +2656,7 @@ router.post('/categories/micro/meta/:id', async (req, res) => {
     const { id } = req.params;
     const payload = req.body || {};
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('micro_category_meta')
       .update({ ...payload, updated_at: new Date().toISOString() })
       .eq('id', id)
@@ -2403,7 +2678,7 @@ router.post('/categories/micro/meta/:id', async (req, res) => {
 router.delete('/categories/micro/meta/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { error } = await supabase.from('micro_category_meta').delete().eq('id', id);
+    const { error } = await db.from('micro_category_meta').delete().eq('id', id);
 
     if (error && (error.code === '42P01' || error.message?.includes('does not exist'))) {
       return res.json({ success: true });

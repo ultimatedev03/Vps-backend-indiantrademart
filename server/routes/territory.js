@@ -1,5 +1,5 @@
 import express from 'express';
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 import { normalizeRole } from '../lib/auth.js';
 import { writeAuditLog } from '../lib/audit.js';
@@ -73,7 +73,7 @@ async function resolveEmployeeProfile(authUser = {}) {
   const email = String(authUser?.email || '').trim().toLowerCase();
   if (!userId && !email) return null;
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('employees')
     .select('*')
     .or([userId ? `user_id.eq.${userId}` : null, email ? `email.eq.${email}` : null].filter(Boolean).join(','))
@@ -83,7 +83,7 @@ async function resolveEmployeeProfile(authUser = {}) {
   if (!data) return null;
 
   if (!data.user_id && userId) {
-    await supabase.from('employees').update({ user_id: userId }).eq('id', data.id);
+    await db.from('employees').update({ user_id: userId }).eq('id', data.id);
     data.user_id = userId;
   }
 
@@ -112,7 +112,7 @@ async function getScopedDivisionIds(role, actorUserId) {
   if (isVpOrAdmin(role)) return null;
 
   if (role === 'MANAGER') {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('vp_manager_division_allocations')
       .select('division_id')
       .eq('manager_user_id', actorUserId)
@@ -122,7 +122,7 @@ async function getScopedDivisionIds(role, actorUserId) {
   }
 
   if (role === 'SALES') {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('manager_sales_division_allocations')
       .select('division_id')
       .eq('sales_user_id', actorUserId)
@@ -140,7 +140,7 @@ async function getDivisionsByScope(scopedDivisionIds, reqQuery = {}) {
     ? 'id, division_key, name, slug, state_id, city_id, district_name, subdistrict_name, pincode_count, is_active, state:states(name), city:cities(name), division_pincodes:geo_division_pincodes(pincode)'
     : 'id, division_key, name, slug, state_id, city_id, district_name, subdistrict_name, pincode_count, is_active, state:states(name), city:cities(name)';
 
-  let query = supabase
+  let query = db
     .from('geo_divisions')
     .select(selectClause)
     .eq('is_active', true)
@@ -165,7 +165,7 @@ async function getDivisionsByScope(scopedDivisionIds, reqQuery = {}) {
 }
 
 async function validateEmployeeRole(userId, expectedRole) {
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('employees')
     .select('id, user_id, role, status')
     .eq('user_id', userId)
@@ -206,7 +206,7 @@ router.get('/employees', requireAuth(), async (req, res) => {
       ? [requestedRole]
       : ['MANAGER', 'SALES', 'VP'];
 
-    let query = supabase
+    let query = db
       .from('employees')
       .select('id, user_id, full_name, email, role, department, status, created_at')
       .in('role', roleFilter)
@@ -228,7 +228,7 @@ router.get('/employees', requireAuth(), async (req, res) => {
 
 async function releaseVpManagerAllocations(managerUserId, keepDivisionIds = []) {
   const keep = new Set(keepDivisionIds);
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('vp_manager_division_allocations')
     .select('id, division_id')
     .eq('manager_user_id', managerUserId)
@@ -241,7 +241,7 @@ async function releaseVpManagerAllocations(managerUserId, keepDivisionIds = []) 
     .filter(Boolean);
 
   if (toRelease.length) {
-    const { error: relErr } = await supabase
+    const { error: relErr } = await db
       .from('vp_manager_division_allocations')
       .update({
         allocation_status: 'RELEASED',
@@ -260,7 +260,7 @@ async function upsertVpManagerAllocations(vpUserId, managerUserId, divisionIds =
   let updated = 0;
 
   for (const divisionId of divisionIds) {
-    const { data: existing, error: findErr } = await supabase
+    const { data: existing, error: findErr } = await db
       .from('vp_manager_division_allocations')
       .select('id')
       .eq('manager_user_id', managerUserId)
@@ -270,7 +270,7 @@ async function upsertVpManagerAllocations(vpUserId, managerUserId, divisionIds =
     if (findErr) throw new Error(findErr.message || 'Failed to fetch VP allocation');
 
     if (existing?.id) {
-      const { error: updErr } = await supabase
+      const { error: updErr } = await db
         .from('vp_manager_division_allocations')
         .update({
           vp_user_id: vpUserId,
@@ -283,7 +283,7 @@ async function upsertVpManagerAllocations(vpUserId, managerUserId, divisionIds =
       continue;
     }
 
-    const { error: insErr } = await supabase.from('vp_manager_division_allocations').insert([
+    const { error: insErr } = await db.from('vp_manager_division_allocations').insert([
       {
         vp_user_id: vpUserId,
         manager_user_id: managerUserId,
@@ -313,7 +313,7 @@ router.get('/allocations/vp-manager', requireAuth(), async (req, res) => {
     let managerUserId = normalizeText(req.query?.manager_user_id);
     if (actor.role === 'MANAGER') managerUserId = actor.actorUserId;
 
-    let query = supabase
+    let query = db
       .from('vp_manager_division_allocations')
       .select('id, vp_user_id, manager_user_id, division_id, allocation_status, notes, allocated_at, released_at, updated_at, division:geo_divisions(id, name, city_id, state_id)')
       .order('allocated_at', { ascending: false });
@@ -351,7 +351,7 @@ router.post('/allocations/vp-manager', requireAuth(), async (req, res) => {
     if (!managerCheck.ok) return res.status(400).json({ success: false, error: managerCheck.reason });
 
     if (divisionIds.length) {
-      const { count, error } = await supabase
+      const { count, error } = await db
         .from('geo_divisions')
         .select('id', { count: 'exact', head: true })
         .in('id', divisionIds)
@@ -395,7 +395,7 @@ router.post('/allocations/vp-manager', requireAuth(), async (req, res) => {
 
 async function releaseManagerSalesAllocations(managerUserId, salesUserId, keepDivisionIds = []) {
   const keep = new Set(keepDivisionIds);
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('manager_sales_division_allocations')
     .select('id, division_id')
     .eq('manager_user_id', managerUserId)
@@ -409,7 +409,7 @@ async function releaseManagerSalesAllocations(managerUserId, salesUserId, keepDi
     .filter(Boolean);
 
   if (toRelease.length) {
-    const { error: relErr } = await supabase
+    const { error: relErr } = await db
       .from('manager_sales_division_allocations')
       .update({
         allocation_status: 'RELEASED',
@@ -424,7 +424,7 @@ async function releaseManagerSalesAllocations(managerUserId, salesUserId, keepDi
 }
 
 async function rebalanceDivision(managerUserId, salesUserId, divisionId) {
-  const { error } = await supabase
+  const { error } = await db
     .from('manager_sales_division_allocations')
     .update({
       allocation_status: 'RELEASED',
@@ -446,7 +446,7 @@ async function upsertManagerSalesAllocations(managerUserId, salesUserId, divisio
   for (const divisionId of divisionIds) {
     await rebalanceDivision(managerUserId, salesUserId, divisionId);
 
-    const { data: existing, error: findErr } = await supabase
+    const { data: existing, error: findErr } = await db
       .from('manager_sales_division_allocations')
       .select('id')
       .eq('manager_user_id', managerUserId)
@@ -457,7 +457,7 @@ async function upsertManagerSalesAllocations(managerUserId, salesUserId, divisio
     if (findErr) throw new Error(findErr.message || 'Failed to fetch sales allocation');
 
     if (existing?.id) {
-      const { error: updErr } = await supabase
+      const { error: updErr } = await db
         .from('manager_sales_division_allocations')
         .update({
           notes: notes || null,
@@ -469,7 +469,7 @@ async function upsertManagerSalesAllocations(managerUserId, salesUserId, divisio
       continue;
     }
 
-    const { error: insErr } = await supabase.from('manager_sales_division_allocations').insert([
+    const { error: insErr } = await db.from('manager_sales_division_allocations').insert([
       {
         manager_user_id: managerUserId,
         sales_user_id: salesUserId,
@@ -499,7 +499,7 @@ router.get('/allocations/manager-sales', requireAuth(), async (req, res) => {
     let managerUserId = normalizeText(req.query?.manager_user_id);
     if (actor.role === 'MANAGER') managerUserId = actor.actorUserId;
 
-    let query = supabase
+    let query = db
       .from('manager_sales_division_allocations')
       .select('id, manager_user_id, sales_user_id, division_id, allocation_status, notes, allocated_at, released_at, updated_at, division:geo_divisions(id, name, city_id, state_id)')
       .order('allocated_at', { ascending: false });
@@ -549,7 +549,7 @@ router.post('/allocations/manager-sales', requireAuth(), async (req, res) => {
     if (!salesCheck.ok) return res.status(400).json({ success: false, error: salesCheck.reason });
 
     if (divisionIds.length) {
-      const { count, error } = await supabase
+      const { count, error } = await db
         .from('geo_divisions')
         .select('id', { count: 'exact', head: true })
         .in('id', divisionIds)
@@ -626,7 +626,7 @@ router.get('/sales/vendors', requireAuth(), async (req, res) => {
     const seenVendorIds = new Set();
     const divisionByVendorId = new Map();
     if (divisionIds.length) {
-      const { data, error } = await supabase
+      const { data, error } = await db
         .from('vendor_division_map')
         .select('vendor_id, division_id')
         .in('division_id', divisionIds);
@@ -636,7 +636,7 @@ router.get('/sales/vendors', requireAuth(), async (req, res) => {
       (data || []).forEach((x) => divisionByVendorId.set(x.vendor_id, x.division_id));
 
       if (mappedVendorIds.length) {
-        const { data: vendors, error: vendorErr } = await supabase
+        const { data: vendors, error: vendorErr } = await db
           .from('vendors')
           .select('id, vendor_id, company_name, owner_name, email, phone, city, state, pincode, city_id, state_id, kyc_status, is_active')
           .in('id', mappedVendorIds)
@@ -660,7 +660,7 @@ router.get('/sales/vendors', requireAuth(), async (req, res) => {
     }
 
     if (cityIds.length) {
-      const { data: vendors, error } = await supabase
+      const { data: vendors, error } = await db
         .from('vendors')
         .select('id, vendor_id, company_name, owner_name, email, phone, city, state, pincode, city_id, state_id, kyc_status, is_active')
         .in('city_id', cityIds)
@@ -714,7 +714,7 @@ async function resolveDivisionFromVendor(vendorId, preferredDivisionId = '') {
   const requestedDivisionId = normalizeText(preferredDivisionId);
   if (requestedDivisionId) return requestedDivisionId;
 
-  const { data: mapped, error: mapErr } = await supabase
+  const { data: mapped, error: mapErr } = await db
     .from('vendor_division_map')
     .select('division_id')
     .eq('vendor_id', vendorId)
@@ -722,7 +722,7 @@ async function resolveDivisionFromVendor(vendorId, preferredDivisionId = '') {
   if (mapErr) throw new Error(mapErr.message || 'Failed to resolve vendor division map');
   if (mapped?.division_id) return mapped.division_id;
 
-  const { data: vendor, error: vendorErr } = await supabase
+  const { data: vendor, error: vendorErr } = await db
     .from('vendors')
     .select('city_id')
     .eq('id', vendorId)
@@ -730,7 +730,7 @@ async function resolveDivisionFromVendor(vendorId, preferredDivisionId = '') {
   if (vendorErr) throw new Error(vendorErr.message || 'Failed to resolve vendor city');
   if (!vendor?.city_id) return null;
 
-  const { data: division, error: divisionErr } = await supabase
+  const { data: division, error: divisionErr } = await db
     .from('geo_divisions')
     .select('id')
     .eq('city_id', vendor.city_id)
@@ -745,7 +745,7 @@ async function resolveDivisionFromVendor(vendorId, preferredDivisionId = '') {
 async function resolveVpUserForManager(managerUserId, divisionId = null) {
   if (!managerUserId) return null;
 
-  let scoped = supabase
+  let scoped = db
     .from('vp_manager_division_allocations')
     .select('vp_user_id')
     .eq('manager_user_id', managerUserId)
@@ -761,7 +761,7 @@ async function resolveVpUserForManager(managerUserId, divisionId = null) {
 
   if (!divisionId) return null;
 
-  const { data: fallbackVp, error: fallbackErr } = await supabase
+  const { data: fallbackVp, error: fallbackErr } = await db
     .from('vp_manager_division_allocations')
     .select('vp_user_id')
     .eq('manager_user_id', managerUserId)
@@ -778,7 +778,7 @@ async function resolveSalesHierarchyForVendor(salesUserId, vendorId, preferredDi
   let managerUserId = null;
 
   if (divisionId) {
-    const { data: scopedManager, error: scopedErr } = await supabase
+    const { data: scopedManager, error: scopedErr } = await db
       .from('manager_sales_division_allocations')
       .select('manager_user_id')
       .eq('sales_user_id', salesUserId)
@@ -792,7 +792,7 @@ async function resolveSalesHierarchyForVendor(salesUserId, vendorId, preferredDi
   }
 
   if (!managerUserId) {
-    const { data: fallbackManager, error: fallbackErr } = await supabase
+    const { data: fallbackManager, error: fallbackErr } = await db
       .from('manager_sales_division_allocations')
       .select('manager_user_id, division_id')
       .eq('sales_user_id', salesUserId)
@@ -828,7 +828,7 @@ router.post('/sales/engagements', requireAuth(), async (req, res) => {
       return res.status(400).json({ success: false, error: `Invalid engagement_type. Allowed: ${[...ENGAGEMENT_TYPES].join(', ')}` });
     }
 
-    const { data: vendor, error: vendorErr } = await supabase
+    const { data: vendor, error: vendorErr } = await db
       .from('vendors')
       .select('id')
       .eq('id', vendorId)
@@ -867,7 +867,7 @@ router.post('/sales/engagements', requireAuth(), async (req, res) => {
       updated_at: nowIso(),
     };
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('sales_vendor_engagements')
       .insert([payload])
       .select('*')
@@ -905,7 +905,7 @@ router.get('/sales/engagements', requireAuth(), async (req, res) => {
     const vendorId = normalizeText(req.query?.vendor_id);
     const status = normalizeUpper(req.query?.status || '');
 
-    let query = supabase
+    let query = db
       .from('sales_vendor_engagements')
       .select('id, vendor_id, sales_user_id, manager_user_id, vp_user_id, division_id, engagement_type, status, notes, next_follow_up_at, is_contact_unmasked, created_at, updated_at')
       .order('created_at', { ascending: false })
@@ -925,7 +925,7 @@ router.get('/sales/engagements', requireAuth(), async (req, res) => {
 
     let vendorById = new Map();
     if (vendorIds.length) {
-      const { data: vendors, error: vendorErr } = await supabase
+      const { data: vendors, error: vendorErr } = await db
         .from('vendors')
         .select('id, vendor_id, company_name, city, state, pincode')
         .in('id', vendorIds);
@@ -935,7 +935,7 @@ router.get('/sales/engagements', requireAuth(), async (req, res) => {
 
     let divisionById = new Map();
     if (divisionIds.length) {
-      const { data: divisions, error: divisionErr } = await supabase
+      const { data: divisions, error: divisionErr } = await db
         .from('geo_divisions')
         .select('id, name, city_id, state_id, pincode_count, city:cities(name), state:states(name)')
         .in('id', divisionIds);

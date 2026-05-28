@@ -1,5 +1,5 @@
 import express from 'express';
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 
 const router = express.Router();
@@ -54,7 +54,7 @@ async function insertWithOptionalColumns({ table, payload, select = '*', fallbac
   let lastError = null;
   while (attempts.length) {
     const candidate = attempts.shift();
-    const { data, error } = await supabase.from(table).insert([candidate]).select(select).maybeSingle();
+    const { data, error } = await db.from(table).insert([candidate]).select(select).maybeSingle();
     if (!error) return data;
 
     lastError = error;
@@ -72,7 +72,7 @@ async function resolveBuyerForUser(user = {}) {
   const email = normalizeEmail(user?.email || '');
 
   if (userId) {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('buyers')
       .select('*')
       .eq('user_id', userId)
@@ -83,7 +83,7 @@ async function resolveBuyerForUser(user = {}) {
   }
 
   if (email) {
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('buyers')
       .select('*')
       .ilike('email', email)
@@ -100,7 +100,7 @@ async function enrichVendors(rows = []) {
   const vendorIds = Array.from(new Set((rows || []).map((row) => row?.vendor_id).filter(Boolean).map(String)));
   if (!vendorIds.length) return rows || [];
 
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from('vendors')
     .select('id, user_id, vendor_id, company_name, owner_name, email, phone, profile_image, avatar_url, is_verified, verification_badge, kyc_status, is_active')
     .in('id', vendorIds);
@@ -134,7 +134,7 @@ async function listBuyerProposals(req, res) {
     const to = from + limit - 1;
     const status = String(req.query?.status || '').trim().toUpperCase();
 
-    let query = supabase.from('proposals').select('*', { count: 'exact' }).order('created_at', { ascending: false });
+    let query = db.from('proposals').select('*', { count: 'exact' }).order('created_at', { ascending: false });
     query = buildOwnerFilter(query, { buyerId, buyerEmail });
     if (status && status !== 'ALL') query = query.eq('status', status);
     query = query.range(from, to);
@@ -259,7 +259,7 @@ async function listBuyerLeads(req, res) {
     const buyerEmail = normalizeEmail(buyer?.email || req.user?.email || '');
     if (!buyerId && !buyerEmail) return res.status(403).json({ success: false, error: 'Buyer access required' });
 
-    let query = supabase.from('leads').select('*').order('created_at', { ascending: false }).limit(100);
+    let query = db.from('leads').select('*').order('created_at', { ascending: false }).limit(100);
     query = buildOwnerFilter(query, { buyerId, buyerEmail });
     const { data, error } = await query;
     if (error) return res.status(500).json({ success: false, error: error.message });
@@ -277,14 +277,14 @@ async function listSuggestions(req, res) {
     const buyerEmail = normalizeEmail(buyer?.email || req.user?.email || '');
     if (!buyerId && !buyerEmail) return res.status(403).json({ success: false, error: 'Buyer access required' });
 
-    let query = supabase.from('suggestions').select('*').order('created_at', { ascending: false }).limit(100);
+    let query = db.from('suggestions').select('*').order('created_at', { ascending: false }).limit(100);
     if (buyerId && buyerEmail) query = query.or(`buyer_id.eq.${buyerId},buyer_email.eq.${buyerEmail}`);
     else if (buyerId) query = query.eq('buyer_id', buyerId);
     else query = query.eq('buyer_email', buyerEmail);
 
     const { data, error } = await query;
     if (error) {
-      const contactQuery = supabase
+      const contactQuery = db
         .from('contact_submissions')
         .select('id, name, email, message, status, created_at')
         .eq('email', buyerEmail)
@@ -345,7 +345,7 @@ async function createSuggestion(req, res) {
         status: 'new',
         created_at: new Date().toISOString(),
       };
-      const { data, error } = await supabase.from('contact_submissions').insert([contactPayload]).select('*').maybeSingle();
+      const { data, error } = await db.from('contact_submissions').insert([contactPayload]).select('*').maybeSingle();
       if (error) throw error;
       return res.status(201).json({ success: true, suggestion: { ...data, subject, message } });
     }

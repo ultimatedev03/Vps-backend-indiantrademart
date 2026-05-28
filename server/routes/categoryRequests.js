@@ -1,6 +1,6 @@
 import express from 'express';
 import { randomUUID } from 'crypto';
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import { notifyUser, notifyRole } from '../lib/notify.js';
 import { requireEmployeeRoles } from '../middleware/requireEmployeeRoles.js';
 import { requireAuth } from '../middleware/requireAuth.js';
@@ -33,13 +33,13 @@ const resolveEmployeeUserId = async (emp) => {
   try {
     const email = normalizeEmail(emp.email);
     if (!email) return emp;
-    const { data: publicUser } = await supabase
+    const { data: publicUser } = await db
       .from('users')
       .select('id')
       .eq('email', email)
       .maybeSingle();
     if (!publicUser?.id) return emp;
-    await supabase.from('employees').update({ user_id: publicUser.id }).eq('id', emp.id);
+    await db.from('employees').update({ user_id: publicUser.id }).eq('id', emp.id);
     return { ...emp, user_id: publicUser.id };
   } catch {
     return emp;
@@ -60,7 +60,7 @@ router.post('/', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
       return res.status(400).json({ success: false, error: 'Group name is required' });
     }
 
-    const { data: vendor, error: vErr } = await supabase
+    const { data: vendor, error: vErr } = await db
       .from('vendors')
       .select('id, company_name, user_id')
       .eq('user_id', authUser.id)
@@ -73,7 +73,7 @@ router.post('/', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
       return res.status(403).json({ success: false, error: 'Vendor profile not found' });
     }
 
-    const { data: employees, error: eErr } = await supabase
+    const { data: employees, error: eErr } = await db
       .from('employees')
       .select('id, user_id, full_name, email, status, role')
       .in('role', ['DATA_ENTRY', 'DATAENTRY']);
@@ -114,7 +114,7 @@ router.post('/', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
       },
     };
 
-    const { data: ticket } = await supabase
+    const { data: ticket } = await db
       .from('support_tickets')
       .insert([ticketPayload])
       .select()
@@ -197,7 +197,7 @@ router.patch('/:taskId/status', requireEmployeeRoles(['DATA_ENTRY', 'ADMIN', 'SU
       return res.status(400).json({ success: false, error: `Invalid status. Use: ${VALID_STATUSES.join(', ')}` });
     }
 
-    const { data: ticket, error: tErr } = await supabase
+    const { data: ticket, error: tErr } = await db
       .from('support_tickets')
       .select('*')
       .eq('id', taskId)
@@ -260,7 +260,7 @@ router.patch('/:taskId/status', requireEmployeeRoles(['DATA_ENTRY', 'ADMIN', 'SU
     };
     const ticketStatus = statusMap[nextStatus] || 'OPEN';
 
-    const { data: updatedTicket, error: updErr } = await supabase
+    const { data: updatedTicket, error: updErr } = await db
       .from('support_tickets')
       .update({
         status: ticketStatus,

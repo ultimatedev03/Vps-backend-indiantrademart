@@ -1,4 +1,4 @@
-import { supabase } from "./supabaseClient.js";
+import { db } from "./dbClient.js";
 import { upsertPublicUser } from "./auth.js";
 import { buildAuthLookupMap, loadAuthLookupCache } from "./authLookupCache.js";
 
@@ -28,7 +28,7 @@ const resolveRoleCandidates = (role) => {
 async function getPublicUserById(userId) {
   const safeUserId = String(userId || "").trim();
   if (!safeUserId) return null;
-  const { data: byId, error: byIdError } = await supabase
+  const { data: byId, error: byIdError } = await db
     .from("users")
     .select("id, email, role, full_name")
     .eq("id", safeUserId)
@@ -40,7 +40,7 @@ async function getPublicUserById(userId) {
 async function getPublicUserByEmail(email) {
   const safeEmail = normalizeEmail(email);
   if (!safeEmail) return null;
-  const { data: byEmailRows, error: byEmailError } = await supabase
+  const { data: byEmailRows, error: byEmailError } = await db
     .from("users")
     .select("id, email, role, full_name")
     .ilike("email", safeEmail)
@@ -54,7 +54,7 @@ async function getPublicUserByEmail(email) {
 async function getAuthUserIdById(userId) {
   const safeUserId = String(userId || "").trim();
   if (!safeUserId) return null;
-  const { data, error } = await supabase.auth.admin.getUserById(safeUserId);
+  const { data, error } = await db.auth.admin.getUserById(safeUserId);
   if (error || !data?.user?.id) return null;
   return String(data.user.id);
 }
@@ -63,7 +63,7 @@ async function loadAuthLookupByEmail(force = false) {
   return loadAuthLookupCache({
     force,
     loader: async () => {
-      const { data, error } = await supabase.auth.admin.listUsers();
+      const { data, error } = await db.auth.admin.listUsers();
       if (error) return null;
       return buildAuthLookupMap(data?.users || []);
     },
@@ -104,7 +104,7 @@ async function resolveIdentityFromProfiles({ userId, email }) {
       .join(",");
 
     if (empFilters) {
-      const { data: employee, error: empError } = await supabase
+      const { data: employee, error: empError } = await db
         .from("employees")
         .select("email, role, full_name")
         .or(empFilters)
@@ -130,7 +130,7 @@ async function resolveIdentityFromProfiles({ userId, email }) {
       .join(",");
 
     if (vendorFilters) {
-      const { data: vendor, error: vendorError } = await supabase
+      const { data: vendor, error: vendorError } = await db
         .from("vendors")
         .select("email, owner_name, company_name")
         .or(vendorFilters)
@@ -156,7 +156,7 @@ async function resolveIdentityFromProfiles({ userId, email }) {
       .join(",");
 
     if (buyerFilters) {
-      const { data: buyer, error: buyerError } = await supabase
+      const { data: buyer, error: buyerError } = await db
         .from("buyers")
         .select("email, full_name, company_name")
         .or(buyerFilters)
@@ -246,7 +246,7 @@ export async function notifyUser(payload) {
       fullName: payload?.full_name || payload?.name || null,
     });
     if (!userId) return null;
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from("notifications")
       .insert([buildNotification({ ...payload, user_id: userId })])
       .select()
@@ -265,7 +265,7 @@ export async function notifyUsers(userIds = [], payload) {
     );
     if (!ids.length) return [];
     const rows = ids.map((id) => buildNotification({ ...payload, user_id: id }));
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from("notifications")
       .insert(rows)
       .select();
@@ -280,7 +280,7 @@ export async function notifyRole(role, payload) {
   try {
     const roleCandidates = resolveRoleCandidates(role);
     if (!roleCandidates.length) return [];
-    const { data: employees, error } = await supabase
+    const { data: employees, error } = await db
       .from("employees")
       .select("user_id, email, status, role, full_name");
     if (error || !employees?.length) return [];

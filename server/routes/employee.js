@@ -1,6 +1,6 @@
 import express from 'express';
 import { randomUUID } from 'crypto';
-import { supabase } from '../lib/supabaseClient.js';
+import { db } from '../lib/dbClient.js';
 import { inferCloudinaryResourceType, isCloudinaryConfigured, uploadBufferToCloudinary } from '../lib/cloudinaryUpload.js';
 import { writeAuditLog } from '../lib/audit.js';
 import { hashPassword, normalizeEmail, normalizeRole, upsertPublicUser } from '../lib/auth.js';
@@ -26,8 +26,8 @@ const CATEGORY_TABLE_BY_LEVEL = {
 };
 const CATEGORY_IMAGE_MIN_BYTES = 10 * 1024; // 10KB
 const CATEGORY_IMAGE_MAX_BYTES = 800 * 1024; // 800KB
-const PRODUCT_UPLOAD_MAX_BYTES = 10 * 1024 * 1024; // 10MB
-const PRODUCT_IMAGE_MIN_BYTES = 50 * 1024; // 50KB
+const PRODUCT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024; // source videos/PDFs can be larger; images are optimized client-side
+const PRODUCT_IMAGE_MIN_BYTES = 10 * 1024; // images are optimized before upload
 const PRODUCT_IMAGE_MAX_BYTES = 1024 * 1024; // 1MB
 const DEFAULT_PRODUCT_UPLOAD_BUCKETS_BY_TYPE = {
   image: ['product-images', 'product-media', 'objects', 'avatars'],
@@ -139,7 +139,7 @@ const isBucketAlreadyExistsError = (error) => {
 const ensurePublicBucket = async (bucketName) => {
   const bucket = sanitizeBucketName(bucketName);
   if (!bucket) return new Error('Invalid bucket name');
-  const { error } = await supabase.storage.createBucket(bucket, { public: true });
+  const { error } = await db.storage.createBucket(bucket, { public: true });
   if (error && !isBucketAlreadyExistsError(error)) return error;
   return null;
 };
@@ -337,7 +337,7 @@ async function resolveEmployeeProfile(authUser) {
   const email = String(authUser?.email || '').trim().toLowerCase();
 
   let employee = null;
-  const { data: byId } = await supabase
+  const { data: byId } = await db
     .from('employees')
     .select('*')
     .eq('user_id', userId)
@@ -345,7 +345,7 @@ async function resolveEmployeeProfile(authUser) {
   if (byId) employee = byId;
 
   if (!employee && email) {
-    const { data: byEmail } = await supabase
+    const { data: byEmail } = await db
       .from('employees')
       .select('*')
       .eq('email', email)
@@ -354,7 +354,7 @@ async function resolveEmployeeProfile(authUser) {
   }
 
   if (employee?.id && userId && employee.user_id !== userId) {
-    await supabase
+    await db
       .from('employees')
       .update({ user_id: userId })
       .eq('id', employee.id);
@@ -403,7 +403,7 @@ router.get('/staff', requireAuth(), async (req, res) => {
     const employee = await resolveStaffManager(req, res);
     if (!employee) return;
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('employees')
       .select('*')
       .order('created_at', { ascending: false });
@@ -474,7 +474,7 @@ router.post('/staff', requireAuth(), async (req, res) => {
       updated_at: new Date().toISOString(),
     };
 
-    const { data: existingByUserId, error: existingByUserIdError } = await supabase
+    const { data: existingByUserId, error: existingByUserIdError } = await db
       .from('employees')
       .select('*')
       .eq('user_id', publicUser.id)
@@ -487,7 +487,7 @@ router.post('/staff', requireAuth(), async (req, res) => {
     let existingEmployee = existingByUserId || null;
 
     if (!existingEmployee) {
-      const { data: existingByEmail, error: existingByEmailError } = await supabase
+      const { data: existingByEmail, error: existingByEmailError } = await db
         .from('employees')
         .select('*')
         .ilike('email', email)
@@ -503,7 +503,7 @@ router.post('/staff', requireAuth(), async (req, res) => {
 
     let employeeRow = null;
     if (existingEmployee?.id) {
-      const { data: updatedEmployee, error: updateEmployeeError } = await supabase
+      const { data: updatedEmployee, error: updateEmployeeError } = await db
         .from('employees')
         .update(employeePayload)
         .eq('id', existingEmployee.id)
@@ -516,7 +516,7 @@ router.post('/staff', requireAuth(), async (req, res) => {
 
       employeeRow = updatedEmployee || { ...existingEmployee, ...employeePayload };
     } else {
-      const { data: insertedEmployee, error: insertEmployeeError } = await supabase
+      const { data: insertedEmployee, error: insertEmployeeError } = await db
         .from('employees')
         .insert([
           {
@@ -550,7 +550,7 @@ router.patch('/staff/:employeeId', requireAuth(), async (req, res) => {
     if (!manager) return;
 
     const { employeeId } = req.params;
-    const { data: employeeRow, error: employeeError } = await supabase
+    const { data: employeeRow, error: employeeError } = await db
       .from('employees')
       .select('*')
       .eq('id', employeeId)
@@ -646,7 +646,7 @@ router.patch('/staff/:employeeId', requireAuth(), async (req, res) => {
       updates.user_id = publicUser.id;
     }
 
-    const { data: updatedEmployee, error: updateError } = await supabase
+    const { data: updatedEmployee, error: updateError } = await db
       .from('employees')
       .update(updates)
       .eq('id', employeeId)
@@ -684,7 +684,7 @@ router.patch('/staff/:employeeId', requireAuth(), async (req, res) => {
 });
 
 async function sumRevenueByPeriod({ startIso, endIso, endInclusive = true }) {
-  let byPurchaseDate = supabase
+  let byPurchaseDate = db
     .from('lead_purchases')
     .select('amount, purchase_date');
 
@@ -698,7 +698,7 @@ async function sumRevenueByPeriod({ startIso, endIso, endInclusive = true }) {
   // Legacy schema fallback: purchase_date column may not exist.
   const errText = String(error?.message || '').toLowerCase();
   if (error && (error?.code === '42703' || errText.includes('purchase_date'))) {
-    let byCreatedAt = supabase
+    let byCreatedAt = db
       .from('lead_purchases')
       .select('amount, created_at')
       .gte('created_at', startIso);
@@ -763,7 +763,7 @@ router.put('/me', requireAuth(), async (req, res) => {
 
     updates.updated_at = new Date().toISOString();
 
-    const { data: updated, error } = await supabase
+    const { data: updated, error } = await db
       .from('employees')
       .update(updates)
       .eq('id', employee.id)
@@ -849,7 +849,7 @@ router.post('/category-image-upload', requireAuth(), async (req, res) => {
       });
     }
 
-    const { error: uploadError } = await supabase.storage
+    const { error: uploadError } = await db.storage
       .from(CATEGORY_IMAGE_BUCKET)
       .upload(objectPath, buffer, {
         contentType,
@@ -860,7 +860,7 @@ router.post('/category-image-upload', requireAuth(), async (req, res) => {
       return res.status(500).json({ success: false, error: uploadError.message || 'Upload failed' });
     }
 
-    const { data } = supabase.storage.from(CATEGORY_IMAGE_BUCKET).getPublicUrl(objectPath);
+    const { data } = db.storage.from(CATEGORY_IMAGE_BUCKET).getPublicUrl(objectPath);
     return res.json({
       success: true,
       bucket: CATEGORY_IMAGE_BUCKET,
@@ -910,11 +910,11 @@ router.post('/product-media-upload', requireAuth(), async (req, res) => {
       return res.status(400).json({ success: false, error: 'Empty upload payload' });
     }
     if (buffer.length > PRODUCT_UPLOAD_MAX_BYTES) {
-      return res.status(413).json({ success: false, error: 'File too large (max 10MB)' });
+      return res.status(413).json({ success: false, error: 'File too large (max 50MB)' });
     }
     if (finalType === 'image') {
       if (buffer.length < PRODUCT_IMAGE_MIN_BYTES) {
-        return res.status(400).json({ success: false, error: 'Image too small (minimum 50KB)' });
+        return res.status(400).json({ success: false, error: 'Image too small (minimum 10KB)' });
       }
       if (buffer.length > PRODUCT_IMAGE_MAX_BYTES) {
         return res.status(413).json({ success: false, error: 'Image too large (maximum 1MB)' });
@@ -955,7 +955,7 @@ router.post('/product-media-upload', requireAuth(), async (req, res) => {
     };
 
     for (const bucket of buckets) {
-      let { error: uploadError } = await supabase.storage
+      let { error: uploadError } = await db.storage
         .from(bucket)
         .upload(objectPath, buffer, uploadOptions);
       const bucketMissingOnInitialTry = !!uploadError && isBucketMissingError(uploadError);
@@ -963,7 +963,7 @@ router.post('/product-media-upload', requireAuth(), async (req, res) => {
       if (bucketMissingOnInitialTry) {
         const bucketCreateError = await ensurePublicBucket(bucket);
         if (!bucketCreateError) {
-          const retryUpload = await supabase.storage.from(bucket).upload(objectPath, buffer, uploadOptions);
+          const retryUpload = await db.storage.from(bucket).upload(objectPath, buffer, uploadOptions);
           uploadError = retryUpload.error || null;
         } else {
           uploadError = bucketCreateError;
@@ -988,7 +988,7 @@ router.post('/product-media-upload', requireAuth(), async (req, res) => {
       return res.status(500).json({ success: false, error: errorMessage });
     }
 
-    const { data } = supabase.storage.from(uploadedBucket).getPublicUrl(objectPath);
+    const { data } = db.storage.from(uploadedBucket).getPublicUrl(objectPath);
     return res.json({
       success: true,
       bucket: uploadedBucket,
@@ -1038,7 +1038,7 @@ router.post('/category-update', requireAuth(), async (req, res) => {
       return res.status(400).json({ success: false, error: 'No allowed fields provided in payload' });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from(table)
       .update(payload)
       .eq('id', id)
@@ -1089,25 +1089,25 @@ router.get('/sales/stats', requireAuth(), async (req, res) => {
       converted7Res,
       convertedPrev7Res,
     ] = await Promise.all([
-      supabase.from('leads').select('*', { count: 'exact', head: true }),
-      supabase.from('leads').select('*', { count: 'exact', head: true }).in('status', conversions),
-      supabase
+      db.from('leads').select('*', { count: 'exact', head: true }),
+      db.from('leads').select('*', { count: 'exact', head: true }).in('status', conversions),
+      db
         .from('leads')
         .select('*', { count: 'exact', head: true })
         .gte('created_at', start7.toISOString())
         .lte('created_at', endIso),
-      supabase
+      db
         .from('leads')
         .select('*', { count: 'exact', head: true })
         .gte('created_at', prevStart7.toISOString())
         .lt('created_at', prevEnd7.toISOString()),
-      supabase
+      db
         .from('leads')
         .select('*', { count: 'exact', head: true })
         .in('status', conversions)
         .gte('created_at', start7.toISOString())
         .lte('created_at', endIso),
-      supabase
+      db
         .from('leads')
         .select('*', { count: 'exact', head: true })
         .in('status', conversions)
@@ -1181,7 +1181,7 @@ router.get('/sales/leads', requireAuth(), async (req, res) => {
       return res.status(403).json({ success: false, error: 'Sales access required' });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('leads')
       .select('*')
       .order('created_at', { ascending: false });
@@ -1243,7 +1243,7 @@ router.patch('/sales/leads/:leadId', requireAuth(), async (req, res) => {
 
     payload.updated_at = new Date().toISOString();
 
-    let { data, error } = await supabase
+    let { data, error } = await db
       .from('leads')
       .update(payload)
       .eq('id', leadId)
@@ -1254,7 +1254,7 @@ router.patch('/sales/leads/:leadId', requireAuth(), async (req, res) => {
       const retryPayload = { ...payload };
       delete retryPayload.sales_note;
 
-      ({ data, error } = await supabase
+      ({ data, error } = await db
         .from('leads')
         .update(retryPayload)
         .eq('id', leadId)
@@ -1288,7 +1288,7 @@ router.patch('/sales/leads/:leadId/status', requireAuth(), async (req, res) => {
       return res.status(400).json({ success: false, error: 'leadId and status are required' });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('leads')
       .update({ status: nextStatus, updated_at: new Date().toISOString() })
       .eq('id', leadId)
@@ -1319,11 +1319,11 @@ router.get('/sales/pricing-rules', requireAuth(), async (req, res) => {
       { data: vendorPlans, error: vendorPlanError },
       { data: auditRows, error: auditError },
     ] = await Promise.all([
-      supabase
+      db
         .from('vendor_plans')
         .select('*')
         .order('created_at', { ascending: false }),
-      supabase
+      db
         .from('audit_logs')
         .select('action, entity_type, entity_id, details, created_at')
         .eq('entity_type', PRICING_RULE_ENTITY_TYPE)
@@ -1430,7 +1430,7 @@ router.get('/manager/pricing-approvals', requireAuth(), async (req, res) => {
       return res.status(403).json({ success: false, error: 'Manager access required' });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('audit_logs')
       .select('action, entity_type, entity_id, details, created_at')
       .eq('entity_type', PRICING_RULE_ENTITY_TYPE)
@@ -1468,7 +1468,7 @@ router.post('/manager/pricing-approvals/:ruleId/decision', requireAuth(), async 
       return res.status(400).json({ success: false, error: 'decision must be APPROVE or REJECT' });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('audit_logs')
       .select('action, entity_type, entity_id, details, created_at')
       .eq('entity_type', PRICING_RULE_ENTITY_TYPE)
@@ -1533,7 +1533,7 @@ router.get('/sales/vendors', requireAuth(), async (req, res) => {
 
     const q = String(req.query?.q || '').trim().toLowerCase();
 
-    let query = supabase
+    let query = db
       .from('vendors')
       .select('id, company_name, state, city, email, phone')
       .eq('is_active', true)
@@ -1576,7 +1576,7 @@ router.post('/subscription-requests', requireAuth(), async (req, res) => {
       return res.status(400).json({ success: false, error: 'extension_days must be between 1 and 365' });
     }
 
-    const { data: inserted, error } = await supabase
+    const { data: inserted, error } = await db
       .from('subscription_extension_requests')
       .insert({
         vendor_id,
@@ -1619,7 +1619,7 @@ router.get('/subscription-requests', requireAuth(), async (req, res) => {
       return res.status(403).json({ success: false, error: 'Sales access required' });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('subscription_extension_requests')
       .select('*')
       .eq('created_by_email', String(employee.email || '').trim())
@@ -1642,7 +1642,7 @@ router.get('/subscription-requests/manager', requireAuth(), async (req, res) => 
       return res.status(403).json({ success: false, error: 'Manager access required' });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('subscription_extension_requests')
       .select('*')
       .in('status', ['OPEN', 'FORWARDED'])
@@ -1669,7 +1669,7 @@ router.post('/subscription-requests/:id/manager-forward', requireAuth(), async (
     const { id } = req.params;
     const manager_note = String(req.body?.manager_note || '').trim();
 
-    const { data: existing, error: fetchErr } = await supabase
+    const { data: existing, error: fetchErr } = await db
       .from('subscription_extension_requests')
       .select('id, status, current_level')
       .eq('id', id)
@@ -1684,7 +1684,7 @@ router.post('/subscription-requests/:id/manager-forward', requireAuth(), async (
       return res.status(409).json({ success: false, error: 'Request is already resolved or rejected' });
     }
 
-    const { data: updated, error: updateErr } = await supabase
+    const { data: updated, error: updateErr } = await db
       .from('subscription_extension_requests')
       .update({
         current_level: 'MANAGER',
@@ -1723,7 +1723,7 @@ router.get('/subscription-requests/vp', requireAuth(), async (req, res) => {
       return res.status(403).json({ success: false, error: 'VP access required' });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('subscription_extension_requests')
       .select('*')
       .eq('status', 'FORWARDED')
@@ -1750,7 +1750,7 @@ router.post('/subscription-requests/:id/vp-forward', requireAuth(), async (req, 
     const { id } = req.params;
     const vp_note = String(req.body?.vp_note || '').trim();
 
-    const { data: existing, error: fetchErr } = await supabase
+    const { data: existing, error: fetchErr } = await db
       .from('subscription_extension_requests')
       .select('id, status, current_level')
       .eq('id', id)
@@ -1765,7 +1765,7 @@ router.post('/subscription-requests/:id/vp-forward', requireAuth(), async (req, 
       return res.status(409).json({ success: false, error: 'Request is already resolved or rejected' });
     }
 
-    const { data: updated, error: updateErr } = await supabase
+    const { data: updated, error: updateErr } = await db
       .from('subscription_extension_requests')
       .update({
         current_level: 'VP',
@@ -1805,9 +1805,9 @@ router.get('/dashboard/stats', requireAuth(), async (req, res) => {
     const userId = authUser?.id;
 
     const [vendorsRes, ticketsRes, leadsRes] = await Promise.allSettled([
-      supabase.from('vendors').select('*', { count: 'exact', head: true }).or(`assigned_to.eq.${employeeId}${userId ? `,created_by.eq.${userId}` : ''}`),
-      supabase.from('support_tickets').select('*', { count: 'exact', head: true }).eq('assigned_to', employeeId),
-      supabase.from('leads').select('*', { count: 'exact', head: true }).eq('assigned_to', employeeId),
+      db.from('vendors').select('*', { count: 'exact', head: true }).or(`assigned_to.eq.${employeeId}${userId ? `,created_by.eq.${userId}` : ''}`),
+      db.from('support_tickets').select('*', { count: 'exact', head: true }).eq('assigned_to', employeeId),
+      db.from('leads').select('*', { count: 'exact', head: true }).eq('assigned_to', employeeId),
     ]);
 
     return res.json({
@@ -1835,7 +1835,7 @@ router.get('/requirements', requireAuth(), async (req, res) => {
     const { status, search, limit = 50, page = 1 } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
 
-    let query = supabase
+    let query = db
       .from('leads')
       .select('*')
       .order('created_at', { ascending: false })
@@ -1860,7 +1860,7 @@ router.patch('/requirements/:id/status', requireAuth(), async (req, res) => {
     const { status } = req.body || {};
     if (!status) return res.status(400).json({ success: false, error: 'status is required' });
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('leads')
       .update({ status: String(status).toUpperCase(), updated_at: new Date().toISOString() })
       .eq('id', id)
@@ -1882,7 +1882,7 @@ router.get('/suggestions', requireAuth(), async (req, res) => {
     if (!employee) return res.status(404).json({ success: false, error: 'Employee profile not found' });
 
     // Return suggestions from the suggestions table or empty array if not set up
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('employee_suggestions')
       .select('*')
       .eq('employee_id', employee.id)
@@ -1914,7 +1914,7 @@ router.post('/sales/leads', requireAuth(), async (req, res) => {
     }
 
     const payload = req.body || {};
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from('leads')
       .insert([{
         title: payload.title || payload.product_name || 'Sales Lead',
