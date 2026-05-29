@@ -111,7 +111,6 @@ const apiLimiter = rateLimit({
   skip: (req) => {
     if (runtimeConfig.disableApiRateLimit) return true;
     if (
-      !runtimeConfig.isProd &&
       req.path === '/db/query' &&
       String(req.body?.operation || 'select').toLowerCase() === 'select'
     ) {

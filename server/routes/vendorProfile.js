@@ -4549,7 +4549,21 @@ router.get('/me/lead-stats', requireAuth({ roles: ['VENDOR'] }), async (req, res
 router.get('/me/dashboard-stats', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
   try {
     const vendor = buildVendorResponse(await resolveVendorForUser(req.user));
-    if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
+    if (!vendor) {
+      return res.json({
+        success: true,
+        stats: {
+          totalProducts: 0,
+          totalLeads: 0,
+          totalMessages: 0,
+          profileCompletion: 0,
+          kycStatus: 'PENDING',
+          trustScore: 0,
+          rating: 0,
+          vendorId: null,
+        },
+      });
+    }
     const vendorIds = await resolveVendorIdsForUser(req.user);
     if (!vendorIds.includes(vendor.id)) vendorIds.unshift(vendor.id);
 
