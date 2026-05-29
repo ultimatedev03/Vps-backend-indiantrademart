@@ -3695,7 +3695,7 @@ router.get('/:vendorId([0-9a-fA-F-]{36})', async (req, res) => {
 
 router.get(/^\/(?!me(?:\/|$))([A-Za-z0-9][A-Za-z0-9_-]*)$/, async (req, res) => {
   try {
-    const [vendorSlug] = req.params;
+    const vendorSlug = req.params[0];
     const requestedSlug = String(vendorSlug || '').trim();
     if (!requestedSlug) {
       return res.status(400).json({ success: false, error: 'Vendor slug required' });
