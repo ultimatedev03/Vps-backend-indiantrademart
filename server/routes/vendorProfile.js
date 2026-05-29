@@ -4574,8 +4574,6 @@ router.get('/me/dashboard-stats', requireAuth({ roles: ['VENDOR'] }), async (req
     }
 
     const userId = String(req.user?.id || '').trim();
-    const userEmail = normalizeEmail(req.user?.email || '');
-
     const [
       totalProducts,
       directLeads,
@@ -4590,7 +4588,6 @@ router.get('/me/dashboard-stats', requireAuth({ roles: ['VENDOR'] }), async (req
       (async () => {
         const identityFilters = [];
         if (userId) identityFilters.push(`user_id.eq.${userId}`);
-        if (userEmail) identityFilters.push(`user_email.ilike.${userEmail}`);
         if (!identityFilters.length) return 0;
 
         let query = db
