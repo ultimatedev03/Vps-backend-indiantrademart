@@ -652,7 +652,40 @@ async function fetchVendorByPublicSlug(slug) {
     return { vendor: null, error: null };
   }
 
-  return { vendor: data || null, error };
+  if (error || data) return { vendor: data || null, error };
+
+  const { data: byPublicId, error: publicIdError } = await db
+    .from('vendors')
+    .select('*')
+    .eq('vendor_id', normalizedSlug)
+    .maybeSingle();
+
+  if (publicIdError && !isMissingColumnError(publicIdError)) {
+    return { vendor: null, error: publicIdError };
+  }
+  if (byPublicId) return { vendor: byPublicId, error: null };
+
+  const slugTokens = normalizedSlug.split('-').filter((token) => token.length >= 2);
+  const strongestToken = slugTokens.find((token) => token.length >= 4) || slugTokens[0] || '';
+
+  if (!strongestToken) return { vendor: null, error: null };
+
+  const { data: candidates, error: candidatesError } = await db
+    .from('vendors')
+    .select('*')
+    .ilike('company_name', `%${strongestToken}%`)
+    .limit(100);
+
+  if (candidatesError) return { vendor: null, error: candidatesError };
+
+  const vendor = (candidates || []).find((row) => {
+    const rowSlug = publicSlugify(row?.slug);
+    const companySlug = publicSlugify(row?.company_name);
+    const legalCompanySlug = publicSlugify(row?.legal_company_name);
+    return [rowSlug, companySlug, legalCompanySlug].filter(Boolean).includes(normalizedSlug);
+  });
+
+  return { vendor: vendor || null, error: null };
 }
 
 async function fetchVendorById(vendorId) {
@@ -709,6 +742,15 @@ const normalizeText = (value) =>
   String(value || '')
     .toLowerCase()
     .trim();
+
+const publicSlugify = (value = '') =>
+  String(value || '')
+    .toLowerCase()
+    .trim()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-{2,}/g, '-');
 
 const dedupe = (arr = []) => Array.from(new Set((arr || []).filter(Boolean)));
 
@@ -3641,6 +3683,25 @@ router.get('/:vendorId([0-9a-fA-F-]{36})', async (req, res) => {
     }
 
     const { vendor, error } = await resolvePublicVendorRecord(vendorId);
+
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    if (!vendor) return res.status(404).json({ success: false, error: 'Vendor not found' });
+
+    return res.json({ success: true, vendor });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get('/:vendorSlug([A-Za-z0-9][A-Za-z0-9_-]*)', async (req, res) => {
+  try {
+    const { vendorSlug } = req.params;
+    const requestedSlug = String(vendorSlug || '').trim();
+    if (!requestedSlug) {
+      return res.status(400).json({ success: false, error: 'Vendor slug required' });
+    }
+
+    const { vendor, error } = await resolvePublicVendorRecord(requestedSlug);
 
     if (error) return res.status(500).json({ success: false, error: error.message });
     if (!vendor) return res.status(404).json({ success: false, error: 'Vendor not found' });
