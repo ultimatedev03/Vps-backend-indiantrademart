@@ -24,6 +24,7 @@ const KYC_DOC_MAX_BYTES = 5 * 1024 * 1024;
 const KYC_ALLOWED_DOC_TYPES = new Set(['GST', 'PAN', 'AADHAR', 'BANK']);
 const KYC_ALLOWED_MIME = new Set(['image/jpeg', 'image/jpg', 'image/png']);
 const KYC_APPROVED_STATUSES = new Set(['APPROVED', 'VERIFIED']);
+const PUBLIC_VENDOR_RESERVED_SLUGS = new Set(['me']);
 
 const MIME_EXT = {
   'image/jpeg': 'jpg',
@@ -3693,10 +3694,12 @@ router.get('/:vendorId([0-9a-fA-F-]{36})', async (req, res) => {
   }
 });
 
-router.get('/:vendorSlug([A-Za-z0-9][A-Za-z0-9_-]*)', async (req, res) => {
+router.get('/:vendorSlug([A-Za-z0-9][A-Za-z0-9_-]*)', async (req, res, next) => {
   try {
     const { vendorSlug } = req.params;
     const requestedSlug = String(vendorSlug || '').trim();
+    if (PUBLIC_VENDOR_RESERVED_SLUGS.has(requestedSlug.toLowerCase())) return next('route');
+
     if (!requestedSlug) {
       return res.status(400).json({ success: false, error: 'Vendor slug required' });
     }
