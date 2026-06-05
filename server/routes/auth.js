@@ -204,10 +204,23 @@ async function assertUserActive(user) {
   if (!user?.id) return { ok: false, error: 'User not found' };
   const role = normalizeRole(user.role || 'USER');
 
+  const readAccountIsActive = (account) => {
+    if (!account || typeof account !== 'object') return null;
+
+    if (account.terminated_at || account.suspended_at) return false;
+
+    const normalizedStatus = String(account.status || '').trim().toUpperCase();
+    if (['TERMINATED', 'SUSPENDED', 'INACTIVE'].includes(normalizedStatus)) return false;
+    if (normalizedStatus === 'ACTIVE') return true;
+
+    if (typeof account.is_active === 'boolean') return account.is_active;
+    return null;
+  };
+
   if (role === 'VENDOR') {
     const { data: vendor } = await db
       .from('vendors')
-      .select('is_active')
+      .select('*')
       .or(
         [
           `user_id.eq.${user.id}`,
@@ -219,15 +232,19 @@ async function assertUserActive(user) {
       .maybeSingle();
 
     if (!vendor) return { ok: false, error: 'Vendor profile not found' };
-    // Suspended/terminated vendors are allowed to login.
-    // UI + protected routes enforce restricted access (support/logout only).
+    if (readAccountIsActive(vendor) === false) {
+      return {
+        ok: false,
+        error: 'Your vendor account is suspended or terminated. Please contact support.',
+      };
+    }
     return { ok: true };
   }
 
   if (role === 'BUYER') {
     const { data: buyer } = await db
       .from('buyers')
-      .select('is_active')
+      .select('*')
       .or(
         [
           `user_id.eq.${user.id}`,
@@ -238,9 +255,13 @@ async function assertUserActive(user) {
       )
       .maybeSingle();
 
-    // Suspended/terminated buyers are allowed to login.
-    // Buyer portal route guards will restrict them to support/tickets pages.
     if (!buyer) return { ok: true };
+    if (readAccountIsActive(buyer) === false) {
+      return {
+        ok: false,
+        error: 'Your buyer account is suspended or terminated. Please contact support.',
+      };
+    }
     return { ok: true };
   }
 

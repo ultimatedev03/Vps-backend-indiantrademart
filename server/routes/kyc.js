@@ -27,6 +27,17 @@ const isOptionalSchemaError = (error, relationName = '') => {
 const isHttpUrl = (v) => typeof v === 'string' && /^https?:\/\//i.test(v);
 const looksLikePdf = (v = '') => String(v || '').toLowerCase().includes('.pdf');
 const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
+const TRACKED_KYC_DOCUMENT_TYPES = new Set(['GST', 'PAN', 'AADHAR', 'BANK']);
+
+const normalizeKycDocumentType = (value = '') => {
+  const raw = String(value || '').trim().toUpperCase();
+  if (!raw) return '';
+  if (['GST', 'GST_CERTIFICATE', 'GSTIN_CERTIFICATE'].includes(raw)) return 'GST';
+  if (['PAN', 'PAN_CARD'].includes(raw)) return 'PAN';
+  if (['AADHAR', 'AADHAAR', 'AADHAR_CARD', 'AADHAAR_CARD', 'COMPANY_REGISTRATION', 'REGISTRATION_CERTIFICATE'].includes(raw)) return 'AADHAR';
+  if (raw.startsWith('BANK') || ['BANK_PROOF', 'BANK_STATEMENT', 'CANCELLED_CHEQUE', 'CHEQUE_COPY', 'PASSBOOK'].includes(raw)) return 'BANK';
+  return raw;
+};
 
 const sendReminderEmail = async ({ to, subject, text, html }) => {
   const safeTo = normalizeEmail(to);
@@ -228,20 +239,22 @@ router.post(
       }
 
       const counts = {};
-      const bumpCount = (vendorId) => {
+      const vendorTypeMap = new Map();
+      const ensureVendorTypeSet = (vendorId) => {
         const key = String(vendorId || '').trim();
-        if (!key) return;
-        counts[key] = (counts[key] || 0) + 1;
+        if (!key) return null;
+        if (!vendorTypeMap.has(key)) {
+          vendorTypeMap.set(key, new Set());
+        }
+        return vendorTypeMap.get(key);
       };
 
-      const dedupe = new Set();
-      const markAndCount = (vendorId, signature) => {
-        const key = String(vendorId || '').trim();
-        if (!key) return;
-        const dedupeKey = `${key}::${String(signature || '').trim()}`;
-        if (dedupe.has(dedupeKey)) return;
-        dedupe.add(dedupeKey);
-        bumpCount(key);
+      const markDocumentType = (vendorId, docType) => {
+        const normalizedType = normalizeKycDocumentType(docType);
+        if (!TRACKED_KYC_DOCUMENT_TYPES.has(normalizedType)) return;
+        const typeSet = ensureVendorTypeSet(vendorId);
+        if (!typeSet) return;
+        typeSet.add(normalizedType);
       };
 
       try {
@@ -255,16 +268,7 @@ router.post(
           }
         } else {
           (vDocs || []).forEach((row) => {
-            const signature =
-              row?.document_url ||
-              row?.url ||
-              row?.public_url ||
-              row?.file_path ||
-              row?.path ||
-              row?.original_name ||
-              row?.file_name ||
-              `${row?.document_type || row?.type || ''}:${row?.uploaded_at || row?.created_at || row?.updated_at || ''}`;
-            markAndCount(row?.vendor_id, signature);
+            markDocumentType(row?.vendor_id, row?.document_type || row?.type);
           });
         }
       } catch {
@@ -279,16 +283,7 @@ router.post(
 
         if (!legacyError) {
           (legacyDocs || []).forEach((row) => {
-            const signature =
-              row?.document_url ||
-              row?.url ||
-              row?.public_url ||
-              row?.file_path ||
-              row?.path ||
-              row?.original_name ||
-              row?.file_name ||
-              `${row?.document_type || row?.type || ''}:${row?.created_at || row?.updated_at || ''}`;
-            markAndCount(row?.vendor_id, signature);
+            markDocumentType(row?.vendor_id, row?.document_type || row?.type);
           });
         } else if (!isOptionalSchemaError(legacyError, 'kyc_documents')) {
           return res.status(500).json({ success: false, error: legacyError.message || 'Failed to fetch legacy KYC documents' });
@@ -298,9 +293,7 @@ router.post(
       }
 
       vendorIds.forEach((id) => {
-        if (!Object.prototype.hasOwnProperty.call(counts, id)) {
-          counts[id] = 0;
-        }
+        counts[id] = vendorTypeMap.get(id)?.size || 0;
       });
 
       return res.json({ success: true, counts });

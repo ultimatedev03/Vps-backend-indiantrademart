@@ -576,34 +576,39 @@ async function resolveChatBlockStatusForProposal(proposal = {}, actorPublicUserI
     return { ...DEFAULT_CHAT_BLOCK_STATUS };
   }
 
-  const filter = `and(blocker_user_id.eq.${actorUserId},blocked_user_id.eq.${counterpartUserId}),and(blocker_user_id.eq.${counterpartUserId},blocked_user_id.eq.${actorUserId})`;
-  const { data, error } = await db
-    .from('chat_blocks')
-    .select('blocker_user_id, blocked_user_id')
-    .or(filter);
+  const readBlockPair = async (blockerUserId, blockedUserId) => {
+    const { data, error } = await db
+      .from('chat_blocks')
+      .select('blocker_user_id, blocked_user_id')
+      .eq('blocker_user_id', blockerUserId)
+      .eq('blocked_user_id', blockedUserId)
+      .maybeSingle();
 
-  if (error) {
-    if (isMissingChatBlocksRelation(error)) {
-      warnMissingChatBlocksOnce();
-      return {
-        ...DEFAULT_CHAT_BLOCK_STATUS,
-        counterpart_user_id: counterpartUserId,
-      };
+    if (error) {
+      if (isMissingChatBlocksRelation(error)) {
+        return { missingRelation: true, row: null };
+      }
+      throw new Error(error.message || 'Failed to load chat block status');
     }
-    throw new Error(error.message || 'Failed to load chat block status');
+
+    return { missingRelation: false, row: data || null };
+  };
+
+  const [blockedByMeResult, blockedMeResult] = await Promise.all([
+    readBlockPair(actorUserId, counterpartUserId),
+    readBlockPair(counterpartUserId, actorUserId),
+  ]);
+
+  if (blockedByMeResult.missingRelation || blockedMeResult.missingRelation) {
+    warnMissingChatBlocksOnce();
+    return {
+      ...DEFAULT_CHAT_BLOCK_STATUS,
+      counterpart_user_id: counterpartUserId,
+    };
   }
 
-  const rows = Array.isArray(data) ? data : [];
-  const blockedByMe = rows.some(
-    (row) =>
-      String(row?.blocker_user_id || '').trim() === actorUserId &&
-      String(row?.blocked_user_id || '').trim() === counterpartUserId
-  );
-  const blockedMe = rows.some(
-    (row) =>
-      String(row?.blocker_user_id || '').trim() === counterpartUserId &&
-      String(row?.blocked_user_id || '').trim() === actorUserId
-  );
+  const blockedByMe = Boolean(blockedByMeResult.row);
+  const blockedMe = Boolean(blockedMeResult.row);
 
   return {
     blocked_by_me: blockedByMe,
