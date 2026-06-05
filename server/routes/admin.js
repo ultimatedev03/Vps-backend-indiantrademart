@@ -211,6 +211,37 @@ function buildVendorSearchFilters(search) {
   return Array.from(filters).join(",");
 }
 
+function buildVendorExactSearchFilters(search) {
+  const raw = String(search || "").trim();
+  if (!raw) return "";
+
+  const filters = new Set();
+  const normalizedEmail = normalizeEmail(raw);
+  const compact = raw.replace(/\s+/g, " ").trim();
+  const phoneDigits = raw.replace(/\D/g, "");
+
+  if (EMAIL_SEARCH_RE.test(raw) && normalizedEmail) {
+    filters.add(`email.ilike.${escapeIlikeTerm(normalizedEmail)}`);
+  }
+
+  if (UUID_LIKE_RE.test(raw)) {
+    filters.add(`id.eq.${raw}`);
+  }
+
+  if (compact) {
+    const escaped = escapeIlikeTerm(compact);
+    filters.add(`company_name.ilike.${escaped}`);
+    filters.add(`owner_name.ilike.${escaped}`);
+    filters.add(`vendor_id.ilike.${escaped}`);
+  }
+
+  if (phoneDigits.length >= 10) {
+    filters.add(`phone.ilike.${escapeIlikeTerm(phoneDigits)}`);
+  }
+
+  return Array.from(filters).join(",");
+}
+
 async function findPublicUserByEmail(email) {
   const target = normalizeEmail(email);
   if (!target) return null;
@@ -754,62 +785,98 @@ router.get("/vendors", async (req, res) => {
       ? parsedOffset
       : 0;
 
-    let vendorQuery = db
-      .from("vendors")
-      .select(
-        "id, vendor_id, company_name, owner_name, email, phone, kyc_status, created_at, is_active, joined_on, joined_at, registration_date, registered_at",
-        { count: "exact" }
-      )
-      .order("created_at", { ascending: false })
-      .range(safeOffset, safeOffset + safeLimit - 1);
+    const buildVendorBaseQuery = () => {
+      let query = db
+        .from("vendors")
+        .select(
+          "id, vendor_id, company_name, owner_name, email, phone, kyc_status, created_at, is_active, status, terminated_at, joined_on, joined_at, registration_date, registered_at",
+          { count: "exact" }
+        )
+        .order("created_at", { ascending: false });
 
-    // State-scope filtering: admin only sees vendors from their assigned states
-    const adminScope = getAdminScope(req);
-    if (adminScope) {
-      vendorQuery = vendorQuery.in("state", adminScope);
-    }
+      const adminScope = getAdminScope(req);
+      if (adminScope) {
+        query = query.in("state", adminScope);
+      }
 
-    if (creatorId || creatorEmployeeId) {
-      const creatorFilter = [
-        creatorId ? `created_by_user_id.eq.${creatorId}` : null,
-        creatorId ? `assigned_to.eq.${creatorId}` : null,
-        creatorId ? `user_id.eq.${creatorId}` : null,
-        creatorEmployeeId ? `assigned_to.eq.${creatorEmployeeId}` : null,
-      ].filter(Boolean).join(",");
-      vendorQuery = vendorQuery.or(creatorFilter);
-    }
+      if (creatorId || creatorEmployeeId) {
+        const creatorFilter = [
+          creatorId ? `created_by_user_id.eq.${creatorId}` : null,
+          creatorId ? `assigned_to.eq.${creatorId}` : null,
+          creatorId ? `user_id.eq.${creatorId}` : null,
+          creatorEmployeeId ? `assigned_to.eq.${creatorEmployeeId}` : null,
+        ].filter(Boolean).join(",");
+        query = query.or(creatorFilter);
+      }
 
-    const kyc = kycRaw.toUpperCase();
-    if (kyc && kyc !== "ALL") {
-      vendorQuery = vendorQuery.eq("kyc_status", kyc);
-    }
+      const kyc = kycRaw.toUpperCase();
+      if (kyc && kyc !== "ALL") {
+        query = query.eq("kyc_status", kyc);
+      }
 
-    const active = activeRaw.toLowerCase();
-    if (active === "active") {
-      vendorQuery = vendorQuery.neq("is_active", false);
-    } else if (active === "inactive" || active === "terminated" || active === "suspended") {
-      vendorQuery = vendorQuery.eq("is_active", false);
-    }
+      const active = activeRaw.toLowerCase();
+      if (active === "active") {
+        query = query.neq("is_active", false);
+      } else if (active === "inactive" || active === "terminated" || active === "suspended") {
+        query = query.eq("is_active", false);
+      }
+
+      if (hasJoinedFrom) {
+        query = query.gte("created_at", parsedJoinedFrom.toISOString());
+      }
+
+      if (hasJoinedTo) {
+        query = query.lt("created_at", parsedJoinedTo.toISOString());
+      }
+
+      return query;
+    };
+
+    let vendorQuery = buildVendorBaseQuery();
 
     if (search) {
-      const searchFilters = buildVendorSearchFilters(search);
-      if (searchFilters) vendorQuery = vendorQuery.or(searchFilters);
+      const exactSearchFilters = buildVendorExactSearchFilters(search);
+      if (exactSearchFilters) {
+        const exactQuery = buildVendorBaseQuery()
+          .or(exactSearchFilters)
+          .range(0, MAX_VENDOR_LIMIT - 1);
+        const { data: exactVendors, error: exactError, count: exactCount } = await exactQuery;
+        if (exactError) {
+          return res.status(500).json({ success: false, error: exactError.message });
+        }
+        if (Array.isArray(exactVendors) && exactVendors.length) {
+          vendorQuery = null;
+          const normalizedExactList = exactVendors;
+          var vendors = normalizedExactList.slice(safeOffset, safeOffset + safeLimit);
+          var count = Number.isFinite(exactCount) ? exactCount : normalizedExactList.length;
+        }
+      }
     }
 
-    if (hasJoinedFrom) {
-      vendorQuery = vendorQuery.gte("created_at", parsedJoinedFrom.toISOString());
+    if (vendorQuery) {
+      if (search) {
+        const searchFilters = buildVendorSearchFilters(search);
+        if (searchFilters) vendorQuery = vendorQuery.or(searchFilters);
+      }
+      vendorQuery = vendorQuery.range(safeOffset, safeOffset + safeLimit - 1);
     }
 
-    if (hasJoinedTo) {
-      vendorQuery = vendorQuery.lt("created_at", parsedJoinedTo.toISOString());
-    }
-
-    const { data: vendors, error, count } = await vendorQuery;
+    const vendorResponse = vendorQuery ? await vendorQuery : { data: vendors, error: null, count };
+    const { data: vendorsData, error, count: resultCount } = vendorResponse;
     if (error) {
       return res.status(500).json({ success: false, error: error.message });
     }
 
-    const vendorsList = Array.isArray(vendors) ? vendors : [];
+    const normalizeTinyIntBoolean = (value) => {
+      if (typeof value === "boolean") return value;
+      if (typeof value === "number") return value !== 0;
+      const normalized = String(value ?? "").trim().toLowerCase();
+      if (["1", "true", "yes", "active"].includes(normalized)) return true;
+      if (["0", "false", "no", "inactive", "terminated", "suspended"].includes(normalized)) return false;
+      return value;
+    };
+
+    const vendorsList = Array.isArray(vendorsData) ? vendorsData : [];
     const vendorIds = vendorsList.map((v) => v.id).filter(Boolean);
     const publicVendorIds = vendorsList.map((v) => v.vendor_id).filter(Boolean);
     const vendorLookupMap = new Map();
@@ -959,7 +1026,7 @@ router.get("/vendors", async (req, res) => {
       }
     }
 
-    const result = (vendors || []).map((v) => {
+    const result = vendorsList.map((v) => {
       const sub = activeSubByVendor[v.id] || null;
       const plan = sub?.plan_id ? planMap[sub.plan_id] : null;
       const documentCount = documentTypeMap.get(v.id)?.size || 0;
@@ -967,8 +1034,10 @@ router.get("/vendors", async (req, res) => {
       const hasSubmittedKyc =
         documentCount > 0 ||
         ["SUBMITTED", "APPROVED", "VERIFIED"].includes(normalizedKycStatus);
+      const normalizedIsActive = normalizeTinyIntBoolean(v?.is_active);
       return {
         ...v,
+        is_active: normalizedIsActive,
         joined_on: getVendorJoinedOn(v),
         document_count: documentCount,
         has_submitted_kyc: hasSubmittedKyc,
@@ -988,7 +1057,7 @@ router.get("/vendors", async (req, res) => {
     return res.json({
       success: true,
       vendors: result,
-      total: Number.isFinite(count) ? count : result.length,
+      total: Number.isFinite(resultCount) ? resultCount : (Number.isFinite(count) ? count : result.length),
       limit: safeLimit,
       offset: safeOffset,
     });
