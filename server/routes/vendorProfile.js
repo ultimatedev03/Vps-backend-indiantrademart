@@ -583,14 +583,31 @@ async function resolveActiveSubscriptionForVendor(vendorId) {
   return (rows || []).find((row) => !row?.end_date || String(row.end_date) > nowIso) || null;
 }
 
-async function resolveBuyerId(userId) {
-  if (!userId) return null;
-  const { data: buyer } = await db
-    .from('buyers')
-    .select('id')
-    .eq('user_id', userId)
-    .maybeSingle();
-  return buyer?.id || null;
+async function resolveBuyerId(userOrId = {}) {
+  const userId = typeof userOrId === 'string' ? userOrId : String(userOrId?.id || '').trim();
+  const email = typeof userOrId === 'object' ? normalizeEmail(userOrId?.email || '') : '';
+
+  if (userId) {
+    const { data: buyer } = await db
+      .from('buyers')
+      .select('id')
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (buyer?.id) return buyer.id;
+  }
+
+  if (email) {
+    const { data: buyers, error } = await db
+      .from('buyers')
+      .select('id')
+      .ilike('email', email)
+      .order('updated_at', { ascending: false })
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (!error && Array.isArray(buyers) && buyers[0]?.id) return buyers[0].id;
+  }
+
+  return null;
 }
 
 async function resolveBuyerProfileForUser(user = {}) {
@@ -3923,7 +3940,7 @@ router.get('/:vendorId([0-9a-fA-F-]{36})/favorite', requireAuth({ roles: ['BUYER
       return res.status(400).json({ success: false, error: 'Invalid vendor id' });
     }
 
-    const buyerId = await resolveBuyerId(req.user.id);
+    const buyerId = await resolveBuyerId(req.user);
     if (!buyerId) {
       return res.status(404).json({ success: false, error: 'Buyer profile not found' });
     }
@@ -3950,9 +3967,24 @@ router.post('/:vendorId([0-9a-fA-F-]{36})/favorite', requireAuth({ roles: ['BUYE
       return res.status(400).json({ success: false, error: 'Invalid vendor id' });
     }
 
-    const buyerId = await resolveBuyerId(req.user.id);
+    const buyerId = await resolveBuyerId(req.user);
     if (!buyerId) {
       return res.status(404).json({ success: false, error: 'Buyer profile not found' });
+    }
+
+    const { data: existingFavorite, error: existingFavoriteError } = await db
+      .from('favorites')
+      .select('id')
+      .eq('buyer_id', buyerId)
+      .eq('vendor_id', vendorId)
+      .maybeSingle();
+
+    if (existingFavoriteError) {
+      return res.status(500).json({ success: false, error: existingFavoriteError.message });
+    }
+
+    if (existingFavorite?.id) {
+      return res.json({ success: true, isFavorite: true });
     }
 
     const { error } = await db
@@ -3978,7 +4010,7 @@ router.delete('/:vendorId([0-9a-fA-F-]{36})/favorite', requireAuth({ roles: ['BU
       return res.status(400).json({ success: false, error: 'Invalid vendor id' });
     }
 
-    const buyerId = await resolveBuyerId(req.user.id);
+    const buyerId = await resolveBuyerId(req.user);
     if (!buyerId) {
       return res.status(404).json({ success: false, error: 'Buyer profile not found' });
     }

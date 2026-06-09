@@ -227,6 +227,22 @@ CREATE TABLE IF NOT EXISTS `favorites` (
   KEY `idx_favorites_created_at` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS `product_ratings` (
+  `id` CHAR(36) NOT NULL,
+  `product_id` CHAR(36) NOT NULL,
+  `buyer_id` CHAR(36) NOT NULL,
+  `buyer_name` TEXT NULL,
+  `rating` TINYINT NULL,
+  `feedback` TEXT NULL,
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_product_ratings_product_buyer` (`product_id`, `buyer_id`),
+  KEY `idx_product_ratings_product_id` (`product_id`),
+  KEY `idx_product_ratings_buyer_id` (`buyer_id`),
+  KEY `idx_product_ratings_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `geo_division_pincodes` (
   `id` CHAR(36) NOT NULL,
   `division_id` CHAR(36) NULL,

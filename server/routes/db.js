@@ -39,6 +39,7 @@ const ALLOWED_TABLES = new Set([
   'plan_tiers',
   'platform_feedback',
   'product_images',
+  'product_ratings',
   'product_videos',
   'products',
   'proposal_messages',

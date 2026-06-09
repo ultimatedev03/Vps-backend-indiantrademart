@@ -3,6 +3,8 @@ import { logger } from '../utils/logger.js';
 import express from 'express';
 import { db } from '../lib/dbClient.js';
 import { cacheResponse } from '../lib/cacheMiddleware.js';
+import { optionalAuth, requireAuth } from '../middleware/requireAuth.js';
+import { mysqlQuery } from '../lib/mysqlPool.js';
 
 const router = express.Router();
 
@@ -50,6 +52,118 @@ function safeQ(v) {
   const s = String(v || '').trim();
   if (!s) return '';
   return s.slice(0, 100);
+}
+
+function clampRating(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(1, Math.min(5, Math.round(n)));
+}
+
+function safeText(v, max = 1000) {
+  return String(v || '').trim().slice(0, max);
+}
+
+async function resolveBuyerProfileForUser(user = {}) {
+  const userId = String(user?.id || '').trim();
+  const email = String(user?.email || '').trim().toLowerCase();
+
+  if (userId) {
+    const { data } = await db
+      .from('buyers')
+      .select('id, full_name, company_name, email')
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (data?.id) return data;
+  }
+
+  if (email) {
+    const { data, error } = await db
+      .from('buyers')
+      .select('id, full_name, company_name, email')
+      .ilike('email', email)
+      .order('updated_at', { ascending: false })
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (!error && Array.isArray(data) && data[0]?.id) return data[0];
+  }
+
+  return null;
+}
+
+function summarizeRatings(rows = []) {
+  const ratings = (Array.isArray(rows) ? rows : [])
+    .map((row) => clampRating(row?.rating))
+    .filter((rating) => rating >= 1 && rating <= 5);
+
+  const count = ratings.length;
+  if (!count) return { average: 0, count: 0 };
+
+  const average = Math.round((ratings.reduce((sum, rating) => sum + rating, 0) / count) * 10) / 10;
+  return { average, count };
+}
+
+function toPublicRating(row = {}) {
+  return {
+    id: row.id,
+    product_id: row.product_id,
+    buyer_id: row.buyer_id,
+    buyerName: safeText(row.buyer_name, 120) || 'Buyer',
+    rating: clampRating(row.rating),
+    feedback: safeText(row.feedback, 1000),
+    created_at: row.created_at || null,
+    updated_at: row.updated_at || row.created_at || null,
+  };
+}
+
+let productRatingsTableReady = null;
+async function ensureProductRatingsTable() {
+  if (!productRatingsTableReady) {
+    productRatingsTableReady = mysqlQuery(`
+      CREATE TABLE IF NOT EXISTS \`product_ratings\` (
+        \`id\` CHAR(36) NOT NULL,
+        \`product_id\` CHAR(36) NOT NULL,
+        \`buyer_id\` CHAR(36) NOT NULL,
+        \`buyer_name\` TEXT NULL,
+        \`rating\` TINYINT NULL,
+        \`feedback\` TEXT NULL,
+        \`created_at\` DATETIME DEFAULT CURRENT_TIMESTAMP,
+        \`updated_at\` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (\`id\`),
+        UNIQUE KEY \`uq_product_ratings_product_buyer\` (\`product_id\`, \`buyer_id\`),
+        KEY \`idx_product_ratings_product_id\` (\`product_id\`),
+        KEY \`idx_product_ratings_buyer_id\` (\`buyer_id\`),
+        KEY \`idx_product_ratings_updated_at\` (\`updated_at\`)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `).catch((error) => {
+      productRatingsTableReady = null;
+      throw error;
+    });
+  }
+
+  return productRatingsTableReady;
+}
+
+async function getProductRatingState(productId, buyerId = '') {
+  await ensureProductRatingsTable();
+
+  const { data, error } = await db
+    .from('product_ratings')
+    .select('id, product_id, buyer_id, buyer_name, rating, feedback, created_at, updated_at')
+    .eq('product_id', productId)
+    .order('updated_at', { ascending: false })
+    .order('created_at', { ascending: false })
+    .limit(500);
+
+  if (error) throw error;
+
+  const ratings = (data || []).map(toPublicRating).filter((row) => row.rating);
+  const summary = summarizeRatings(ratings);
+  const myRating = buyerId
+    ? ratings.find((row) => String(row.buyer_id) === String(buyerId)) || null
+    : null;
+
+  return { summary, ratings, myRating };
 }
 
 function applySort(q, sort) {
@@ -1023,6 +1137,193 @@ router.get('/product/id/:productId', cacheResponse('dir:product-id', 300, { incl
     res.json({ success: true, product });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/dir/products/ratings/summary - public summary for product cards
+router.post('/products/ratings/summary', async (req, res) => {
+  try {
+    const productIds = Array.from(
+      new Set(
+        (Array.isArray(req.body?.productIds) ? req.body.productIds : [])
+          .map((id) => String(id || '').trim())
+          .filter(Boolean)
+      )
+    ).slice(0, 100);
+
+    if (!productIds.length) {
+      return res.json({ success: true, summaries: {} });
+    }
+
+    await ensureProductRatingsTable();
+
+    const { data, error } = await db
+      .from('product_ratings')
+      .select('product_id, rating')
+      .in('product_id', productIds)
+      .limit(5000);
+
+    if (error) throw error;
+
+    const grouped = new Map();
+    (data || []).forEach((row) => {
+      const key = String(row?.product_id || '').trim();
+      if (!key) return;
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key).push(row);
+    });
+
+    const summaries = {};
+    productIds.forEach((id) => {
+      summaries[id] = summarizeRatings(grouped.get(id) || []);
+    });
+
+    return res.json({ success: true, summaries });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/dir/products/:productId/ratings - public ratings for a product
+router.get('/products/:productId/ratings', optionalAuth(), async (req, res) => {
+  try {
+    const productId = String(req.params?.productId || '').trim();
+    if (!productId) return res.status(400).json({ success: false, error: 'Product ID required' });
+
+    const buyer = req.user ? await resolveBuyerProfileForUser(req.user) : null;
+    const state = await getProductRatingState(productId, buyer?.id || '');
+
+    return res.json({
+      success: true,
+      summary: state.summary,
+      ratings: state.ratings,
+      myRating: state.myRating,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/dir/products/:productId/ratings - add/update buyer rating
+router.post('/products/:productId/ratings', requireAuth({ roles: ['BUYER'] }), async (req, res) => {
+  try {
+    const productId = String(req.params?.productId || '').trim();
+    if (!productId) return res.status(400).json({ success: false, error: 'Product ID required' });
+
+    const rating = clampRating(req.body?.rating);
+    if (!rating) {
+      return res.status(400).json({ success: false, error: 'Please select a star rating' });
+    }
+
+    const buyer = await resolveBuyerProfileForUser(req.user);
+    if (!buyer?.id) {
+      return res.status(404).json({ success: false, error: 'Buyer profile not found' });
+    }
+
+    await ensureProductRatingsTable();
+
+    const { data: product, error: productError } = await db
+      .from('products')
+      .select('id')
+      .eq('id', productId)
+      .maybeSingle();
+
+    if (productError) throw productError;
+    if (!product?.id) return res.status(404).json({ success: false, error: 'Product not found' });
+
+    const nowIso = new Date().toISOString();
+    const buyerName =
+      safeText(req.body?.buyerName, 120) ||
+      safeText(buyer.full_name, 120) ||
+      safeText(buyer.company_name, 120) ||
+      safeText(buyer.email, 120) ||
+      'Buyer';
+    const feedback = safeText(req.body?.feedback, 1000);
+
+    const { data: existing, error: existingError } = await db
+      .from('product_ratings')
+      .select('id, created_at')
+      .eq('product_id', productId)
+      .eq('buyer_id', buyer.id)
+      .maybeSingle();
+
+    if (existingError) throw existingError;
+
+    let entryRes;
+    if (existing?.id) {
+      entryRes = await db
+        .from('product_ratings')
+        .update({
+          rating,
+          feedback,
+          buyer_name: buyerName,
+          updated_at: nowIso,
+        })
+        .eq('id', existing.id)
+        .select('id, product_id, buyer_id, buyer_name, rating, feedback, created_at, updated_at')
+        .maybeSingle();
+    } else {
+      entryRes = await db
+        .from('product_ratings')
+        .insert([{
+          product_id: productId,
+          buyer_id: buyer.id,
+          buyer_name: buyerName,
+          rating,
+          feedback,
+          created_at: nowIso,
+          updated_at: nowIso,
+        }])
+        .select('id, product_id, buyer_id, buyer_name, rating, feedback, created_at, updated_at')
+        .maybeSingle();
+    }
+
+    if (entryRes.error) throw entryRes.error;
+
+    const state = await getProductRatingState(productId, buyer.id);
+    return res.json({
+      success: true,
+      entry: toPublicRating(entryRes.data),
+      summary: state.summary,
+      ratings: state.ratings,
+      myRating: state.myRating,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// DELETE /api/dir/products/:productId/ratings - remove buyer rating
+router.delete('/products/:productId/ratings', requireAuth({ roles: ['BUYER'] }), async (req, res) => {
+  try {
+    const productId = String(req.params?.productId || '').trim();
+    if (!productId) return res.status(400).json({ success: false, error: 'Product ID required' });
+
+    const buyer = await resolveBuyerProfileForUser(req.user);
+    if (!buyer?.id) {
+      return res.status(404).json({ success: false, error: 'Buyer profile not found' });
+    }
+
+    await ensureProductRatingsTable();
+
+    const { count, error } = await db
+      .from('product_ratings')
+      .delete()
+      .eq('product_id', productId)
+      .eq('buyer_id', buyer.id);
+
+    if (error) throw error;
+
+    const state = await getProductRatingState(productId, buyer.id);
+    return res.json({
+      success: true,
+      removed: Number(count || 0) > 0,
+      summary: state.summary,
+      ratings: state.ratings,
+      myRating: null,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
