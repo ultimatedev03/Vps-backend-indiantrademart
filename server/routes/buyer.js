@@ -15,6 +15,27 @@ const parseNumber = (value) => {
   const numeric = Number(String(value).replace(/[, ]+/g, ''));
   return Number.isFinite(numeric) ? numeric : null;
 };
+const VISITOR_LEAD_OPTIONAL_COLUMNS = [
+  'visitor_id',
+  'visitor_session_id',
+  'lead_origin',
+  'landing_page',
+  'page_url',
+  'referrer',
+  'user_agent',
+  'consent_source',
+];
+
+const buildVisitorLeadMeta = (req, payload = {}) => ({
+  visitor_id: textOrNull(payload.visitor_id || payload.visitorId || req.headers?.['x-itm-visitor-id'], 120),
+  visitor_session_id: textOrNull(payload.visitor_session_id || payload.visitorSessionId, 120),
+  lead_origin: textOrNull(payload.lead_origin || payload.leadOrigin, 120),
+  landing_page: textOrNull(payload.landing_page || payload.landingPage, 500),
+  page_url: textOrNull(payload.page_url || payload.pageUrl, 500),
+  referrer: textOrNull(payload.referrer || payload.referrer_url || payload.referrerUrl, 500),
+  user_agent: textOrNull(payload.user_agent || payload.userAgent || req.headers?.['user-agent'], 500),
+  consent_source: textOrNull(payload.consent_source || payload.consentSource, 120),
+});
 
 const omitKeys = (obj, keys = []) =>
   Object.fromEntries(
@@ -157,6 +178,7 @@ async function createBuyerProposal(req, res) {
     if (!buyerId && !buyerEmail) return res.status(403).json({ success: false, error: 'Buyer access required' });
 
     const payload = req.body || {};
+    const visitorLeadMeta = buildVisitorLeadMeta(req, payload);
     const title = textOrNull(payload.title || payload.product_name || payload.category || 'Product requirement', 200);
     const description = textOrNull(payload.description || payload.message, 5000);
     if (!title) return res.status(400).json({ success: false, error: 'title/product_name is required' });
@@ -232,6 +254,8 @@ async function createBuyerProposal(req, res) {
           city_id: proposalPayload.city_id,
           pincode: proposalPayload.pincode,
           source: proposalPayload.vendor_id ? 'DIRECT' : 'MARKETPLACE',
+          ...visitorLeadMeta,
+          lead_origin: visitorLeadMeta.lead_origin || (visitorLeadMeta.visitor_id ? 'BUYER_REQUIREMENT' : null),
           status: 'AVAILABLE',
           created_at: createdAt,
         },
@@ -239,7 +263,7 @@ async function createBuyerProposal(req, res) {
         fallbackDropSets: [
           ['proposal_id'],
           ['proposal_id', 'vendor_email', 'buyer_phone', 'company_name', 'category_slug'],
-          ['proposal_id', 'vendor_email', 'buyer_phone', 'company_name', 'category_slug', 'micro_category_id', 'sub_category_id', 'head_category_id', 'state_id', 'city_id', 'location', 'pincode', 'source', 'city', 'state'],
+          ['proposal_id', 'vendor_email', 'buyer_phone', 'company_name', 'category_slug', 'micro_category_id', 'sub_category_id', 'head_category_id', 'state_id', 'city_id', 'location', 'pincode', 'source', 'city', 'state', ...VISITOR_LEAD_OPTIONAL_COLUMNS],
         ],
       });
     } catch {

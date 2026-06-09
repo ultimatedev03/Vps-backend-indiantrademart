@@ -7,9 +7,11 @@
 import dirRouter from '../../routes/dir.js';
 import migrationRouter from '../../routes/migration.js';
 import publicConfigRouter from '../../routes/publicConfig.js';
+import visitorTrackingRouter from '../../routes/visitorTracking.js';
 
 export const directoryRoutes = Object.freeze([
   { path: '/api/dir', router: dirRouter },
   { path: '/api/public', router: publicConfigRouter },
+  { path: '/api/visitor', router: visitorTrackingRouter },
   { path: '/api/migration', router: migrationRouter },
 ]);

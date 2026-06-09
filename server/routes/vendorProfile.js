@@ -62,6 +62,16 @@ const MAX_VENDORS_PER_LEAD = 5;
 const MARKETPLACE_LEAD_LIMIT = 500;
 const MARKETPLACE_LEAD_MAX_AGE_DAYS = 30;
 const LEAD_EXPIRY_DAYS = 30;
+const VISITOR_LEAD_OPTIONAL_COLUMNS = [
+  'visitor_id',
+  'visitor_session_id',
+  'lead_origin',
+  'landing_page',
+  'page_url',
+  'referrer',
+  'user_agent',
+  'consent_source',
+];
 
 const isValidId = (v) => typeof v === 'string' && v.trim().length > 0;
 const UUID_LIKE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -4092,6 +4102,19 @@ router.post('/:vendorId/leads', optionalAuth(), async (req, res) => {
       null;
     const pincode = nonEmptyText(payload.pincode, 10);
     const vendorEmail = nonEmptyText(payload.vendor_email || vendor?.email, 320);
+    const visitorId = nonEmptyText(payload.visitor_id || payload.visitorId || req.headers?.['x-itm-visitor-id'], 120);
+    const visitorSessionId = nonEmptyText(payload.visitor_session_id || payload.visitorSessionId, 120);
+    const leadOrigin = nonEmptyText(payload.lead_origin || payload.leadOrigin, 120);
+    const landingPage = nonEmptyText(payload.landing_page || payload.landingPage, 500);
+    const pageUrl = nonEmptyText(payload.page_url || payload.pageUrl, 500);
+    const referrer = nonEmptyText(payload.referrer || payload.referrer_url || payload.referrerUrl, 500);
+    const userAgent = nonEmptyText(payload.user_agent || payload.userAgent || req.headers?.['user-agent'], 500);
+    const consentSource = nonEmptyText(payload.consent_source || payload.consentSource, 120);
+    const rawSource = nonEmptyText(payload.source || payload.lead_source || payload.leadSource, 80);
+    const normalizedPublicSource = rawSource
+      ? rawSource.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+      : null;
+    const leadSource = vendor?.id ? 'DIRECT' : normalizedPublicSource || 'MARKETPLACE';
     const createdAt = new Date().toISOString();
 
     const proposalBasePayload = {
@@ -4194,7 +4217,15 @@ router.post('/:vendorId/leads', optionalAuth(), async (req, res) => {
       state_id: stateId,
       city_id: cityId,
       pincode,
-      source: vendor?.id ? 'DIRECT' : 'MARKETPLACE',
+      source: leadSource,
+      lead_origin: leadOrigin || (visitorId ? 'WEBSITE_VISITOR' : null),
+      visitor_id: visitorId,
+      visitor_session_id: visitorSessionId,
+      landing_page: landingPage,
+      page_url: pageUrl,
+      referrer,
+      user_agent: userAgent,
+      consent_source: consentSource,
       status: 'AVAILABLE',
       created_at: createdAt,
       expires_at: addDays(createdAt, LEAD_EXPIRY_DAYS)?.toISOString() || null,
@@ -4228,6 +4259,7 @@ router.post('/:vendorId/leads', optionalAuth(), async (req, res) => {
             'city',
             'state',
             'expires_at',
+            ...VISITOR_LEAD_OPTIONAL_COLUMNS,
           ],
           [
             'vendor_id',
@@ -4247,6 +4279,7 @@ router.post('/:vendorId/leads', optionalAuth(), async (req, res) => {
             'city',
             'state',
             'expires_at',
+            ...VISITOR_LEAD_OPTIONAL_COLUMNS,
           ],
           [
             'vendor_id',
@@ -4269,6 +4302,7 @@ router.post('/:vendorId/leads', optionalAuth(), async (req, res) => {
             'city',
             'state',
             'expires_at',
+            ...VISITOR_LEAD_OPTIONAL_COLUMNS,
           ],
         ],
       });

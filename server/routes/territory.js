@@ -16,6 +16,7 @@ const ENGAGEMENT_TYPES = new Set([
   'DEMO',
   'FOLLOW_UP',
   'PLAN_PITCH',
+  'PLAN_SHARED',
   'CONVERTED',
   'UNMASK_REQUEST',
 ]);
@@ -24,6 +25,10 @@ const normalizeText = (value = '') => String(value || '').trim();
 const normalizeUpper = (value = '') => normalizeRole(value || '');
 const unique = (arr = []) => Array.from(new Set((arr || []).map((v) => String(v || '').trim()).filter(Boolean)));
 const nowIso = () => new Date().toISOString();
+const isTruthyQuery = (value) => ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
+const OPEN_ENGAGEMENT_STATUSES = new Set(['OPEN', 'PENDING', 'SENT', 'IN_PROGRESS']);
+const getActorIdentityIds = (actor = {}, authUser = {}) =>
+  unique([actor?.actorUserId, actor?.employee?.user_id, authUser?.id, actor?.employee?.id].filter(Boolean));
 
 const isVpOrAdmin = (role) => VP_ROLES.has(normalizeUpper(role));
 const isManagerOrAbove = (role) => MANAGER_ROLES.has(normalizeUpper(role));
@@ -104,7 +109,7 @@ async function ensureActor(req, res, { allowSuperadminWithoutEmployee = true } =
   }
 
   const role = normalizeUpper(employee?.role || actorRole);
-  const actorUserId = String(req.user?.id || employee?.user_id || '').trim() || null;
+  const actorUserId = String(employee?.user_id || req.user?.id || employee?.id || '').trim() || null;
   return { role, actorUserId, employee };
 }
 
@@ -822,6 +827,11 @@ router.post('/sales/engagements', requireAuth(), async (req, res) => {
     const status = normalizeUpper(req.body?.status || 'OPEN');
     const notes = normalizeText(req.body?.notes || '');
     const nextFollowUpAt = normalizeText(req.body?.next_follow_up_at || '');
+    const leadId = normalizeText(req.body?.lead_id || '');
+    const planId = normalizeText(req.body?.plan_id || '');
+    const salesCode = normalizeText(req.body?.sales_code || '').toUpperCase();
+    const planShareUrl = normalizeText(req.body?.plan_share_url || '');
+    const channel = normalizeText(req.body?.channel || '').toUpperCase();
 
     if (!vendorId) return res.status(400).json({ success: false, error: 'vendor_id is required' });
     if (!ENGAGEMENT_TYPES.has(engagementType)) {
@@ -854,10 +864,15 @@ router.post('/sales/engagements', requireAuth(), async (req, res) => {
 
     const payload = {
       vendor_id: vendorId,
+      lead_id: leadId || null,
       sales_user_id: actor.actorUserId,
       manager_user_id: managerUserId,
       vp_user_id: vpUserId,
       division_id: divisionId,
+      plan_id: planId || null,
+      sales_code: salesCode || null,
+      plan_share_url: planShareUrl || null,
+      channel: channel || null,
       engagement_type: engagementType,
       status: status || 'OPEN',
       notes: notes || null,
@@ -882,6 +897,8 @@ router.post('/sales/engagements', requireAuth(), async (req, res) => {
       entityId: data?.id || null,
       details: {
         vendor_id: vendorId,
+        lead_id: leadId || null,
+        plan_id: planId || null,
         engagement_type: engagementType,
       },
     });
@@ -901,20 +918,63 @@ router.get('/sales/engagements', requireAuth(), async (req, res) => {
     }
 
     const limitRaw = Number(req.query?.limit || 100);
-    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 100;
-    const vendorId = normalizeText(req.query?.vendor_id);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.trunc(limitRaw), 500) : 100;
+    const vendorRef = normalizeText(req.query?.vendor_id);
     const status = normalizeUpper(req.query?.status || '');
+    const engagementType = normalizeUpper(req.query?.engagement_type || '');
+    const salesUserId = normalizeText(req.query?.sales_user_id || '');
+    const managerUserId = normalizeText(req.query?.manager_user_id || '');
+    const search = normalizeText(req.query?.search || '').toLowerCase();
+    const dueOnly = isTruthyQuery(req.query?.due);
+    const dateFrom = normalizeText(req.query?.date_from || '');
+    const dateTo = normalizeText(req.query?.date_to || '');
+    let engagementVendorIds = [];
+    let vendorFilterMatches = [];
+
+    if (vendorRef) {
+      const vendorSearch = vendorRef.replace(/,/g, ' ').trim();
+      const vendorLike = `%${vendorSearch}%`;
+      const { data: vendorMatches, error: vendorMatchErr } = await db
+        .from('vendors')
+        .select('id, vendor_id, company_name, owner_name, email, phone, city, state, pincode, city_id, state_id, kyc_status, is_active')
+        .or(
+          [
+            `id.eq.${vendorSearch}`,
+            `vendor_id.ilike.${vendorLike}`,
+            `company_name.ilike.${vendorLike}`,
+            `owner_name.ilike.${vendorLike}`,
+            `email.ilike.${vendorLike}`,
+            `phone.ilike.${vendorLike}`,
+          ].join(',')
+        )
+        .limit(50);
+      if (vendorMatchErr) {
+        return res.status(500).json({ success: false, error: vendorMatchErr.message || 'Failed to resolve vendor filter' });
+      }
+      vendorFilterMatches = vendorMatches || [];
+      engagementVendorIds = unique([vendorRef, ...vendorFilterMatches.map((vendor) => vendor.id)]);
+    }
 
     let query = db
       .from('sales_vendor_engagements')
-      .select('id, vendor_id, sales_user_id, manager_user_id, vp_user_id, division_id, engagement_type, status, notes, next_follow_up_at, is_contact_unmasked, created_at, updated_at')
+      .select('id, vendor_id, lead_id, sales_user_id, manager_user_id, vp_user_id, division_id, plan_id, sales_code, plan_share_url, channel, engagement_type, status, notes, next_follow_up_at, is_contact_unmasked, created_at, updated_at')
       .order('created_at', { ascending: false })
       .limit(limit);
 
-    if (actor.role === 'SALES') query = query.eq('sales_user_id', actor.actorUserId);
-    if (actor.role === 'MANAGER') query = query.eq('manager_user_id', actor.actorUserId);
-    if (vendorId) query = query.eq('vendor_id', vendorId);
+    const actorIdentityIds = getActorIdentityIds(actor, req.user);
+    if (actor.role === 'SALES') query = query.in('sales_user_id', actorIdentityIds.length ? actorIdentityIds : [actor.actorUserId]);
+    if (actor.role === 'MANAGER') query = query.in('manager_user_id', actorIdentityIds.length ? actorIdentityIds : [actor.actorUserId]);
+    if (vendorRef) query = query.in('vendor_id', engagementVendorIds.length ? engagementVendorIds : [vendorRef]);
     if (status) query = query.eq('status', status);
+    if (engagementType) query = query.eq('engagement_type', engagementType);
+    if (salesUserId && isManagerOrAbove(actor.role)) query = query.eq('sales_user_id', salesUserId);
+    if (managerUserId && isVpOrAdmin(actor.role)) query = query.eq('manager_user_id', managerUserId);
+    if (dateFrom && !Number.isNaN(new Date(dateFrom).getTime())) query = query.gte('created_at', new Date(dateFrom).toISOString());
+    if (dateTo && !Number.isNaN(new Date(dateTo).getTime())) {
+      const end = new Date(dateTo);
+      end.setHours(23, 59, 59, 999);
+      query = query.lte('created_at', end.toISOString());
+    }
 
     const { data, error } = await query;
     if (error) return res.status(500).json({ success: false, error: error.message || 'Failed to fetch engagements' });
@@ -922,12 +982,16 @@ router.get('/sales/engagements', requireAuth(), async (req, res) => {
     const engagements = data || [];
     const vendorIds = unique(engagements.map((x) => x.vendor_id).filter(Boolean));
     const divisionIds = unique(engagements.map((x) => x.division_id).filter(Boolean));
+    const planIds = unique(engagements.map((x) => x.plan_id).filter(Boolean));
+    const employeeUserIds = unique(
+      engagements.flatMap((x) => [x.sales_user_id, x.manager_user_id, x.vp_user_id]).filter(Boolean)
+    );
 
     let vendorById = new Map();
     if (vendorIds.length) {
       const { data: vendors, error: vendorErr } = await db
         .from('vendors')
-        .select('id, vendor_id, company_name, city, state, pincode')
+        .select('id, vendor_id, company_name, owner_name, email, phone, city, state, pincode, city_id, state_id, kyc_status, is_active')
         .in('id', vendorIds);
       if (vendorErr) return res.status(500).json({ success: false, error: vendorErr.message || 'Failed to fetch engagement vendors' });
       vendorById = new Map((vendors || []).map((v) => [v.id, v]));
@@ -943,13 +1007,114 @@ router.get('/sales/engagements', requireAuth(), async (req, res) => {
       divisionById = new Map((divisions || []).map((d) => [d.id, d]));
     }
 
-    const hydrated = engagements.map((row) => ({
-      ...row,
-      vendor: vendorById.get(row.vendor_id) || null,
-      division: divisionById.get(row.division_id) || null,
-    }));
+    let planById = new Map();
+    if (planIds.length) {
+      const { data: plans, error: planErr } = await db
+        .from('vendor_plans')
+        .select('id, name, price, duration_days, is_active, description, features')
+        .in('id', planIds);
+      if (planErr) return res.status(500).json({ success: false, error: planErr.message || 'Failed to fetch engagement plans' });
+      planById = new Map((plans || []).map((p) => [p.id, p]));
+    }
 
-    return res.json({ success: true, engagements: hydrated });
+    let employeeByUserId = new Map();
+    if (employeeUserIds.length) {
+      const { data: employees, error: employeeErr } = await db
+        .from('employees')
+        .select('user_id, full_name, email, role, sales_code')
+        .in('user_id', employeeUserIds);
+      if (employeeErr) return res.status(500).json({ success: false, error: employeeErr.message || 'Failed to fetch engagement owners' });
+      employeeByUserId = new Map((employees || []).map((employee) => [employee.user_id, employee]));
+    }
+
+    const allowRoleUnmask = isManagerOrAbove(actor.role);
+    const now = Date.now();
+    const hydrated = engagements
+      .map((row) => {
+        const vendor = vendorById.get(row.vendor_id) || null;
+        const plan = planById.get(row.plan_id) || null;
+        return {
+          ...row,
+          vendor: maskVendorRecord(vendor, allowRoleUnmask || row.is_contact_unmasked === true),
+          division: divisionById.get(row.division_id) || null,
+          plan,
+          sales_user: employeeByUserId.get(row.sales_user_id) || null,
+          manager_user: employeeByUserId.get(row.manager_user_id) || null,
+          vp_user: employeeByUserId.get(row.vp_user_id) || null,
+        };
+      })
+      .filter((row) => {
+        const rowStatus = normalizeUpper(row?.status || '');
+        const dueAt = row?.next_follow_up_at ? new Date(row.next_follow_up_at).getTime() : 0;
+        if (dueOnly && (!dueAt || dueAt > now || !OPEN_ENGAGEMENT_STATUSES.has(rowStatus))) return false;
+        if (!search) return true;
+
+        const haystack = [
+          row.id,
+          row.vendor_id,
+          row.lead_id,
+          row.sales_code,
+          row.channel,
+          row.engagement_type,
+          row.status,
+          row.notes,
+          row.vendor?.vendor_id,
+          row.vendor?.company_name,
+          row.vendor?.owner_name,
+          row.vendor?.phone,
+          row.vendor?.email,
+          row.vendor?.city,
+          row.vendor?.state,
+          row.vendor?.pincode,
+          row.division?.name,
+          row.division?.city?.name,
+          row.division?.state?.name,
+          row.plan?.name,
+          row.sales_user?.full_name,
+          row.sales_user?.email,
+          row.manager_user?.full_name,
+          row.manager_user?.email,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+
+        return haystack.includes(search);
+      });
+
+    const dueEngagements = hydrated.filter((row) => {
+      const dueAt = row?.next_follow_up_at ? new Date(row.next_follow_up_at).getTime() : 0;
+      return dueAt && dueAt <= now && OPEN_ENGAGEMENT_STATUSES.has(normalizeUpper(row?.status || ''));
+    });
+
+    const summary = {
+      total: hydrated.length,
+      open_count: hydrated.filter((row) => OPEN_ENGAGEMENT_STATUSES.has(normalizeUpper(row?.status || ''))).length,
+      due_count: dueEngagements.length,
+      plan_shared_count: hydrated.filter((row) => normalizeUpper(row?.engagement_type || '') === 'PLAN_SHARED').length,
+      converted_count: hydrated.filter((row) => normalizeUpper(row?.engagement_type || '') === 'CONVERTED').length,
+      unique_vendors: unique(hydrated.map((row) => row.vendor_id)).length,
+      unique_sales_users: unique(hydrated.map((row) => row.sales_user_id)).length,
+    };
+
+    return res.json({
+      success: true,
+      engagements: hydrated,
+      meta: {
+        summary,
+        vendor_matches: vendorFilterMatches.map((vendor) => maskVendorRecord(vendor, isManagerOrAbove(actor.role))),
+        filters: {
+          limit,
+          vendor_id: vendorRef || null,
+          status: status || null,
+          engagement_type: engagementType || null,
+          due: dueOnly,
+          search: search || null,
+          date_from: dateFrom || null,
+          date_to: dateTo || null,
+        },
+      },
+    });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message || 'Failed to fetch engagements' });
   }

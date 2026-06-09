@@ -619,6 +619,41 @@ function parseBuyerProfileUpdates(body = {}) {
   return updates;
 }
 
+async function resolveRequestPublicUser(authUser = {}) {
+  let user = null;
+  if (authUser?.id) {
+    user = await getPublicUserById(authUser.id);
+  }
+  if (!user && authUser?.email) {
+    user = await getPublicUserByEmail(authUser.email);
+  }
+  return user || null;
+}
+
+async function linkVendorProfileToUser(vendor = {}, userId = '') {
+  const normalizedUserId = String(userId || '').trim();
+  const vendorId = String(vendor?.id || '').trim();
+  if (!normalizedUserId || !vendorId || vendor?.user_id === normalizedUserId) return;
+
+  const { error } = await db
+    .from('vendors')
+    .update({ user_id: normalizedUserId, updated_at: new Date().toISOString() })
+    .eq('id', vendorId);
+
+  if (error) {
+    logger.warn('[Auth] Vendor relink failed during role switch:', error?.message || error);
+  }
+}
+
+function attachBuyerSessionMeta(payload, buyer) {
+  if (!payload || !buyer) return payload;
+  payload.buyer_id = buyer.id || null;
+  payload.is_active = typeof buyer.is_active === 'boolean' ? buyer.is_active : true;
+  payload.account_status = deriveBuyerAccountStatus(buyer);
+  payload.suspension_reason = buyer.terminated_reason || null;
+  return payload;
+}
+
 router.post('/login', async (req, res) => {
   try {
     await assertCaptchaForExpressRequest(req, { action: 'auth_login' });
@@ -634,9 +669,9 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid email format' });
     }
 
-    // Strict buyer portal isolation:
-    // buyer login requires an existing buyer identity by email
-    // and must not use vendor-only identities.
+    // Buyer portal isolation:
+    // buyer login requires an existing buyer identity by email.
+    // Vendor-origin accounts can login here only after a buyer profile exists.
     if (roleHint === 'BUYER') {
       const { data: buyerByEmail, error: buyerLookupError } = await db
         .from('buyers')
@@ -654,16 +689,6 @@ router.post('/login', async (req, res) => {
         return res.status(403).json({ success: false, error: BUYER_NOT_REGISTERED_MESSAGE });
       }
 
-      const { data: vendorByEmail } = await db
-        .from('vendors')
-        .select('id')
-        .ilike('email', email)
-        .limit(1)
-        .maybeSingle();
-
-      if (vendorByEmail?.id) {
-        return res.status(403).json({ success: false, error: BUYER_NOT_REGISTERED_MESSAGE });
-      }
     }
 
     let user = await getPublicUserByEmail(email);
@@ -745,16 +770,15 @@ router.post('/login', async (req, res) => {
       }
     }
 
-    // Buyer portal strict session:
-    // vendor accounts must not authenticate in buyer portal.
+    // Buyer portal session:
     // only existing buyer identities are allowed to login as BUYER.
     if (roleHint === 'BUYER') {
+      const existingBuyer = await findBuyerProfileForUser(user);
       const vendorForUser = await resolveVendorProfileForUser(user);
-      if (currentRole === 'VENDOR' || vendorForUser?.id) {
+      if ((currentRole === 'VENDOR' || vendorForUser?.id) && !existingBuyer) {
         return res.status(403).json({ success: false, error: BUYER_NOT_REGISTERED_MESSAGE });
       }
 
-      const existingBuyer = await findBuyerProfileForUser(user);
       if (!existingBuyer && currentRole !== 'BUYER') {
         return res.status(403).json({ success: false, error: BUYER_NOT_REGISTERED_MESSAGE });
       }
@@ -934,6 +958,112 @@ router.post('/register', async (req, res) => {
   }
 });
 
+router.post('/switch/buyer', requireAuth({ roles: ['VENDOR', 'BUYER'] }), async (req, res) => {
+  try {
+    let user = await resolveRequestPublicUser(req.user);
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    const vendor = await resolveVendorProfileForUser(user);
+    const profileInput = parseBuyerProfileInput(req.body);
+
+    const buyer = await upsertBuyerProfile({
+      userId: user.id,
+      email: user.email,
+      full_name: user.full_name || vendor?.owner_name || vendor?.company_name,
+      phone: user.phone || vendor?.phone || vendor?.mobile_number || vendor?.whatsapp,
+      company_name: profileInput.company_name || vendor?.company_name,
+      gst_number: profileInput.gst_number || vendor?.gst_number,
+      state_id: profileInput.state_id || vendor?.state_id,
+      city_id: profileInput.city_id || vendor?.city_id,
+      state: profileInput.state || vendor?.state,
+      city: profileInput.city || vendor?.city,
+    });
+
+    user = await upsertPublicUser({
+      id: user.id,
+      email: user.email,
+      full_name: user.full_name || buyer?.full_name || vendor?.owner_name,
+      role: 'BUYER',
+      phone: user.phone || buyer?.phone || vendor?.phone || null,
+      password_hash: user.password_hash,
+      allowPasswordUpdate: false,
+    });
+
+    const activeCheck = await assertUserActive(user);
+    if (!activeCheck.ok) {
+      return res.status(403).json({ success: false, error: activeCheck.error || 'Account inactive' });
+    }
+
+    _cacheBuyerProfile.clear();
+    const sessionPayload = attachBuyerSessionMeta(issueSession(res, user), buyer);
+
+    return res.json({
+      success: true,
+      user: sessionPayload,
+      buyer,
+      next: '/buyer/proposals/new',
+    });
+  } catch (error) {
+    logger.error('[Auth] Switch to buyer failed:', error?.message || error);
+    return res.status(500).json({ success: false, error: 'Failed to switch to buyer account' });
+  }
+});
+
+router.post('/switch/vendor', requireAuth({ roles: ['BUYER', 'VENDOR'] }), async (req, res) => {
+  try {
+    let user = await resolveRequestPublicUser(req.user);
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    const vendor = await resolveVendorProfileForUser(user);
+    if (!vendor?.id) {
+      return res.status(409).json({
+        success: false,
+        needs_vendor_registration: true,
+        register_url: '/vendor/register?from=buyer',
+        error: 'Vendor profile not found',
+      });
+    }
+
+    await linkVendorProfileToUser(vendor, user.id);
+
+    user = await upsertPublicUser({
+      id: user.id,
+      email: user.email,
+      full_name: user.full_name || vendor.owner_name || vendor.company_name,
+      role: 'VENDOR',
+      phone: user.phone || vendor.phone || null,
+      password_hash: user.password_hash,
+      allowPasswordUpdate: false,
+    });
+
+    const activeCheck = await assertUserActive(user);
+    if (!activeCheck.ok) {
+      return res.status(403).json({ success: false, error: activeCheck.error || 'Account inactive' });
+    }
+
+    const sessionPayload = issueSession(res, user);
+
+    return res.json({
+      success: true,
+      user: sessionPayload,
+      vendor: {
+        id: vendor.id,
+        vendor_id: vendor.vendor_id || null,
+        company_name: vendor.company_name || null,
+        email: vendor.email || user.email || null,
+      },
+      next: '/vendor/dashboard',
+    });
+  } catch (error) {
+    logger.error('[Auth] Switch to vendor failed:', error?.message || error);
+    return res.status(500).json({ success: false, error: 'Failed to switch to vendor account' });
+  }
+});
+
 router.get('/me', async (req, res) => {
   try {
     const { AUTH_COOKIE_NAME, CSRF_COOKIE_NAME } = getAuthCookieNames();
@@ -954,7 +1084,19 @@ router.get('/me', async (req, res) => {
 
     if (!user) return res.json({ user: null });
 
-    user = await ensureUserRole(user);
+    const impersonationActive =
+      String(decoded?.type || '').toUpperCase() === 'IMPERSONATION' ||
+      Boolean(decoded?.impersonated_by);
+
+    if (impersonationActive) {
+      user = {
+        ...user,
+        role: normalizeRole(decoded?.role || user?.role || 'USER'),
+      };
+    } else {
+      user = await ensureUserRole(user);
+    }
+
     let buyerProfile = null;
 
     if (normalizeRole(user?.role) === 'BUYER') {
@@ -976,6 +1118,25 @@ router.get('/me', async (req, res) => {
       ...buildAuthUserPayload(user),
       access_token: token,
     };
+
+    if (impersonationActive) {
+      payload.impersonation = {
+        active: true,
+        by_user_id: decoded?.impersonated_by || null,
+        by_email: decoded?.impersonated_by_email || null,
+        by_role: decoded?.impersonated_by_role || null,
+        target_type: decoded?.impersonation_target_type || normalizeRole(decoded?.role || user?.role),
+        target_id: decoded?.impersonation_target_id || null,
+      };
+      payload.user_metadata = {
+        ...(payload.user_metadata || {}),
+        impersonation: payload.impersonation,
+      };
+      payload.app_metadata = {
+        ...(payload.app_metadata || {}),
+        impersonation: payload.impersonation,
+      };
+    }
 
     if (buyerProfile) {
       payload.buyer_id = buyerProfile.id || null;

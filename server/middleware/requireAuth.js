@@ -25,6 +25,11 @@ function buildActor(decoded = {}, roleOverride = null) {
     email: decoded.email || null,
     role,
     type: decoded.type || 'USER',
+    impersonated_by: decoded.impersonated_by || null,
+    impersonated_by_role: decoded.impersonated_by_role || null,
+    impersonated_by_email: decoded.impersonated_by_email || null,
+    impersonation_target_type: decoded.impersonation_target_type || null,
+    impersonation_target_id: decoded.impersonation_target_id || null,
   };
 }
 

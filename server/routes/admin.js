@@ -14,6 +14,13 @@ import {
   upsertPublicUser,
 } from "../lib/auth.js";
 import { validateStrongPassword } from "../lib/passwordPolicy.js";
+import { getWebsiteVisitorActivity } from "../lib/visitorActivity.js";
+import {
+  buildSearch360ActorFromEmployee,
+  createSearch360Escalation,
+  searchVendors360,
+  updateSearch360CaseStatus,
+} from "../lib/search360.js";
 
 const router = express.Router();
 
@@ -66,6 +73,50 @@ async function ensureAdminSystemConfigRow(adminId) {
   if (insertError) throw new Error(insertError.message);
   return inserted || payload;
 }
+
+router.get("/search360/vendors", async (req, res) => {
+  try {
+    const actor = buildSearch360ActorFromEmployee(req);
+    const result = await searchVendors360(actor, {
+      query: req.query?.q || req.query?.query || "",
+      stateId: req.query?.stateId || req.query?.state_id || "",
+      limit: req.query?.limit,
+      offset: req.query?.offset,
+    });
+    return res.json(result);
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      success: false,
+      error: error?.message || "Failed to load Search 360",
+    });
+  }
+});
+
+router.post("/search360/escalations", async (req, res) => {
+  try {
+    const actor = buildSearch360ActorFromEmployee(req);
+    const result = await createSearch360Escalation(actor, req.body || {}, req);
+    return res.status(201).json(result);
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      success: false,
+      error: error?.message || "Failed to create Search 360 escalation",
+    });
+  }
+});
+
+router.patch("/search360/cases/:caseId/status", async (req, res) => {
+  try {
+    const actor = buildSearch360ActorFromEmployee(req);
+    const result = await updateSearch360CaseStatus(actor, req.params.caseId, req.body || {}, req);
+    return res.json(result);
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      success: false,
+      error: error?.message || "Failed to update Search 360 case",
+    });
+  }
+});
 
 /**
  * =========================
@@ -2254,6 +2305,20 @@ router.get("/dashboard/counts", async (req, res) => {
     });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get("/dashboard/visitor-activity", async (req, res) => {
+  try {
+    const data = await getWebsiteVisitorActivity({
+      days: req.query?.days,
+      limit: req.query?.limit,
+      includeTechnical: false,
+    });
+
+    return res.json({ success: true, ...data });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message || "Failed to load visitor activity" });
   }
 });
 

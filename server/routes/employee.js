@@ -6,6 +6,13 @@ import { writeAuditLog } from '../lib/audit.js';
 import { hashPassword, normalizeEmail, normalizeRole, upsertPublicUser } from '../lib/auth.js';
 import { validateStrongPassword } from '../lib/passwordPolicy.js';
 import { requireAuth } from '../middleware/requireAuth.js';
+import { requireEmployeeRoles } from '../middleware/requireEmployeeRoles.js';
+import {
+  buildSearch360ActorFromEmployee,
+  createSearch360Escalation,
+  searchVendors360,
+  updateSearch360CaseStatus,
+} from '../lib/search360.js';
 
 const router = express.Router();
 
@@ -216,6 +223,8 @@ const buildPricingRuleRecord = (entityId, details = {}, createdAt = '') => {
     submitted_at: String(details?.submitted_at || '').trim() || createdAt || new Date().toISOString(),
     created_at: String(details?.created_at || '').trim() || createdAt || new Date().toISOString(),
     manager_remarks: String(details?.manager_remarks || details?.remarks || '').trim() || null,
+    business_reason: String(details?.business_reason || details?.reason || '').trim() || null,
+    target_segment: String(details?.target_segment || details?.scope || '').trim() || null,
     decided_at: String(details?.decided_at || '').trim() || null,
     decided_by_name: String(details?.decided_by_name || '').trim() || null,
     decided_by_email: String(details?.decided_by_email || '').trim() || null,
@@ -300,6 +309,7 @@ const roleToDepartment = (role) => {
 };
 
 const PRIVILEGED_STAFF_ROLES = new Set(['ADMIN', 'HR', 'FINANCE', 'SUPERADMIN']);
+const SEARCH360_EMPLOYEE_ROLES = ['SUPPORT', 'DATA_ENTRY', 'SALES', 'MANAGER', 'VP', 'ADMIN'];
 
 // Roles each level is allowed to CREATE:
 // ADMIN → HR, FINANCE only
@@ -397,6 +407,50 @@ async function resolveStaffManager(req, res) {
 
   return employee;
 }
+
+router.get('/search360/vendors', requireEmployeeRoles(SEARCH360_EMPLOYEE_ROLES), async (req, res) => {
+  try {
+    const actor = buildSearch360ActorFromEmployee(req);
+    const result = await searchVendors360(actor, {
+      query: req.query?.q || req.query?.query || '',
+      stateId: req.query?.stateId || req.query?.state_id || '',
+      limit: req.query?.limit,
+      offset: req.query?.offset,
+    });
+    return res.json(result);
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      success: false,
+      error: error?.message || 'Failed to load Search 360',
+    });
+  }
+});
+
+router.post('/search360/escalations', requireEmployeeRoles(SEARCH360_EMPLOYEE_ROLES), async (req, res) => {
+  try {
+    const actor = buildSearch360ActorFromEmployee(req);
+    const result = await createSearch360Escalation(actor, req.body || {}, req);
+    return res.status(201).json(result);
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      success: false,
+      error: error?.message || 'Failed to create Search 360 escalation',
+    });
+  }
+});
+
+router.patch('/search360/cases/:caseId/status', requireEmployeeRoles(SEARCH360_EMPLOYEE_ROLES), async (req, res) => {
+  try {
+    const actor = buildSearch360ActorFromEmployee(req);
+    const result = await updateSearch360CaseStatus(actor, req.params.caseId, req.body || {}, req);
+    return res.json(result);
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      success: false,
+      error: error?.message || 'Failed to update Search 360 case',
+    });
+  }
+});
 
 router.get('/staff', requireAuth(), async (req, res) => {
   try {
@@ -712,6 +766,207 @@ async function sumRevenueByPeriod({ startIso, endIso, endInclusive = true }) {
   if (error) throw new Error(error.message || 'Failed to load revenue');
 
   return safeNum((data || []).reduce((sum, row) => sum + safeNum(row?.amount), 0));
+}
+
+const normalizeTextValue = (value = '', max = 500) => {
+  const text = String(value || '').trim();
+  return text ? text.slice(0, max) : '';
+};
+
+const normalizeSalesCode = (value = '') =>
+  String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .slice(0, 32);
+
+const getSalesUserId = (employee, authUser = {}) =>
+  String(employee?.user_id || authUser?.id || employee?.id || '').trim() || null;
+
+const getFrontendBaseUrl = (req) => {
+  const configured = normalizeTextValue(
+    process.env.FRONTEND_URL ||
+      process.env.PUBLIC_SITE_URL ||
+      process.env.APP_PUBLIC_URL ||
+      process.env.WEBSITE_URL ||
+      '',
+    300
+  ).replace(/\/+$/, '');
+  if (configured) return configured;
+
+  const host = String(req.headers?.['x-forwarded-host'] || req.headers?.host || 'localhost:3000')
+    .replace(/:(3001|3100|5000)$/, ':3000');
+  const proto = String(req.headers?.['x-forwarded-proto'] || req.protocol || 'http').split(',')[0];
+  return `${proto}://${host}`;
+};
+
+const buildSalesPlanLink = (req, { planId, salesCode, vendorId = '' }) => {
+  const params = new URLSearchParams();
+  if (planId) params.set('plan', planId);
+  if (salesCode) params.set('sales_code', salesCode);
+  if (vendorId) params.set('vendor_id', vendorId);
+  return `${getFrontendBaseUrl(req)}/vendor/services${params.toString() ? `?${params.toString()}` : ''}`;
+};
+
+const buildSalesCodeCandidate = (employee, authUser = {}, salt = '') => {
+  const namePart =
+    normalizeSalesCode(employee?.full_name || employee?.email || authUser?.email || 'SALE').slice(0, 6) || 'SALE';
+  const idPart = normalizeSalesCode(employee?.user_id || authUser?.id || employee?.id || randomUUID()).slice(0, 6);
+  const saltPart = normalizeSalesCode(salt).slice(0, 4);
+  return normalizeSalesCode(`ITM${namePart}${idPart}${saltPart}`).slice(0, 24);
+};
+
+async function ensureSalesCode(employee, authUser = {}) {
+  const existing = normalizeSalesCode(employee?.sales_code || '');
+  if (existing) return existing;
+  if (!employee?.id) return buildSalesCodeCandidate(employee, authUser);
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const candidate = buildSalesCodeCandidate(employee, authUser, attempt ? randomUUID().slice(0, 6) : '');
+    const { data: conflict } = await db
+      .from('employees')
+      .select('id')
+      .eq('sales_code', candidate)
+      .maybeSingle();
+    if (conflict?.id && conflict.id !== employee.id) continue;
+
+    const { data, error } = await db
+      .from('employees')
+      .update({ sales_code: candidate, updated_at: new Date().toISOString() })
+      .eq('id', employee.id)
+      .select('*')
+      .maybeSingle();
+
+    if (!error) {
+      if (data) Object.assign(employee, data);
+      employee.sales_code = candidate;
+      return candidate;
+    }
+  }
+
+  return buildSalesCodeCandidate(employee, authUser, randomUUID().slice(0, 8));
+}
+
+async function resolveSalesActor(req, res) {
+  const employee = (await resolveEmployeeProfile(req.user)) || buildAuthEmployeeFallback(req.user);
+  if (!employee) {
+    res.status(404).json({ success: false, error: 'Employee profile not found' });
+    return null;
+  }
+  if (!hasSalesAccess(req.user?.role, employee?.role)) {
+    res.status(403).json({ success: false, error: 'Sales access required' });
+    return null;
+  }
+  const salesCode = await ensureSalesCode(employee, req.user);
+  return {
+    employee,
+    salesCode,
+    salesUserId: getSalesUserId(employee, req.user),
+  };
+}
+
+async function resolveSalesEmployeeByCode(code = '') {
+  const salesCode = normalizeSalesCode(code);
+  if (!salesCode) return null;
+
+  const { data, error } = await db
+    .from('employees')
+    .select('id, user_id, full_name, email, role, status, sales_code')
+    .eq('sales_code', salesCode)
+    .maybeSingle();
+  if (error || !data?.id) return null;
+
+  const role = normalizeRole(data.role || '');
+  const status = String(data.status || 'ACTIVE').trim().toUpperCase();
+  if (!['SALES', 'MANAGER', 'VP', 'ADMIN', 'SUPERADMIN'].includes(role) || status !== 'ACTIVE') return null;
+
+  return data;
+}
+
+async function getActiveSubscriptionMap(vendorIds = []) {
+  const ids = Array.from(new Set((vendorIds || []).map((id) => String(id || '').trim()).filter(Boolean)));
+  if (!ids.length) return new Map();
+
+  const { data, error } = await db
+    .from('vendor_plan_subscriptions')
+    .select('id, vendor_id, plan_id, status, start_date, end_date, sales_code, sales_user_id, created_at')
+    .in('vendor_id', ids)
+    .eq('status', 'ACTIVE')
+    .order('created_at', { ascending: false });
+  if (error) throw new Error(error.message || 'Failed to fetch active subscriptions');
+
+  const now = Date.now();
+  const byVendor = new Map();
+  (data || []).forEach((row) => {
+    const vendorId = String(row?.vendor_id || '').trim();
+    if (!vendorId || byVendor.has(vendorId)) return;
+    const endMs = row?.end_date ? new Date(row.end_date).getTime() : null;
+    if (endMs && Number.isFinite(endMs) && endMs < now) return;
+    byVendor.set(vendorId, row);
+  });
+  return byVendor;
+}
+
+async function hydrateVendors(rows = [], vendorIdField = 'vendor_id') {
+  const vendorIds = Array.from(
+    new Set((rows || []).map((row) => String(row?.[vendorIdField] || row?.vendor_id || '').trim()).filter(Boolean))
+  );
+  if (!vendorIds.length) return rows || [];
+
+  const { data, error } = await db
+    .from('vendors')
+    .select('id, vendor_id, company_name, owner_name, email, phone, city, state, pincode, kyc_status, is_active, created_at')
+    .in('id', vendorIds);
+  if (error) throw new Error(error.message || 'Failed to hydrate vendors');
+  const vendorById = new Map((data || []).map((vendor) => [vendor.id, vendor]));
+  return (rows || []).map((row) => ({ ...row, vendor: vendorById.get(row?.[vendorIdField] || row?.vendor_id) || null }));
+}
+
+async function hydratePlans(rows = [], planIdField = 'plan_id') {
+  const planIds = Array.from(
+    new Set((rows || []).map((row) => String(row?.[planIdField] || row?.plan_id || '').trim()).filter(Boolean))
+  );
+  if (!planIds.length) return rows || [];
+
+  const { data, error } = await db
+    .from('vendor_plans')
+    .select('id, name, price, duration_days, is_active')
+    .in('id', planIds);
+  if (error) throw new Error(error.message || 'Failed to hydrate plans');
+  const planById = new Map((data || []).map((plan) => [plan.id, plan]));
+  return (rows || []).map((row) => ({ ...row, plan: planById.get(row?.[planIdField] || row?.plan_id) || null }));
+}
+
+const isMissingWebsiteVisitorEventsTable = (error) => {
+  const message = String(error?.message || '').toLowerCase();
+  return (
+    message.includes('website_visitor_events') &&
+    (message.includes("doesn't exist") || message.includes('does not exist') || message.includes('unknown table'))
+  );
+};
+
+async function countWebsiteVisitorEvents(startIso, endIso) {
+  const { count, error } = await db
+    .from('website_visitor_events')
+    .select('*', { count: 'exact', head: true })
+    .gte('created_at', startIso)
+    .lte('created_at', endIso);
+
+  if (error && isMissingWebsiteVisitorEventsTable(error)) return 0;
+  if (error) throw new Error(error.message || 'Failed to count visitor activity');
+  return safeNum(count);
+}
+
+async function getRecentWebsiteVisitorEvents(limit = 12) {
+  const { data, error } = await db
+    .from('website_visitor_events')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (error && isMissingWebsiteVisitorEventsTable(error)) return [];
+  if (error) throw new Error(error.message || 'Failed to fetch visitor activity');
+  return data || [];
 }
 
 router.get('/me', requireAuth(), async (req, res) => {
@@ -1305,6 +1560,506 @@ router.patch('/sales/leads/:leadId/status', requireAuth(), async (req, res) => {
   }
 });
 
+router.get('/sales/profile', requireAuth(), async (req, res) => {
+  try {
+    const actor = await resolveSalesActor(req, res);
+    if (!actor) return;
+
+    return res.json({
+      success: true,
+      profile: {
+        id: actor.employee.id,
+        user_id: actor.salesUserId,
+        full_name: actor.employee.full_name,
+        email: actor.employee.email,
+        role: actor.employee.role,
+        sales_code: actor.salesCode,
+        plan_link_base: buildSalesPlanLink(req, { salesCode: actor.salesCode }),
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message || 'Failed to load sales profile' });
+  }
+});
+
+router.get('/sales/plans', requireAuth(), async (req, res) => {
+  try {
+    const actor = await resolveSalesActor(req, res);
+    if (!actor) return;
+
+    const { data, error } = await db
+      .from('vendor_plans')
+      .select('id, name, description, price, duration_days, daily_limit, weekly_limit, yearly_limit, features, is_active')
+      .eq('is_active', true)
+      .order('price', { ascending: true });
+
+    if (error) return res.status(500).json({ success: false, error: error.message || 'Failed to fetch plans' });
+
+    const plans = (data || []).map((plan) => ({
+      ...plan,
+      sales_link: buildSalesPlanLink(req, { planId: plan.id, salesCode: actor.salesCode }),
+    }));
+    return res.json({ success: true, plans });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message || 'Failed to fetch plans' });
+  }
+});
+
+router.get('/sales/no-plan-vendors', requireAuth(), async (req, res) => {
+  try {
+    const actor = await resolveSalesActor(req, res);
+    if (!actor) return;
+
+    const limitRaw = Number(req.query?.limit || 50);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.trunc(limitRaw), 200) : 50;
+    const search = normalizeTextValue(req.query?.search || '', 120).toLowerCase();
+    const region = normalizeTextValue(req.query?.region || '', 120).toLowerCase();
+
+    const fetchLimit = Math.min(Math.max(limit * 8, 200), 800);
+    const { data: vendors, error } = await db
+      .from('vendors')
+      .select('id, vendor_id, company_name, owner_name, email, phone, city, state, pincode, kyc_status, profile_completion, is_active, created_at, updated_at')
+      .eq('is_active', true)
+      .order('created_at', { ascending: false })
+      .limit(fetchLimit);
+
+    if (error) return res.status(500).json({ success: false, error: error.message || 'Failed to fetch vendors' });
+
+    const vendorRows = Array.isArray(vendors) ? vendors : [];
+    const activeByVendor = await getActiveSubscriptionMap(vendorRows.map((vendor) => vendor.id));
+
+    let rows = vendorRows
+      .filter((vendor) => !activeByVendor.has(String(vendor.id || '').trim()))
+      .filter((vendor) => {
+        const haystack = [
+          vendor.company_name,
+          vendor.owner_name,
+          vendor.email,
+          vendor.phone,
+          vendor.vendor_id,
+          vendor.city,
+          vendor.state,
+          vendor.pincode,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+        const regionText = [vendor.city, vendor.state, vendor.pincode].filter(Boolean).join(' ').toLowerCase();
+        if (search && !haystack.includes(search)) return false;
+        if (region && !regionText.includes(region)) return false;
+        return true;
+      })
+      .slice(0, limit);
+
+    const vendorIds = rows.map((vendor) => vendor.id).filter(Boolean);
+    let latestByVendor = new Map();
+    if (vendorIds.length) {
+      const { data: engagements, error: engagementError } = await db
+        .from('sales_vendor_engagements')
+        .select('id, vendor_id, lead_id, sales_user_id, plan_id, sales_code, plan_share_url, channel, engagement_type, status, notes, next_follow_up_at, created_at')
+        .in('vendor_id', vendorIds)
+        .order('created_at', { ascending: false })
+        .limit(1000);
+      if (engagementError) {
+        return res.status(500).json({ success: false, error: engagementError.message || 'Failed to fetch vendor engagement history' });
+      }
+      (engagements || []).forEach((row) => {
+        if (!row?.vendor_id || latestByVendor.has(row.vendor_id)) return;
+        latestByVendor.set(row.vendor_id, row);
+      });
+    }
+
+    rows = rows.map((vendor) => ({
+      ...vendor,
+      active_plan: null,
+      latest_engagement: latestByVendor.get(vendor.id) || null,
+      last_contact_at: latestByVendor.get(vendor.id)?.created_at || null,
+      next_follow_up_at: latestByVendor.get(vendor.id)?.next_follow_up_at || null,
+    }));
+
+    return res.json({
+      success: true,
+      vendors: rows,
+      meta: {
+        total_scanned: vendorRows.length,
+        returned: rows.length,
+        limit,
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message || 'Failed to fetch vendors without plans' });
+  }
+});
+
+router.get('/sales/reminders', requireAuth(), async (req, res) => {
+  try {
+    const actor = await resolveSalesActor(req, res);
+    if (!actor) return;
+
+    const limitRaw = Number(req.query?.limit || 80);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.trunc(limitRaw), 200) : 80;
+    const status = normalizeRole(req.query?.status || '');
+    const dueOnly = String(req.query?.due || '').toLowerCase() === 'true';
+
+    let query = db
+      .from('sales_vendor_engagements')
+      .select('id, vendor_id, lead_id, sales_user_id, manager_user_id, vp_user_id, division_id, plan_id, sales_code, plan_share_url, channel, engagement_type, status, notes, next_follow_up_at, created_at, updated_at')
+      .not('next_follow_up_at', 'is', null)
+      .order('next_follow_up_at', { ascending: true })
+      .limit(limit);
+
+    if (actor.employee.role === 'SALES') query = query.eq('sales_user_id', actor.salesUserId);
+    if (status) query = query.eq('status', status);
+    else query = query.in('status', ['OPEN', 'PENDING', 'SENT', 'IN_PROGRESS']);
+    if (dueOnly) query = query.lte('next_follow_up_at', new Date().toISOString());
+
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ success: false, error: error.message || 'Failed to fetch reminders' });
+
+    let reminders = await hydrateVendors(data || []);
+    reminders = await hydratePlans(reminders);
+
+    return res.json({ success: true, reminders });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message || 'Failed to fetch reminders' });
+  }
+});
+
+router.post('/sales/reminders', requireAuth(), async (req, res) => {
+  try {
+    const actor = await resolveSalesActor(req, res);
+    if (!actor) return;
+
+    const vendorId = normalizeTextValue(req.body?.vendor_id || '', 80);
+    const leadId = normalizeTextValue(req.body?.lead_id || '', 80);
+    const notes = normalizeTextValue(req.body?.notes || '', 2000);
+    const nextFollowUpAt = normalizeTextValue(req.body?.next_follow_up_at || '', 80);
+    const status = normalizeRole(req.body?.status || 'OPEN') || 'OPEN';
+    const channel = normalizeRole(req.body?.channel || 'CALL') || 'CALL';
+
+    if (!vendorId && !leadId) {
+      return res.status(400).json({ success: false, error: 'vendor_id or lead_id is required' });
+    }
+    if (!nextFollowUpAt || Number.isNaN(new Date(nextFollowUpAt).getTime())) {
+      return res.status(400).json({ success: false, error: 'Valid next_follow_up_at is required' });
+    }
+
+    if (vendorId) {
+      const { data: vendor, error: vendorError } = await db
+        .from('vendors')
+        .select('id')
+        .eq('id', vendorId)
+        .maybeSingle();
+      if (vendorError) return res.status(500).json({ success: false, error: vendorError.message || 'Failed to validate vendor' });
+      if (!vendor?.id) return res.status(404).json({ success: false, error: 'Vendor not found' });
+    }
+
+    if (leadId) {
+      await db
+        .from('leads')
+        .update({
+          assigned_to: actor.employee.id,
+          assigned_sales_user_id: actor.salesUserId,
+          next_follow_up_at: new Date(nextFollowUpAt).toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', leadId);
+    }
+
+    const payload = {
+      vendor_id: vendorId || null,
+      lead_id: leadId || null,
+      sales_user_id: actor.salesUserId,
+      engagement_type: 'FOLLOW_UP',
+      channel,
+      status,
+      notes: notes || null,
+      next_follow_up_at: new Date(nextFollowUpAt).toISOString(),
+      sales_code: actor.salesCode,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data, error } = await db
+      .from('sales_vendor_engagements')
+      .insert([payload])
+      .select('*')
+      .maybeSingle();
+    if (error) return res.status(500).json({ success: false, error: error.message || 'Failed to create reminder' });
+
+    await writeAuditLog({
+      req,
+      actor: req.actor || { email: actor.employee.email, role: actor.employee.role },
+      action: 'SALES_FOLLOW_UP_REMINDER_CREATED',
+      entityType: 'sales_vendor_engagements',
+      entityId: data?.id || null,
+      details: { vendor_id: vendorId || null, lead_id: leadId || null, next_follow_up_at: nextFollowUpAt },
+    });
+
+    return res.status(201).json({ success: true, reminder: data || payload });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message || 'Failed to create reminder' });
+  }
+});
+
+router.patch('/sales/reminders/:id/status', requireAuth(), async (req, res) => {
+  try {
+    const actor = await resolveSalesActor(req, res);
+    if (!actor) return;
+
+    const id = normalizeTextValue(req.params?.id || '', 80);
+    const status = normalizeRole(req.body?.status || '');
+    if (!id || !status) return res.status(400).json({ success: false, error: 'id and status are required' });
+
+    let query = db.from('sales_vendor_engagements').update({ status, updated_at: new Date().toISOString() }).eq('id', id);
+    if (actor.employee.role === 'SALES') query = query.eq('sales_user_id', actor.salesUserId);
+
+    const { data, error } = await query.select('*').maybeSingle();
+    if (error) return res.status(500).json({ success: false, error: error.message || 'Failed to update reminder' });
+    if (!data?.id) return res.status(404).json({ success: false, error: 'Reminder not found' });
+
+    return res.json({ success: true, reminder: data });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message || 'Failed to update reminder' });
+  }
+});
+
+router.post('/sales/plan-shares', requireAuth(), async (req, res) => {
+  try {
+    const actor = await resolveSalesActor(req, res);
+    if (!actor) return;
+
+    const vendorId = normalizeTextValue(req.body?.vendor_id || '', 80);
+    const planId = normalizeTextValue(req.body?.plan_id || '', 80);
+    const leadId = normalizeTextValue(req.body?.lead_id || '', 80);
+    const channel = normalizeRole(req.body?.channel || 'WHATSAPP') || 'WHATSAPP';
+    const notes = normalizeTextValue(req.body?.notes || '', 2000);
+    const nextFollowUpAt = normalizeTextValue(req.body?.next_follow_up_at || '', 80);
+
+    if (!vendorId || !planId) {
+      return res.status(400).json({ success: false, error: 'vendor_id and plan_id are required' });
+    }
+
+    const [{ data: vendor, error: vendorError }, { data: plan, error: planError }] = await Promise.all([
+      db.from('vendors').select('id, vendor_id, company_name, email, phone').eq('id', vendorId).maybeSingle(),
+      db.from('vendor_plans').select('id, name, price, duration_days, is_active').eq('id', planId).maybeSingle(),
+    ]);
+
+    if (vendorError) return res.status(500).json({ success: false, error: vendorError.message || 'Failed to validate vendor' });
+    if (planError) return res.status(500).json({ success: false, error: planError.message || 'Failed to validate plan' });
+    if (!vendor?.id) return res.status(404).json({ success: false, error: 'Vendor not found' });
+    if (!plan?.id || plan.is_active === false) return res.status(404).json({ success: false, error: 'Active plan not found' });
+
+    const planShareUrl = buildSalesPlanLink(req, {
+      planId,
+      salesCode: actor.salesCode,
+      vendorId,
+    });
+
+    const payload = {
+      vendor_id: vendorId,
+      lead_id: leadId || null,
+      sales_user_id: actor.salesUserId,
+      plan_id: planId,
+      sales_code: actor.salesCode,
+      plan_share_url: planShareUrl,
+      channel,
+      engagement_type: 'PLAN_SHARED',
+      status: 'SENT',
+      notes: notes || `Shared ${plan.name} plan with ${vendor.company_name || vendor.vendor_id || 'vendor'}`,
+      next_follow_up_at: nextFollowUpAt && !Number.isNaN(new Date(nextFollowUpAt).getTime())
+        ? new Date(nextFollowUpAt).toISOString()
+        : null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data, error } = await db
+      .from('sales_vendor_engagements')
+      .insert([payload])
+      .select('*')
+      .maybeSingle();
+    if (error) return res.status(500).json({ success: false, error: error.message || 'Failed to save plan share' });
+
+    await writeAuditLog({
+      req,
+      actor: req.actor || { email: actor.employee.email, role: actor.employee.role },
+      action: 'SALES_PLAN_SHARED',
+      entityType: 'sales_vendor_engagements',
+      entityId: data?.id || null,
+      details: { vendor_id: vendorId, plan_id: planId, sales_code: actor.salesCode, channel },
+    });
+
+    return res.status(201).json({
+      success: true,
+      share: {
+        ...(data || payload),
+        vendor,
+        plan,
+      },
+      link: planShareUrl,
+      sales_code: actor.salesCode,
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message || 'Failed to share plan' });
+  }
+});
+
+router.get('/sales/attributions', requireAuth(), async (req, res) => {
+  try {
+    const actor = await resolveSalesActor(req, res);
+    if (!actor) return;
+
+    const limitRaw = Number(req.query?.limit || 50);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.trunc(limitRaw), 200) : 50;
+
+    let query = db
+      .from('vendor_payments')
+      .select('id, vendor_id, plan_id, subscription_id, amount, discount_amount, net_amount, status, payment_method, transaction_id, payment_date, coupon_code, offer_type, offer_code, referral_id, sales_code, sales_user_id, sales_engagement_id')
+      .order('payment_date', { ascending: false })
+      .limit(limit);
+
+    if (actor.employee.role === 'SALES') {
+      query = query.or(`sales_user_id.eq.${actor.salesUserId},sales_code.eq.${actor.salesCode}`);
+    }
+
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ success: false, error: error.message || 'Failed to fetch attribution records' });
+
+    let payments = await hydrateVendors(data || []);
+    payments = await hydratePlans(payments);
+    const totalRevenue = payments.reduce((sum, row) => sum + safeNum(row?.net_amount ?? row?.amount), 0);
+
+    return res.json({
+      success: true,
+      payments,
+      summary: {
+        count: payments.length,
+        total_revenue: totalRevenue,
+        total_revenue_fmt: fmtINR(totalRevenue),
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message || 'Failed to fetch attribution records' });
+  }
+});
+
+router.get('/sales/dashboard', requireAuth(), async (req, res) => {
+  try {
+    const actor = await resolveSalesActor(req, res);
+    if (!actor) return;
+
+    const now = new Date();
+    const start7 = startOfDay(now);
+    start7.setDate(start7.getDate() - 6);
+    const startIso = start7.toISOString();
+    const endIso = now.toISOString();
+
+    const [
+      leadsRes,
+      visitorLeadsRes,
+      planSharesRes,
+      dueRemindersRes,
+      noPlanVendorsResult,
+      remindersResult,
+      attributionsResult,
+    ] = await Promise.all([
+      db.from('leads').select('*', { count: 'exact', head: true }).gte('created_at', startIso).lte('created_at', endIso),
+      db.from('leads').select('*', { count: 'exact', head: true }).not('visitor_id', 'is', null),
+      db
+        .from('sales_vendor_engagements')
+        .select('*', { count: 'exact', head: true })
+        .eq('engagement_type', 'PLAN_SHARED')
+        .gte('created_at', startIso)
+        .lte('created_at', endIso),
+      db
+        .from('sales_vendor_engagements')
+        .select('*', { count: 'exact', head: true })
+        .not('next_follow_up_at', 'is', null)
+        .in('status', ['OPEN', 'PENDING', 'SENT', 'IN_PROGRESS'])
+        .lte('next_follow_up_at', endIso),
+      (async () => {
+        const { data: vendors, error } = await db
+          .from('vendors')
+          .select('id, vendor_id, company_name, owner_name, email, phone, city, state, pincode, kyc_status, profile_completion, is_active, created_at, updated_at')
+          .eq('is_active', true)
+          .order('created_at', { ascending: false })
+          .limit(180);
+        if (error) throw error;
+        const activeMap = await getActiveSubscriptionMap((vendors || []).map((vendor) => vendor.id));
+        return (vendors || []).filter((vendor) => !activeMap.has(String(vendor.id || '').trim())).slice(0, 12);
+      })(),
+      (async () => {
+        let query = db
+          .from('sales_vendor_engagements')
+          .select('id, vendor_id, lead_id, sales_user_id, plan_id, sales_code, plan_share_url, channel, engagement_type, status, notes, next_follow_up_at, created_at')
+          .not('next_follow_up_at', 'is', null)
+          .in('status', ['OPEN', 'PENDING', 'SENT', 'IN_PROGRESS'])
+          .order('next_follow_up_at', { ascending: true })
+          .limit(8);
+        if (actor.employee.role === 'SALES') query = query.eq('sales_user_id', actor.salesUserId);
+        const { data, error } = await query;
+        if (error) throw error;
+        let rows = await hydrateVendors(data || []);
+        rows = await hydratePlans(rows);
+        return rows;
+      })(),
+      (async () => {
+        let query = db
+          .from('vendor_payments')
+          .select('id, vendor_id, plan_id, amount, net_amount, status, payment_date, sales_code, sales_user_id')
+          .order('payment_date', { ascending: false })
+          .limit(8);
+        if (actor.employee.role === 'SALES') {
+          query = query.or(`sales_user_id.eq.${actor.salesUserId},sales_code.eq.${actor.salesCode}`);
+        }
+        const { data, error } = await query;
+        if (error) throw error;
+        let rows = await hydrateVendors(data || []);
+        rows = await hydratePlans(rows);
+        return rows;
+      })(),
+    ]);
+
+    const countError = [leadsRes.error, visitorLeadsRes.error, planSharesRes.error, dueRemindersRes.error].find(Boolean);
+    if (countError) throw countError;
+
+    const revenue7d = (attributionsResult || [])
+      .filter((row) => {
+        const paymentDate = row?.payment_date ? new Date(row.payment_date).getTime() : 0;
+        return paymentDate && paymentDate >= start7.getTime() && paymentDate <= now.getTime();
+      })
+      .reduce((sum, row) => sum + safeNum(row?.net_amount ?? row?.amount), 0);
+
+    return res.json({
+      success: true,
+      dashboard: {
+        profile: {
+          full_name: actor.employee.full_name,
+          email: actor.employee.email,
+          role: actor.employee.role,
+          sales_code: actor.salesCode,
+          plan_link_base: buildSalesPlanLink(req, { salesCode: actor.salesCode }),
+        },
+        stats: {
+          new_leads_7d: safeNum(leadsRes.count),
+          visitor_leads: safeNum(visitorLeadsRes.count),
+          plan_shares_7d: safeNum(planSharesRes.count),
+          due_reminders: safeNum(dueRemindersRes.count),
+          no_plan_vendors_sample: Array.isArray(noPlanVendorsResult) ? noPlanVendorsResult.length : 0,
+          attributed_revenue_7d: revenue7d,
+          attributed_revenue_7d_fmt: fmtINR(revenue7d),
+        },
+        no_plan_vendors: noPlanVendorsResult || [],
+        reminders: remindersResult || [],
+        attributed_payments: attributionsResult || [],
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message || 'Failed to load sales dashboard' });
+  }
+});
+
 router.get('/sales/pricing-rules', requireAuth(), async (req, res) => {
   try {
     const employee = await resolveEmployeeProfile(req.user);
@@ -1375,6 +2130,8 @@ router.post('/sales/pricing-rules', requireAuth(), async (req, res) => {
     const ruleName = String(req.body?.name || req.body?.rule_name || '').trim();
     const ruleType = normalizePricingRuleType(req.body?.type);
     const ruleValue = Number(req.body?.value);
+    const businessReason = String(req.body?.business_reason || req.body?.reason || '').trim();
+    const targetSegment = String(req.body?.target_segment || req.body?.scope || '').trim();
 
     if (!ruleName) {
       return res.status(400).json({ success: false, error: 'Rule name is required' });
@@ -1399,6 +2156,8 @@ router.post('/sales/pricing-rules', requireAuth(), async (req, res) => {
         requested_by_email: String(employee?.email || '').trim() || null,
         requested_by_role: normalizeRole(employee?.role || req.user?.role || 'SALES') || 'SALES',
         requester_user_id: String(employee?.user_id || req.user?.id || '').trim() || null,
+        business_reason: businessReason || null,
+        target_segment: targetSegment || null,
         submitted_at: submittedAt,
         created_at: submittedAt,
       },
@@ -1531,17 +2290,30 @@ router.get('/sales/vendors', requireAuth(), async (req, res) => {
       return res.status(403).json({ success: false, error: 'Sales access required' });
     }
 
-    const q = String(req.query?.q || '').trim().toLowerCase();
+    const q = String(req.query?.q || '').trim();
+    const searchTerm = q.replace(/,/g, ' ').trim();
 
     let query = db
       .from('vendors')
-      .select('id, company_name, state, city, email, phone')
-      .eq('is_active', true)
+      .select('id, vendor_id, company_name, owner_name, state, city, email, phone, is_active, kyc_status, status')
       .order('company_name', { ascending: true })
       .limit(50);
 
-    if (q) {
-      query = query.ilike('company_name', `%${q}%`);
+    if (searchTerm) {
+      const like = `%${searchTerm}%`;
+      query = query.or(
+        [
+          `vendor_id.ilike.${like}`,
+          `company_name.ilike.${like}`,
+          `owner_name.ilike.${like}`,
+          `email.ilike.${like}`,
+          `phone.ilike.${like}`,
+          `city.ilike.${like}`,
+          `state.ilike.${like}`,
+        ].join(',')
+      );
+    } else {
+      query = query.eq('is_active', true);
     }
 
     const { data, error } = await query;

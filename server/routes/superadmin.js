@@ -4,10 +4,15 @@ import { db } from '../lib/dbClient.js';
 import { notifyUser } from '../lib/notify.js';
 import { writeAuditLog } from '../lib/audit.js';
 import {
+  clearAuthCookies,
+  createCsrfToken,
   getPublicUserByEmail,
+  getPublicUserById,
   hashPassword,
   normalizeEmail,
   setPublicUserPassword,
+  setAuthCookies,
+  signAuthToken,
   upsertPublicUser,
 } from '../lib/auth.js';
 import {
@@ -16,6 +21,13 @@ import {
   requireGodMode,
   changeSuperAdminPassword,
 } from '../lib/superadminAuth.js';
+import { getWebsiteVisitorActivity } from '../lib/visitorActivity.js';
+import {
+  buildSearch360ActorFromSuperadmin,
+  createSearch360Escalation,
+  searchVendors360,
+  updateSearch360CaseStatus,
+} from '../lib/search360.js';
 
 const router = express.Router();
 
@@ -26,6 +38,27 @@ const EMPLOYEE_ALLOWED_ROLES = ['ADMIN'];
 const normalizeRole = (role) => String(role || '').trim().toUpperCase();
 
 const nowIso = () => new Date().toISOString();
+
+const compactText = (value) => String(value || '').trim();
+const IMPERSONATION_TARGETS = new Set(['VENDOR', 'BUYER']);
+const INTERNAL_PUBLIC_ROLES = new Set([
+  'ADMIN',
+  'HR',
+  'FINANCE',
+  'DATA_ENTRY',
+  'DATAENTRY',
+  'SUPPORT',
+  'SALES',
+  'MANAGER',
+  'VP',
+  'SUPERADMIN',
+  'GODMODE',
+]);
+
+const normalizeImpersonationTarget = (value) => {
+  const normalized = normalizeRole(value);
+  return IMPERSONATION_TARGETS.has(normalized) ? normalized : '';
+};
 
 async function findPublicUserByEmail(email) {
   const target = normalizeEmail(email);
@@ -175,6 +208,75 @@ const toNonNegativeInteger = (value, fallback = 0) => {
   return Math.max(0, Math.floor(n));
 };
 
+const PLAN_CURRENCIES = new Set([
+  'INR',
+  'USD',
+  'EUR',
+  'GBP',
+  'AED',
+  'SAR',
+  'QAR',
+  'SGD',
+  'AUD',
+  'CAD',
+  'JPY',
+  'CNY',
+  'BDT',
+  'NPR',
+]);
+
+const normalizePlanCurrency = (value) => {
+  const code = String(value || '').trim().toUpperCase();
+  return PLAN_CURRENCIES.has(code) ? code : 'INR';
+};
+
+const PLAN_REGION_CODES = new Set(['EU', 'GCC', 'NORTH_AMERICA', 'APAC', 'MENA']);
+
+const normalizeMarketCode = (value) =>
+  String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]/g, '')
+    .slice(0, 32);
+
+const normalizeMarketCodeList = (value, { countryOnly = false } = {}) => {
+  const parts = Array.isArray(value)
+    ? value
+    : String(value || '')
+        .split(',')
+        .map((part) => part.trim());
+
+  return Array.from(
+    new Set(
+      parts
+        .map(normalizeMarketCode)
+        .filter((code) => code && (!countryOnly || (/^[A-Z]{2}$/.test(code) && !PLAN_REGION_CODES.has(code))))
+    )
+  );
+};
+
+const normalizeRegionalPrices = (value) => {
+  const rows = Array.isArray(value) ? value : [];
+  return rows
+    .map((row) => {
+      const currency = normalizePlanCurrency(row?.currency);
+      const price = toNonNegativeNumber(row?.price ?? row?.current_price, 0);
+      const originalPrice = toNonNegativeNumber(row?.original_price, 0);
+      const discountPercent = Math.max(0, Math.min(100, toNonNegativeNumber(row?.discount_percent, 0)));
+      return {
+        currency,
+        country_codes: normalizeMarketCodeList(row?.country_codes || row?.countries, { countryOnly: true }),
+        region_codes: normalizeMarketCodeList(row?.region_codes || row?.regions),
+        price,
+        original_price: originalPrice,
+        discount_percent: discountPercent,
+        discount_label: String(row?.discount_label || '').trim(),
+        extra_lead_price: toNonNegativeNumber(row?.extra_lead_price, 0),
+      };
+    })
+    .filter((row) => row.currency !== 'INR' && row.price > 0);
+};
+
 function normalizeObject(value) {
   if (!value) return {};
   if (typeof value === 'string') {
@@ -206,6 +308,8 @@ function buildPlanFeatures(existingFeatures, payload = {}) {
     hasOwn(payload, 'original_price') ||
     hasOwn(payload, 'discount_percent') ||
     hasOwn(payload, 'discount_label') ||
+    hasOwn(payload, 'currency') ||
+    hasOwn(payload, 'regional_prices') ||
     hasOwn(payload, 'extra_lead_price');
 
   if (hasPricingInput) {
@@ -222,6 +326,12 @@ function buildPlanFeatures(existingFeatures, payload = {}) {
     }
     if (hasOwn(payload, 'discount_label')) {
       pricing.discount_label = String(payload.discount_label || '').trim();
+    }
+    if (hasOwn(payload, 'currency')) {
+      pricing.currency = normalizePlanCurrency(payload.currency);
+    }
+    if (hasOwn(payload, 'regional_prices')) {
+      pricing.regional_prices = normalizeRegionalPrices(payload.regional_prices);
     }
     if (hasOwn(payload, 'extra_lead_price')) {
       pricing.extra_lead_price = toNonNegativeNumber(payload.extra_lead_price, 0);
@@ -552,6 +662,347 @@ router.put('/password', requireSuperAdmin, changeSuperAdminPassword);
 
 // All routes below require superadmin.
 router.use(requireSuperAdmin);
+
+function getTargetDisplayName(targetType, row = {}) {
+  if (targetType === 'VENDOR') {
+    return compactText(row.company_name) || compactText(row.owner_name) || compactText(row.email) || 'Vendor';
+  }
+  return compactText(row.company_name) || compactText(row.full_name) || compactText(row.email) || 'Buyer';
+}
+
+function getTargetTable(targetType) {
+  return targetType === 'BUYER' ? 'buyers' : 'vendors';
+}
+
+function getTargetSelect(targetType) {
+  if (targetType === 'BUYER') {
+    return 'id, user_id, full_name, email, phone, company_name, state, city, is_active, created_at, updated_at';
+  }
+
+  return 'id, user_id, vendor_id, company_name, owner_name, email, phone, state, city, is_active, status, account_status, is_suspended, created_at, updated_at';
+}
+
+function getTargetDashboardPath(targetType) {
+  return targetType === 'BUYER' ? '/buyer/dashboard' : '/vendor/dashboard';
+}
+
+function summarizeImpersonationTarget(targetType, row = {}) {
+  const inactive = row.is_active === false || row.is_active === 0 || String(row.is_active).toLowerCase() === 'false';
+  const suspended =
+    String(row.account_status || row.status || '').toUpperCase() === 'SUSPENDED' ||
+    String(row.is_suspended || '').toLowerCase() === 'true';
+
+  return {
+    id: row.id,
+    user_id: row.user_id || null,
+    target_type: targetType,
+    external_id: targetType === 'VENDOR' ? row.vendor_id || null : null,
+    name: getTargetDisplayName(targetType, row),
+    email: row.email || null,
+    phone: row.phone || null,
+    company_name: row.company_name || null,
+    owner_name: row.owner_name || row.full_name || null,
+    city: row.city || null,
+    state: row.state || null,
+    is_active: !inactive && !suspended,
+    status_label: suspended ? 'SUSPENDED' : inactive ? 'INACTIVE' : 'ACTIVE',
+    created_at: row.created_at || null,
+    updated_at: row.updated_at || null,
+  };
+}
+
+async function loadImpersonationTarget(targetType, targetId) {
+  const table = getTargetTable(targetType);
+  const select = getTargetSelect(targetType);
+  const target = compactText(targetId);
+
+  if (!target) {
+    const error = new Error('target_id is required');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  let query = db.from(table).select(select);
+  if (targetType === 'VENDOR') {
+    query = query.or(`id.eq.${target},vendor_id.eq.${target},user_id.eq.${target}`);
+  } else {
+    query = query.or(`id.eq.${target},user_id.eq.${target}`);
+  }
+
+  const { data, error } = await query.maybeSingle();
+  if (error) {
+    const err = new Error(error.message);
+    err.statusCode = 500;
+    throw err;
+  }
+
+  if (!data?.id) {
+    const err = new Error(`${targetType === 'BUYER' ? 'Buyer' : 'Vendor'} not found`);
+    err.statusCode = 404;
+    throw err;
+  }
+
+  return data;
+}
+
+async function ensureTargetSessionUser(targetType, targetRow) {
+  const email = normalizeEmail(targetRow?.email || '');
+  let user = null;
+
+  if (targetRow?.user_id) {
+    user = await getPublicUserById(targetRow.user_id);
+  }
+
+  if (!user && email) {
+    user = await getPublicUserByEmail(email);
+  }
+
+  if (user && INTERNAL_PUBLIC_ROLES.has(normalizeRole(user?.role))) {
+    const err = new Error('Target email is linked to an internal staff account. Link the correct portal user before assisted access.');
+    err.statusCode = 409;
+    throw err;
+  }
+
+  if (!user && !email) {
+    const err = new Error('Target account has no login identity or email');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (!user) {
+    user = await upsertPublicUser({
+      email,
+      full_name: getTargetDisplayName(targetType, targetRow),
+      role: targetType,
+      phone: targetRow?.phone || null,
+    });
+  }
+
+  if (!user?.id) {
+    const err = new Error('Unable to resolve target login identity');
+    err.statusCode = 500;
+    throw err;
+  }
+
+  if (targetRow.user_id !== user.id) {
+    const { error } = await db
+      .from(getTargetTable(targetType))
+      .update({ user_id: user.id, updated_at: nowIso() })
+      .eq('id', targetRow.id);
+
+    if (error) {
+      const err = new Error(error.message);
+      err.statusCode = 500;
+      throw err;
+    }
+
+    targetRow.user_id = user.id;
+  }
+
+  return user;
+}
+
+function buildSuperadminActor(req) {
+  return {
+    id: req.superadmin?.id || req.actor?.id || null,
+    type: 'SUPERADMIN',
+    role: normalizeRole(req.superadmin?.role || req.actor?.role || 'SUPERADMIN'),
+    email: req.superadmin?.email || req.actor?.email || null,
+  };
+}
+
+router.get('/impersonation/targets', async (req, res) => {
+  try {
+    const targetType = normalizeImpersonationTarget(req.query?.target_type || req.query?.type || 'BUYER');
+    if (!targetType) {
+      return res.status(400).json({ success: false, error: 'Invalid target_type. Use VENDOR or BUYER.' });
+    }
+
+    const rawQuery = compactText(req.query?.q || req.query?.query || '').replace(/,/g, ' ');
+    const limit = Math.min(Math.max(Number(req.query?.limit || 20), 1), 50);
+    const table = getTargetTable(targetType);
+    let query = db
+      .from(table)
+      .select(getTargetSelect(targetType))
+      .order('updated_at', { ascending: false })
+      .limit(limit);
+
+    if (rawQuery) {
+      const like = `%${rawQuery}%`;
+      const filters = targetType === 'BUYER'
+        ? [
+            `id.ilike.${like}`,
+            `full_name.ilike.${like}`,
+            `email.ilike.${like}`,
+            `phone.ilike.${like}`,
+            `company_name.ilike.${like}`,
+            `city.ilike.${like}`,
+            `state.ilike.${like}`,
+          ]
+        : [
+            `id.ilike.${like}`,
+            `vendor_id.ilike.${like}`,
+            `company_name.ilike.${like}`,
+            `owner_name.ilike.${like}`,
+            `email.ilike.${like}`,
+            `phone.ilike.${like}`,
+            `city.ilike.${like}`,
+            `state.ilike.${like}`,
+          ];
+      query = query.or(filters.join(','));
+    }
+
+    const { data, error } = await query;
+    if (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    return res.json({
+      success: true,
+      target_type: targetType,
+      query: rawQuery,
+      targets: (data || []).map((row) => summarizeImpersonationTarget(targetType, row)),
+    });
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      success: false,
+      error: error?.message || 'Failed to load assisted-access targets',
+    });
+  }
+});
+
+router.post('/impersonation/start', async (req, res) => {
+  try {
+    const targetType = normalizeImpersonationTarget(req.body?.target_type || req.body?.type);
+    if (!targetType) {
+      return res.status(400).json({ success: false, error: 'Invalid target_type. Use VENDOR or BUYER.' });
+    }
+
+    const target = await loadImpersonationTarget(
+      targetType,
+      req.body?.target_id || req.body?.targetId || req.body?.id
+    );
+    const user = await ensureTargetSessionUser(targetType, target);
+    const actor = buildSuperadminActor(req);
+
+    const token = signAuthToken({
+      sub: user.id,
+      email: user.email || target.email || null,
+      role: targetType,
+      type: 'IMPERSONATION',
+      impersonated_by: actor.id,
+      impersonated_by_role: actor.role,
+      impersonated_by_email: actor.email,
+      impersonation_target_type: targetType,
+      impersonation_target_id: target.id,
+    });
+
+    const csrfToken = createCsrfToken();
+    setAuthCookies(res, token, csrfToken);
+
+    await writeAuditLog({
+      req,
+      actor,
+      action: 'SUPERADMIN_IMPERSONATION_STARTED',
+      entityType: getTargetTable(targetType),
+      entityId: target.id,
+      details: {
+        target_type: targetType,
+        target_name: getTargetDisplayName(targetType, target),
+        target_email: target.email || null,
+        target_user_id: user.id,
+        dashboard_path: getTargetDashboardPath(targetType),
+      },
+    });
+
+    return res.json({
+      success: true,
+      target_type: targetType,
+      target: summarizeImpersonationTarget(targetType, target),
+      user: {
+        id: user.id,
+        email: user.email || target.email || null,
+        role: targetType,
+      },
+      impersonation: {
+        active: true,
+        by_user_id: actor.id,
+        by_email: actor.email,
+        by_role: actor.role,
+        target_type: targetType,
+        target_id: target.id,
+      },
+      next: getTargetDashboardPath(targetType),
+    });
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      success: false,
+      error: error?.message || 'Failed to start assisted dashboard access',
+    });
+  }
+});
+
+router.post('/impersonation/stop', async (req, res) => {
+  try {
+    const actor = buildSuperadminActor(req);
+    clearAuthCookies(res);
+    await writeAuditLog({
+      req,
+      actor,
+      action: 'SUPERADMIN_IMPERSONATION_STOPPED',
+      entityType: 'auth_sessions',
+      details: { stopped_by: actor.email || actor.id || null },
+    });
+    return res.json({ success: true });
+  } catch (error) {
+    clearAuthCookies(res);
+    return res.json({ success: true });
+  }
+});
+
+router.get('/search360/vendors', async (req, res) => {
+  try {
+    const actor = buildSearch360ActorFromSuperadmin(req);
+    const result = await searchVendors360(actor, {
+      query: req.query?.q || req.query?.query || '',
+      stateId: req.query?.stateId || req.query?.state_id || '',
+      limit: req.query?.limit,
+      offset: req.query?.offset,
+    });
+    return res.json(result);
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      success: false,
+      error: error?.message || 'Failed to load Search 360',
+    });
+  }
+});
+
+router.post('/search360/escalations', async (req, res) => {
+  try {
+    const actor = buildSearch360ActorFromSuperadmin(req);
+    const result = await createSearch360Escalation(actor, req.body || {}, req);
+    return res.status(201).json(result);
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      success: false,
+      error: error?.message || 'Failed to create Search 360 escalation',
+    });
+  }
+});
+
+router.patch('/search360/cases/:caseId/status', async (req, res) => {
+  try {
+    const actor = buildSearch360ActorFromSuperadmin(req);
+    const result = await updateSearch360CaseStatus(actor, req.params.caseId, req.body || {}, req);
+    return res.json(result);
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      success: false,
+      error: error?.message || 'Failed to update Search 360 case',
+    });
+  }
+});
 
 // -----------------------
 // Employees
@@ -972,6 +1423,10 @@ router.post('/plans', async (req, res) => {
         yearly_limit: payload.yearly_limit,
         duration_days: payload.duration_days,
         is_active: payload.is_active,
+        currency: payload?.features?.pricing?.currency || 'INR',
+        regional_price_count: Array.isArray(payload?.features?.pricing?.regional_prices)
+          ? payload.features.pricing.regional_prices.length
+          : 0,
         extra_lead_price: toNonNegativeNumber(payload?.features?.pricing?.extra_lead_price, 0),
       },
     });
@@ -1018,6 +1473,8 @@ router.put('/plans/:planId', async (req, res) => {
       hasOwn(req.body, 'original_price') ||
       hasOwn(req.body, 'discount_percent') ||
       hasOwn(req.body, 'discount_label') ||
+      hasOwn(req.body, 'currency') ||
+      hasOwn(req.body, 'regional_prices') ||
       hasOwn(req.body, 'extra_lead_price') ||
       hasOwn(req.body, 'badge_label') ||
       hasOwn(req.body, 'badge_variant') ||
@@ -2061,6 +2518,20 @@ router.put('/employees/:id/states-scope', requireSuperAdmin, async (req, res) =>
     return res.json({ success: true, state_scope_ids: stateIds, states_scope: stateNames });
   } catch (err) {
     return res.status(err?.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/visitor-activity', async (req, res) => {
+  try {
+    const data = await getWebsiteVisitorActivity({
+      days: req.query?.days,
+      limit: req.query?.limit,
+      includeTechnical: normalizeRole(req.superadmin?.role) === 'GODMODE',
+    });
+
+    return res.json({ success: true, ...data });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message || 'Failed to load visitor activity' });
   }
 });
 

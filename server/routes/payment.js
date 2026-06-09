@@ -29,6 +29,38 @@ const normalizeCouponCode = (value) =>
     .replace(/\s+/g, '')
     .replace(/[^A-Z0-9_-]/g, '');
 
+const normalizeSalesCode = (value) =>
+  String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .slice(0, 32);
+
+async function resolveSalesAttribution(rawCode = '') {
+  const salesCode = normalizeSalesCode(rawCode);
+  if (!salesCode) return { salesCode: null, employee: null, salesUserId: null };
+
+  const { data, error } = await db
+    .from('employees')
+    .select('id, user_id, full_name, email, role, status, sales_code')
+    .eq('sales_code', salesCode)
+    .maybeSingle();
+
+  if (error || !data?.id) return { salesCode, employee: null, salesUserId: null };
+
+  const role = String(data.role || '').trim().toUpperCase();
+  const status = String(data.status || 'ACTIVE').trim().toUpperCase();
+  if (!['SALES', 'MANAGER', 'VP', 'ADMIN', 'SUPERADMIN'].includes(role) || status !== 'ACTIVE') {
+    return { salesCode, employee: null, salesUserId: null };
+  }
+
+  return {
+    salesCode,
+    employee: data,
+    salesUserId: String(data.user_id || data.id || '').trim() || null,
+  };
+}
+
 const INDIA_TZ_OFFSET_MINUTES = 5 * 60 + 30;
 const ISO_TZ_SUFFIX_REGEX = /(Z|[+-]\d{2}:\d{2})$/i;
 const LOCAL_DATETIME_REGEX = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/;
@@ -124,6 +156,49 @@ const getPlanExtraLeadPrice = (plan) => {
   const features = asObject(plan?.features);
   const pricing = asObject(features?.pricing);
   return parseCurrencyAmount(pricing?.extra_lead_price, 0);
+};
+
+const getPlanCurrency = (plan) => {
+  const features = asObject(plan?.features);
+  const pricing = asObject(features?.pricing);
+  const currency = String(pricing?.currency || features?.currency || plan?.currency || 'INR')
+    .trim()
+    .toUpperCase();
+  return currency || 'INR';
+};
+
+const normalizeCountryCode = (value) => {
+  const code = String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z]/g, '');
+  return code.length === 2 && code !== 'XX' ? code : '';
+};
+
+const getCountryFromLanguage = (value) => {
+  const match = String(value || '').match(/[-_]([A-Za-z]{2})(?:[,;]|$)/);
+  return normalizeCountryCode(match?.[1]);
+};
+
+const getRequestCountryCode = (req) => {
+  const headers = req?.headers || {};
+  const candidates = [
+    { source: 'cf-ipcountry', value: headers['cf-ipcountry'] },
+    { source: 'x-vercel-ip-country', value: headers['x-vercel-ip-country'] },
+    { source: 'cloudfront-viewer-country', value: headers['cloudfront-viewer-country'] },
+    { source: 'x-country-code', value: headers['x-country-code'] },
+    { source: 'x-appengine-country', value: headers['x-appengine-country'] },
+  ];
+
+  for (const candidate of candidates) {
+    const countryCode = normalizeCountryCode(candidate.value);
+    if (countryCode) return { countryCode, source: candidate.source };
+  }
+
+  const languageCountry = getCountryFromLanguage(headers['accept-language']);
+  if (languageCountry) return { countryCode: languageCountry, source: 'accept-language' };
+
+  return { countryCode: 'IN', source: 'fallback' };
 };
 
 const resolvePaidLeadPrice = (lead, plan) => {
@@ -353,6 +428,7 @@ router.post('/initiate', async (req, res) => {
   try {
     const { vendor_id, plan_id } = req.body;
     const coupon_code = normalizeCouponCode(req.body?.coupon_code);
+    const salesAttribution = await resolveSalesAttribution(req.body?.sales_code || req.query?.sales_code);
 
     // Check if Razorpay keys are configured
     if (!process.env.RAZORPAY_KEY_ID || process.env.RAZORPAY_KEY_ID.includes('your_razorpay')) {
@@ -392,6 +468,13 @@ router.post('/initiate', async (req, res) => {
       return res.status(400).json({ error: 'Invalid plan price' });
     }
 
+    const planCurrency = getPlanCurrency(plan);
+    if (planCurrency !== 'INR') {
+      return res.status(400).json({
+        error: `Online checkout is currently configured for INR plans only. This plan is priced in ${planCurrency}.`,
+      });
+    }
+
     const offer = await resolveOfferForPayment({
       couponCode: coupon_code,
       vendor,
@@ -425,6 +508,7 @@ router.post('/initiate', async (req, res) => {
         vendor_email: vendor.email,
         vendor_name: vendor.company_name,
         coupon_code: offerCode || '',
+        sales_code: salesAttribution.salesCode || '',
       },
     };
 
@@ -446,6 +530,9 @@ router.post('/initiate', async (req, res) => {
         coupon_code: offerCode || null,
         offer_type: offerType,
         referral_id: referralId,
+        sales_code: salesAttribution.salesCode || null,
+        sales_user_id: salesAttribution.salesUserId || null,
+        sales_code_valid: Boolean(salesAttribution.salesUserId),
       },
     });
   } catch (error) {
@@ -462,6 +549,7 @@ router.post('/verify', async (req, res) => {
   try {
     const { order_id, payment_id, signature, vendor_id, plan_id } = req.body;
     const coupon_code = normalizeCouponCode(req.body?.coupon_code);
+    const salesAttribution = await resolveSalesAttribution(req.body?.sales_code || req.query?.sales_code);
 
     if (!order_id || !payment_id || !signature || !vendor_id || !plan_id) {
       return res.status(400).json({ error: 'Missing required fields' });
@@ -533,6 +621,8 @@ router.post('/verify', async (req, res) => {
           end_date: endDate.toISOString(),
           status: 'ACTIVE',
           plan_duration_days: plan.duration_days || 365,
+          sales_code: salesAttribution.salesCode || null,
+          sales_user_id: salesAttribution.salesUserId || null,
         },
       ])
       .select()
@@ -611,6 +701,8 @@ router.post('/verify', async (req, res) => {
           offer_type: offerType,
           offer_code: offerCode || null,
           referral_id: referralId,
+          sales_code: salesAttribution.salesCode || null,
+          sales_user_id: salesAttribution.salesUserId || null,
         },
       ])
       .select()
@@ -655,6 +747,37 @@ router.post('/verify', async (req, res) => {
     }
 
     if (!paymentError && payment) {
+      if (salesAttribution.salesUserId) {
+        try {
+          const { data: engagement } = await db
+            .from('sales_vendor_engagements')
+            .insert([
+              {
+                vendor_id,
+                sales_user_id: salesAttribution.salesUserId,
+                plan_id,
+                sales_code: salesAttribution.salesCode,
+                engagement_type: 'CONVERTED',
+                status: 'CLOSED',
+                notes: `Vendor purchased ${plan.name} via sales code ${salesAttribution.salesCode}`,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+              },
+            ])
+            .select('id')
+            .maybeSingle();
+
+          if (engagement?.id) {
+            await db
+              .from('vendor_payments')
+              .update({ sales_engagement_id: engagement.id })
+              .eq('id', payment.id);
+          }
+        } catch (salesAttributionError) {
+          logger.warn('[payment] sales attribution engagement failed:', salesAttributionError?.message || salesAttributionError);
+        }
+      }
+
       const vendorActor = {
         id: vendor.user_id || vendor_id,
         type: 'VENDOR',
@@ -1214,6 +1337,17 @@ router.get('/plans', async (req, res) => {
     logger.error('Plans retrieval error:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+router.get('/market-context', (req, res) => {
+  const { countryCode, source } = getRequestCountryCode(req);
+  return res.json({
+    success: true,
+    data: {
+      country_code: countryCode,
+      source,
+    },
+  });
 });
 
 /**

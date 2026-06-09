@@ -726,17 +726,29 @@ const fetchMicroCategoriesBySubIds = async (subIds) => {
   if (!Array.isArray(subIds) || subIds.length === 0) return [];
   const chunks = chunkArray(subIds, 60);
   const runChunk = async (ids) => {
-    let q = db.from('micro_categories').select('id, sub_category_id, name, slug').in('sub_category_id', ids).eq('is_active', true).order('sort_order', { ascending: true }).order('name', { ascending: true });
+    let q = db.from('micro_categories').select('id, sub_category_id, name, slug, image_url').in('sub_category_id', ids).eq('is_active', true).order('sort_order', { ascending: true }).order('name', { ascending: true });
     let res = await q;
-    if (res.error && isMissingColumnErr(res.error, 'is_active')) res = await db.from('micro_categories').select('id, sub_category_id, name, slug').in('sub_category_id', ids).order('sort_order', { ascending: true }).order('name', { ascending: true });
+    if (res.error && isMissingColumnErr(res.error, 'image_url')) res = await db.from('micro_categories').select('id, sub_category_id, name, slug').in('sub_category_id', ids).eq('is_active', true).order('sort_order', { ascending: true }).order('name', { ascending: true });
+    if (res.error && isMissingColumnErr(res.error, 'is_active')) res = await db.from('micro_categories').select('id, sub_category_id, name, slug, image_url').in('sub_category_id', ids).order('sort_order', { ascending: true }).order('name', { ascending: true });
+    if (res.error && isMissingColumnErr(res.error, 'image_url')) res = await db.from('micro_categories').select('id, sub_category_id, name, slug').in('sub_category_id', ids).order('sort_order', { ascending: true }).order('name', { ascending: true });
     if (res.error && isMissingColumnErr(res.error, 'sort_order')) {
-      let q2 = db.from('micro_categories').select('id, sub_category_id, name, slug').in('sub_category_id', ids).order('name', { ascending: true });
+      let q2 = db.from('micro_categories').select('id, sub_category_id, name, slug, image_url').in('sub_category_id', ids).order('name', { ascending: true });
       if (!isMissingColumnErr(res.error, 'is_active')) {
         q2 = q2.eq('is_active', true);
       }
       res = await q2;
+      if (res.error && isMissingColumnErr(res.error, 'image_url')) {
+        let q3 = db.from('micro_categories').select('id, sub_category_id, name, slug').in('sub_category_id', ids).order('name', { ascending: true });
+        if (!isMissingColumnErr(res.error, 'is_active')) {
+          q3 = q3.eq('is_active', true);
+        }
+        res = await q3;
+      }
       if (res.error && isMissingColumnErr(res.error, 'is_active')) {
-        res = await db.from('micro_categories').select('id, sub_category_id, name, slug').in('sub_category_id', ids).order('name', { ascending: true });
+        res = await db.from('micro_categories').select('id, sub_category_id, name, slug, image_url').in('sub_category_id', ids).order('name', { ascending: true });
+        if (res.error && isMissingColumnErr(res.error, 'image_url')) {
+          res = await db.from('micro_categories').select('id, sub_category_id, name, slug').in('sub_category_id', ids).order('name', { ascending: true });
+        }
       }
     }
     return res.data || [];
@@ -793,7 +805,7 @@ router.get('/categories/home-showcase', cacheResponse('dir:home-showcase', 900),
     const microsBySub = micros.reduce((acc, m) => {
       if (!acc[m.sub_category_id]) acc[m.sub_category_id] = [];
       if (microLimit <= 0 || acc[m.sub_category_id].length < microLimit) {
-        acc[m.sub_category_id].push({ id: m.id, name: m.name, slug: m.slug });
+        acc[m.sub_category_id].push({ id: m.id, name: m.name, slug: m.slug, image_url: m.image_url || null });
       }
       return acc;
     }, {});
@@ -930,21 +942,21 @@ router.get('/hierarchy', cacheResponse('dir:hierarchy', 1800), async (req, res) 
   try {
     const [headsRes, subsRes, microsRes] = await Promise.all([
       db.from('head_categories').select('id, name, slug, image_url').eq('is_active', true).order('name'),
-      db.from('sub_categories').select('id, name, slug, head_category_id').eq('is_active', true).order('name'),
-      db.from('micro_categories').select('id, name, slug, sub_category_id').eq('is_active', true).order('name'),
+      db.from('sub_categories').select('id, name, slug, head_category_id, image_url').eq('is_active', true).order('name'),
+      db.from('micro_categories').select('id, name, slug, sub_category_id, image_url').eq('is_active', true).order('name'),
     ]);
 
     if (headsRes.error) throw headsRes.error;
 
     const microsBySub = (microsRes.data || []).reduce((acc, m) => {
       if (!acc[m.sub_category_id]) acc[m.sub_category_id] = [];
-      acc[m.sub_category_id].push({ id: m.id, name: m.name, slug: m.slug });
+      acc[m.sub_category_id].push({ id: m.id, name: m.name, slug: m.slug, image_url: m.image_url || null });
       return acc;
     }, {});
 
     const subsByHead = (subsRes.data || []).reduce((acc, s) => {
       if (!acc[s.head_category_id]) acc[s.head_category_id] = [];
-      acc[s.head_category_id].push({ id: s.id, name: s.name, slug: s.slug, micros: microsBySub[s.id] || [] });
+      acc[s.head_category_id].push({ id: s.id, name: s.name, slug: s.slug, image_url: s.image_url || null, micros: microsBySub[s.id] || [] });
       return acc;
     }, {});
 
@@ -1203,7 +1215,7 @@ router.get('/categories/subs', cacheResponse('dir:subs-alias', 1800), async (req
     if (!headId) return res.status(400).json({ success: false, error: 'head_id is required' });
     const { data, error } = await db
       .from('sub_categories')
-      .select('id, name, slug, head_category_id, is_active')
+      .select('id, name, slug, head_category_id, image_url, is_active')
       .eq('head_category_id', headId)
       .eq('is_active', true)
       .order('name');
@@ -1221,7 +1233,7 @@ router.get('/categories/micros', cacheResponse('dir:micros-alias', 1800), async 
     if (!subId) return res.status(400).json({ success: false, error: 'sub_id is required' });
     const { data, error } = await db
       .from('micro_categories')
-      .select('id, name, slug, sub_category_id, is_active')
+      .select('id, name, slug, sub_category_id, image_url, is_active')
       .eq('sub_category_id', subId)
       .eq('is_active', true)
       .order('name');
