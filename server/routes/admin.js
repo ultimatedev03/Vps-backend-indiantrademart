@@ -180,15 +180,65 @@ const startOfLocalMonth = (date = new Date()) =>
 const addMonths = (date, months) =>
   new Date(date.getFullYear(), date.getMonth() + months, 1);
 
-const buildTrend = (current, previous, periodLabel) => {
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const daysBetweenInclusiveEnd = (from, to) =>
+  Math.max(1, Math.ceil((to.getTime() - from.getTime()) / DAY_MS));
+
+const minDate = (a, b) => new Date(Math.min(a.getTime(), b.getTime()));
+
+const formatTrendCount = (value) => {
+  const numeric = safeNum(value);
+  return Number.isInteger(numeric)
+    ? numeric.toLocaleString("en-IN")
+    : numeric.toLocaleString("en-IN", { maximumFractionDigits: 1 });
+};
+
+const buildTrend = (current, previous, periodLabel, options = {}) => {
   const currentValue = safeNum(current);
   const previousValue = safeNum(previous);
+  const minPreviousForPercent = safeNum(options.minPreviousForPercent ?? 10);
+  const maxPercentForDisplay = safeNum(options.maxPercentForDisplay ?? 200);
+  const currentLabel = options.currentLabel || periodLabel;
+
+  if (currentValue <= 0 && previousValue <= 0) {
+    return {
+      value: 0,
+      label: `No activity ${periodLabel}`,
+      trendUp: null,
+      current: currentValue,
+      previous: previousValue,
+      comparisonSkipped: true,
+    };
+  }
+
+  if (previousValue < minPreviousForPercent) {
+    return {
+      value: null,
+      label: `${formatTrendCount(currentValue)} ${currentLabel}`,
+      trendUp: null,
+      current: currentValue,
+      previous: previousValue,
+      comparisonSkipped: true,
+    };
+  }
 
   if (previousValue > 0) {
     const percent = Math.round(((currentValue - previousValue) / previousValue) * 100);
+    if (Math.abs(percent) > maxPercentForDisplay) {
+      return {
+        value: null,
+        label: `${formatTrendCount(currentValue)} ${currentLabel}`,
+        trendUp: null,
+        current: currentValue,
+        previous: previousValue,
+        comparisonSkipped: true,
+      };
+    }
+
     return {
       value: percent,
-      label: `${percent > 0 ? "+" : ""}${percent}% ${periodLabel}`,
+      label: percent === 0 ? `No change ${periodLabel}` : `${percent > 0 ? "+" : ""}${percent}% ${periodLabel}`,
       trendUp: percent > 0 ? true : percent < 0 ? false : null,
       current: currentValue,
       previous: previousValue,
@@ -198,19 +248,21 @@ const buildTrend = (current, previous, periodLabel) => {
   if (currentValue > 0) {
     return {
       value: null,
-      label: `+${currentValue} ${periodLabel}`,
-      trendUp: true,
+      label: `${formatTrendCount(currentValue)} ${currentLabel}`,
+      trendUp: null,
       current: currentValue,
       previous: previousValue,
+      comparisonSkipped: true,
     };
   }
 
   return {
     value: 0,
-    label: `0% ${periodLabel}`,
+    label: `No activity ${periodLabel}`,
     trendUp: null,
     current: currentValue,
     previous: previousValue,
+    comparisonSkipped: true,
   };
 };
 
@@ -2083,9 +2135,16 @@ router.get("/dashboard/overview", async (req, res) => {
     const yesterdayStart = addDays(todayStart, -1);
     const weekStart = startOfLocalWeek(now);
     const previousWeekStart = addDays(weekStart, -7);
+    const previousWeekComparableEnd = addDays(
+      previousWeekStart,
+      daysBetweenInclusiveEnd(weekStart, tomorrowStart)
+    );
     const monthStart = startOfLocalMonth(now);
-    const nextMonthStart = addMonths(monthStart, 1);
     const previousMonthStart = addMonths(monthStart, -1);
+    const previousMonthComparableEnd = minDate(
+      addDays(previousMonthStart, daysBetweenInclusiveEnd(monthStart, tomorrowStart)),
+      monthStart
+    );
 
     // Base queries — scoped by admin's states if assigned
     let vendorsActiveQ = db.from("vendors").select("*", { count: "exact", head: true }).eq("is_active", true);
@@ -2207,14 +2266,14 @@ router.get("/dashboard/overview", async (req, res) => {
       leadPurchasesAmtQ,
       vendorPaymentsQ,
       openTicketsQ,
-      sumLeadRevenueInRange(monthStart, nextMonthStart),
-      sumLeadRevenueInRange(previousMonthStart, monthStart),
-      sumVendorRevenueInRange(monthStart, nextMonthStart),
-      sumVendorRevenueInRange(previousMonthStart, monthStart),
+      sumLeadRevenueInRange(monthStart, tomorrowStart),
+      sumLeadRevenueInRange(previousMonthStart, previousMonthComparableEnd),
+      sumVendorRevenueInRange(monthStart, tomorrowStart),
+      sumVendorRevenueInRange(previousMonthStart, previousMonthComparableEnd),
       countCreatedInRange({ table: "vendors", from: weekStart, to: tomorrowStart, stateScoped: true }),
-      countCreatedInRange({ table: "vendors", from: previousWeekStart, to: weekStart, stateScoped: true }),
+      countCreatedInRange({ table: "vendors", from: previousWeekStart, to: previousWeekComparableEnd, stateScoped: true }),
       countCreatedInRange({ table: "buyers", from: weekStart, to: tomorrowStart, stateScoped: true }),
-      countCreatedInRange({ table: "buyers", from: previousWeekStart, to: weekStart, stateScoped: true }),
+      countCreatedInRange({ table: "buyers", from: previousWeekStart, to: previousWeekComparableEnd, stateScoped: true }),
       countCreatedInRange({ table: "products", from: todayStart, to: tomorrowStart }),
       countCreatedInRange({ table: "products", from: yesterdayStart, to: todayStart }),
     ]);
@@ -2258,10 +2317,22 @@ router.get("/dashboard/overview", async (req, res) => {
         pendingKyc: pendingKycRes.count || 0,
         openTickets: openTicketsRes.count || 0,
         trends: {
-          totalRevenue: buildTrend(currentMonthRevenue, previousMonthRevenue, "this month"),
-          activeVendors: buildTrend(currentWeekVendors, previousWeekVendors, "this week"),
-          totalBuyers: buildTrend(currentWeekBuyers, previousWeekBuyers, "this week"),
-          totalProducts: buildTrend(todayProducts, yesterdayProducts, "today"),
+          totalRevenue: buildTrend(currentMonthRevenue, previousMonthRevenue, "this month", {
+            minPreviousForPercent: 100,
+            currentLabel: "this month",
+          }),
+          activeVendors: buildTrend(currentWeekVendors, previousWeekVendors, "this week", {
+            minPreviousForPercent: 10,
+            currentLabel: "new this week",
+          }),
+          totalBuyers: buildTrend(currentWeekBuyers, previousWeekBuyers, "this week", {
+            minPreviousForPercent: 10,
+            currentLabel: "new this week",
+          }),
+          totalProducts: buildTrend(todayProducts, yesterdayProducts, "today", {
+            minPreviousForPercent: 10,
+            currentLabel: "added today",
+          }),
         },
         scopedToStates: scope || null,
       },
