@@ -797,18 +797,29 @@ router.get('/category/:type/:slug', cacheResponse('dir:category-detail', 1800, {
   }
 });
 
+const PUBLIC_PRODUCT_DETAIL_SELECT = '*, vendors(*), micro_categories(id, name, slug, sub_categories(id, name, slug, head_categories(id, name, slug)))';
+
+const fetchPublicProductDetail = async (column, value) =>
+  db
+    .from('products')
+    .select(PUBLIC_PRODUCT_DETAIL_SELECT)
+    .eq(column, value)
+    .eq('status', 'ACTIVE')
+    .eq('vendors.is_active', true)
+    .limit(1)
+    .maybeSingle();
+
 router.get('/product/:slug', cacheResponse('dir:product', 300, { includeParams: true }), async (req, res) => {
   try {
-    const slug = req.params.slug;
+    const slug = String(req.params.slug || '').trim();
     if (!slug) return res.status(400).json({ success: false, error: 'Slug required' });
 
-    const { data: product, error } = await db
-      .from('products')
-      .select('*, vendors(*), micro_categories(id, name, slug, sub_categories(id, name, slug, head_categories(id, name, slug)))')
-      .eq('slug', slug)
-      .eq('status', 'ACTIVE')
-      .limit(1)
-      .maybeSingle();
+    let { data: product, error } = await fetchPublicProductDetail('slug', slug);
+    if (!error && !product) {
+      const byId = await fetchPublicProductDetail('id', slug);
+      product = byId.data;
+      error = byId.error;
+    }
 
     if (error || !product) {
       return res.status(404).json({ success: false, error: 'Product not found' });
@@ -1127,9 +1138,10 @@ router.get('/product/id/:productId', cacheResponse('dir:product-id', 300, { incl
 
     const { data: product, error } = await db
       .from('products')
-      .select('*, vendors(*), micro_categories(id, name, slug, sub_categories(id, name, slug, head_categories(id, name, slug)))')
+      .select(PUBLIC_PRODUCT_DETAIL_SELECT)
       .eq('id', productId)
       .eq('status', 'ACTIVE')
+      .eq('vendors.is_active', true)
       .maybeSingle();
 
     if (error) throw error;

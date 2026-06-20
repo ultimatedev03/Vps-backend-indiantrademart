@@ -27,9 +27,7 @@
     "node-cron": "^4.2.1",
     "nodemailer": "^8.0.7",
     "openai": "^4.77.4",
-    "papaparse": "^5.4.1",
     "pg": "^8.21.0",
-    "razorpay": "^2.9.6",
-    "ws": "^8.20.1"
+    "razorpay": "^2.9.6"
   }
 }

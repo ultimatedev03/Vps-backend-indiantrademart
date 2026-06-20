@@ -666,8 +666,9 @@ async function resolveLocationNames({ stateId = '', cityId = '' } = {}) {
 }
 
 async function fetchVendorByPublicSlug(slug) {
-  const normalizedSlug = String(slug || '').trim().toLowerCase();
-  if (!normalizedSlug) return { vendor: null, error: null };
+  const requestedKey = String(slug || '').trim();
+  const normalizedSlug = requestedKey.toLowerCase();
+  if (!requestedKey) return { vendor: null, error: null };
 
   const { data, error } = await db
     .from('vendors')
@@ -684,13 +685,26 @@ async function fetchVendorByPublicSlug(slug) {
   const { data: byPublicId, error: publicIdError } = await db
     .from('vendors')
     .select('*')
-    .eq('vendor_id', normalizedSlug)
+    .eq('vendor_id', requestedKey)
     .maybeSingle();
 
   if (publicIdError && !isMissingColumnError(publicIdError)) {
     return { vendor: null, error: publicIdError };
   }
   if (byPublicId) return { vendor: byPublicId, error: null };
+
+  if (requestedKey !== normalizedSlug) {
+    const { data: byLowerPublicId, error: lowerPublicIdError } = await db
+      .from('vendors')
+      .select('*')
+      .eq('vendor_id', normalizedSlug)
+      .maybeSingle();
+
+    if (lowerPublicIdError && !isMissingColumnError(lowerPublicIdError)) {
+      return { vendor: null, error: lowerPublicIdError };
+    }
+    if (byLowerPublicId) return { vendor: byLowerPublicId, error: null };
+  }
 
   const slugTokens = normalizedSlug.split('-').filter((token) => token.length >= 2);
   const strongestToken = slugTokens.find((token) => token.length >= 4) || slugTokens[0] || '';

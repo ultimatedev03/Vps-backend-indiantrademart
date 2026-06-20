@@ -1019,5 +1019,3 @@ export const db = {
     columnCache.clear();
   },
 };
-
-export default db;
