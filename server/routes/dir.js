@@ -495,6 +495,58 @@ async function fetchFuzzyCandidates({ q, microId, microIds, subCategoryId, headC
   return { rows, totalCount: rows.length };
 }
 
+function canUseBroadCategoryScope(scope = {}) {
+  return Boolean(
+    scope?.microId ||
+    scope?.subCategoryId ||
+    (Array.isArray(scope?.microIds) && scope.microIds.length)
+  );
+}
+
+function mergeRowsById(...groups) {
+  const seen = new Set();
+  const rows = [];
+  groups.flat().forEach((row) => {
+    const key = row?.id || `${row?.vendorId || row?.vendor_id || ''}:${row?.name || ''}`;
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    rows.push(row);
+  });
+  return rows;
+}
+
+async function fetchBroadCategoryRows({ fallbackScopes = [], stateId, cityId, sort, limit }) {
+  const rows = [];
+  for (const scope of fallbackScopes.filter(canUseBroadCategoryScope)) {
+    const scoped = await runHybridMysqlSearch({
+      q: '',
+      ...scope,
+      stateId,
+      cityId,
+      sort,
+      limit,
+      offset: 0,
+      useFullText: false,
+      broad: true,
+    });
+    rows.push(...(scoped.rows || []));
+    if (mergeRowsById(rows).length >= limit) break;
+  }
+  return mergeRowsById(rows).slice(0, limit);
+}
+
+async function augmentWithBroadCategoryRows({ rows = [], fallbackScopes = [], stateId, cityId, sort, limit }) {
+  if (!fallbackScopes.some(canUseBroadCategoryScope) || rows.length >= limit) return rows.slice(0, limit);
+  const broadRows = await fetchBroadCategoryRows({
+    fallbackScopes,
+    stateId,
+    cityId,
+    sort,
+    limit: Math.max(limit, limit - rows.length),
+  });
+  return mergeRowsById(rows, broadRows).slice(0, limit);
+}
+
 async function fetchPersonalizedSearchTerms(req) {
   const terms = [];
   const email = String(req.user?.email || req.query?.buyer_email || '').trim().toLowerCase();
@@ -1105,12 +1157,20 @@ async function handleRankedProducts(req, res) {
       });
 
       if (hybrid.rows.length) {
+        const responseRows = await augmentWithBroadCategoryRows({
+          rows: hybrid.rows,
+          fallbackScopes,
+          stateId,
+          cityId,
+          sort,
+          limit,
+        });
         return res.json({
           success: true,
-          data: hybrid.rows,
-          count: hybrid.totalCount,
+          data: responseRows,
+          count: Math.max(hybrid.totalCount, responseRows.length),
           meta: {
-            searchMode: 'hybrid',
+            searchMode: responseRows.length > hybrid.rows.length ? 'hybrid_category_expanded' : 'hybrid',
             autocomplete: true,
             fuzzy: true,
             fullText: true,
@@ -1131,17 +1191,25 @@ async function handleRankedProducts(req, res) {
         });
 
         if (scopedHybrid.rows.length) {
+          const responseRows = await augmentWithBroadCategoryRows({
+            rows: scopedHybrid.rows,
+            fallbackScopes,
+            stateId,
+            cityId,
+            sort,
+            limit,
+          });
           return res.json({
             success: true,
-            data: scopedHybrid.rows,
-            count: scopedHybrid.totalCount,
-            recommendations: scopedHybrid.rows,
+            data: responseRows,
+            count: Math.max(scopedHybrid.totalCount, responseRows.length),
+            recommendations: [],
             availability: {
-              exactAvailable: false,
-              message: 'This product is currently not available. You may like these similar products.',
+              exactAvailable: true,
+              message: '',
             },
             meta: {
-              searchMode: 'hybrid_parent_category',
+              searchMode: 'hybrid_parent_category_expanded',
               autocomplete: true,
               fuzzy: true,
               fullText: true,
@@ -1149,6 +1217,33 @@ async function handleRankedProducts(req, res) {
             },
           });
         }
+      }
+
+      const broadCategoryRows = await fetchBroadCategoryRows({
+        fallbackScopes,
+        stateId,
+        cityId,
+        sort,
+        limit,
+      });
+      if (broadCategoryRows.length) {
+        return res.json({
+          success: true,
+          data: broadCategoryRows,
+          count: broadCategoryRows.length,
+          recommendations: [],
+          availability: {
+            exactAvailable: true,
+            message: '',
+          },
+          meta: {
+            searchMode: 'category_broad',
+            autocomplete: true,
+            fuzzy: true,
+            fullText: true,
+            semantic: true,
+          },
+        });
       }
     }
 
@@ -1414,7 +1509,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
     const offset = (page - 1) * limit;
     const visitorId = safeText(req.query?.visitor_id || req.query?.visitorId || req.headers?.['x-visitor-id'], 191);
     const personalized = Boolean(req.user?.id || req.user?.email || visitorId);
-    const cacheKey = `hybrid:v2:${JSON.stringify({ q, microSlug, sort, page, limit, stateId, cityId })}`;
+    const cacheKey = `hybrid:v3:${JSON.stringify({ q, microSlug, sort, page, limit, stateId, cityId })}`;
 
     if (!personalized && isRedisConfigured()) {
       const cached = await cacheGetJson(cacheKey).catch(() => null);
@@ -1446,6 +1541,15 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
       totalCount = fuzzy.totalCount;
     }
 
+    rows = await augmentWithBroadCategoryRows({
+      rows,
+      fallbackScopes,
+      stateId,
+      cityId,
+      sort,
+      limit,
+    });
+
     const exactAvailable = rows.length > 0;
     let scopedRecommendations = [];
     if (!exactAvailable && q) {
@@ -1460,7 +1564,14 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
           offset: 0,
         });
         if (scoped.rows.length) {
-          scopedRecommendations = scoped.rows.slice(0, limit);
+          scopedRecommendations = await augmentWithBroadCategoryRows({
+            rows: scoped.rows,
+            fallbackScopes,
+            stateId,
+            cityId,
+            sort,
+            limit,
+          });
           break;
         }
       }
@@ -1491,15 +1602,25 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
               fallbackScopes,
             }));
 
-    const responseRows = exactAvailable ? rows : recommendations;
+    const responseRows = exactAvailable
+      ? rows
+      : await augmentWithBroadCategoryRows({
+          rows: recommendations,
+          fallbackScopes,
+          stateId,
+          cityId,
+          sort,
+          limit,
+        });
+    const hasResults = responseRows.length > 0;
     const response = {
       success: true,
       data: responseRows,
-      count: exactAvailable ? totalCount : recommendations.length,
-      recommendations,
+      count: exactAvailable ? Math.max(totalCount, responseRows.length) : responseRows.length,
+      recommendations: exactAvailable ? [] : responseRows,
       availability: {
-        exactAvailable,
-        message: exactAvailable
+        exactAvailable: hasResults,
+        message: hasResults
           ? ''
           : 'This product is currently not available. You may like these similar products.',
       },
