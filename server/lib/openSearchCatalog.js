@@ -8,16 +8,45 @@ const SEMANTIC_TOKEN_MAP = {
   phone: ['mobile', 'smartphone', 'telephone', 'cellphone'],
   mobile: ['phone', 'smartphone', 'cellphone'],
   laptop: ['notebook', 'computer', 'pc'],
+  computer: ['pc', 'desktop', 'laptop'],
   shoe: ['shoes', 'footwear', 'sneaker', 'sneakers', 'slipper', 'slippers', 'sandal', 'sandals', 'boot', 'boots'],
   shoes: ['shoe', 'footwear', 'sneaker', 'sneakers', 'slipper', 'slippers', 'sandal', 'sandals', 'boot', 'boots'],
   footwear: ['shoe', 'shoes', 'sneaker', 'sneakers', 'slipper', 'slippers', 'sandal', 'sandals', 'boot', 'boots'],
   saree: ['sari', 'fabric', 'textile', 'dress'],
+  sari: ['saree', 'fabric', 'textile', 'dress'],
+  textile: ['fabric', 'cloth', 'garment', 'apparel'],
+  garment: ['apparel', 'clothing', 'textile'],
+  apparel: ['garment', 'clothing', 'textile'],
   consultant: ['consulting', 'service', 'advisor', 'engineer'],
+  consulting: ['consultant', 'service', 'advisor'],
   design: ['drawing', 'layout', 'planning', 'engineering'],
   machine: ['machinery', 'equipment', 'tool'],
+  machinery: ['machine', 'equipment', 'tool'],
+  equipment: ['machine', 'machinery', 'tool'],
   supplier: ['vendor', 'manufacturer', 'dealer'],
   manufacturer: ['supplier', 'vendor', 'producer'],
+  dealer: ['supplier', 'vendor', 'distributor'],
+  lubricant: ['oil', 'engine oil', 'grease'],
+  oil: ['lubricant', 'engine oil', 'grease'],
+  packaging: ['packing', 'box', 'carton'],
+  solar: ['panel', 'inverter', 'renewable'],
+  furniture: ['chair', 'table', 'sofa'],
 };
+
+const OPENSEARCH_SYNONYMS = [
+  'phone, mobile, smartphone, cellphone, telephone',
+  'laptop, notebook, computer, pc',
+  'shoe, shoes, footwear, sneaker, sneakers, slipper, slippers, sandal, sandals, boot, boots',
+  'saree, sari, fabric, textile',
+  'textile, fabric, cloth, garment, apparel, clothing',
+  'consultant, consulting, advisor, service',
+  'machine, machinery, equipment, tool',
+  'supplier, vendor, manufacturer, dealer, distributor, producer',
+  'lubricant, oil, engine oil, grease',
+  'packaging, packing, box, carton',
+  'solar, solar panel, panel, inverter, renewable',
+  'furniture, chair, table, sofa',
+];
 
 function normalizeSearchText(value = '') {
   return String(value || '')
@@ -64,6 +93,22 @@ function searchTokens(value = '', max = 14) {
       (SEMANTIC_TOKEN_MAP[token] || []).forEach((synonym) => out.add(synonym));
     });
   return Array.from(out).slice(0, max);
+}
+
+function uniqueSearchStrings(values = [], max = 16) {
+  const seen = new Set();
+  const out = [];
+  values
+    .flat()
+    .map((value) => String(value || '').trim())
+    .filter((value) => value.length >= 2)
+    .forEach((value) => {
+      const key = normalizeSearchText(value);
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      out.push(value.slice(0, 80));
+    });
+  return out.slice(0, max);
 }
 
 function getOpenSearchUrl() {
@@ -151,6 +196,10 @@ function productIndexBody() {
             min_gram: 2,
             max_gram: 20,
           },
+          catalog_synonym_filter: {
+            type: 'synonym_graph',
+            synonyms: OPENSEARCH_SYNONYMS,
+          },
         },
         analyzer: {
           autocomplete_analyzer: {
@@ -163,6 +212,11 @@ function productIndexBody() {
             tokenizer: 'standard',
             filter: ['lowercase', 'asciifolding'],
           },
+          catalog_search_analyzer: {
+            type: 'custom',
+            tokenizer: 'standard',
+            filter: ['lowercase', 'asciifolding', 'catalog_synonym_filter'],
+          },
         },
       },
     },
@@ -174,35 +228,43 @@ function productIndexBody() {
         name: {
           type: 'text',
           analyzer: 'autocomplete_analyzer',
-          search_analyzer: 'catalog_text_analyzer',
+          search_analyzer: 'catalog_search_analyzer',
           fields: { raw: { type: 'keyword', ignore_above: 256 } },
         },
+        suggest: {
+          type: 'completion',
+          analyzer: 'simple',
+          search_analyzer: 'simple',
+          preserve_separators: true,
+          preserve_position_increments: true,
+          max_input_length: 80,
+        },
         slug: { type: 'keyword' },
-        description: { type: 'text', analyzer: 'catalog_text_analyzer' },
+        description: { type: 'text', analyzer: 'catalog_text_analyzer', search_analyzer: 'catalog_search_analyzer' },
         category: {
           type: 'text',
           analyzer: 'autocomplete_analyzer',
-          search_analyzer: 'catalog_text_analyzer',
+          search_analyzer: 'catalog_search_analyzer',
           fields: { raw: { type: 'keyword', ignore_above: 256 } },
         },
-        category_path: { type: 'text', analyzer: 'catalog_text_analyzer' },
+        category_path: { type: 'text', analyzer: 'catalog_text_analyzer', search_analyzer: 'catalog_search_analyzer' },
         category_slug: { type: 'keyword' },
-        search_text: { type: 'text', analyzer: 'catalog_text_analyzer' },
-        semantic_text: { type: 'text', analyzer: 'catalog_text_analyzer' },
+        search_text: { type: 'text', analyzer: 'catalog_text_analyzer', search_analyzer: 'catalog_search_analyzer' },
+        semantic_text: { type: 'text', analyzer: 'catalog_text_analyzer', search_analyzer: 'catalog_search_analyzer' },
         search_tokens: { type: 'keyword' },
         micro_category_id: { type: 'keyword' },
         sub_category_id: { type: 'keyword' },
         head_category_id: { type: 'keyword' },
-        micro_name: { type: 'text', analyzer: 'catalog_text_analyzer' },
+        micro_name: { type: 'text', analyzer: 'catalog_text_analyzer', search_analyzer: 'catalog_search_analyzer' },
         micro_slug: { type: 'keyword' },
-        sub_category_name: { type: 'text', analyzer: 'catalog_text_analyzer' },
+        sub_category_name: { type: 'text', analyzer: 'catalog_text_analyzer', search_analyzer: 'catalog_search_analyzer' },
         sub_category_slug: { type: 'keyword' },
-        head_category_name: { type: 'text', analyzer: 'catalog_text_analyzer' },
+        head_category_name: { type: 'text', analyzer: 'catalog_text_analyzer', search_analyzer: 'catalog_search_analyzer' },
         head_category_slug: { type: 'keyword' },
         vendor_name: {
           type: 'text',
           analyzer: 'autocomplete_analyzer',
-          search_analyzer: 'catalog_text_analyzer',
+          search_analyzer: 'catalog_search_analyzer',
           fields: { raw: { type: 'keyword', ignore_above: 256 } },
         },
         vendor_slug: { type: 'keyword' },
@@ -302,6 +364,17 @@ function documentFromProductRow(row = {}) {
   ].filter(Boolean);
   const semanticTerms = textParts.flatMap((value) => searchTokens(value, 8));
   const searchText = textParts.join(' ');
+  const planPriority = Number(row.vendor_plan_priority || 100);
+  const suggestInputs = uniqueSearchStrings([
+    row.name,
+    row.category,
+    row.micro_name,
+    row.sub_category_name,
+    row.head_category_name,
+    row.vendor_name,
+    searchTokens(row.name, 8),
+    searchTokens(row.category, 8),
+  ]);
 
   return {
     id: row.id,
@@ -312,6 +385,10 @@ function documentFromProductRow(row = {}) {
     category: row.category || '',
     category_path: row.category_path || '',
     category_slug: row.category_slug || null,
+    suggest: {
+      input: suggestInputs,
+      weight: Math.max(1, Math.min(planPriority, 1000)),
+    },
     search_text: searchText,
     semantic_text: Array.from(new Set([...semanticTerms, ...searchTokens(searchText, 24)])).join(' '),
     search_tokens: Array.from(new Set([...semanticTerms, ...searchTokens(searchText, 32)])).slice(0, 96),
@@ -333,7 +410,7 @@ function documentFromProductRow(row = {}) {
     vendor_active: activeBool(row.vendor_active),
     vendor_verified: String(row.vendor_kyc_status || '').toUpperCase() === 'VERIFIED' || Boolean(row.vendor_verification_badge),
     vendor_plan_name: row.vendor_plan_name || 'TRIAL',
-    vendor_plan_priority: Number(row.vendor_plan_priority || 100),
+    vendor_plan_priority: planPriority,
     price: numberOrNull(row.price),
     price_unit: row.price_unit || null,
     status: row.status || 'ACTIVE',
@@ -461,14 +538,20 @@ function buildProductSearchQuery({ q, microId, microIds, subCategoryId, headCate
   const expandedText = Array.from(new Set([queryText, ...expandedTokens])).join(' ');
   const should = [
     { match_phrase: { name: { query: queryText, boost: 16 } } },
+    { match_phrase: { category: { query: queryText, boost: 10 } } },
+    { match_phrase: { micro_name: { query: queryText, boost: 8 } } },
+    { match_phrase: { vendor_name: { query: queryText, boost: 4 } } },
     { match_phrase_prefix: { name: { query: queryText, boost: 12, max_expansions: 30 } } },
     { match_phrase_prefix: { category: { query: queryText, boost: 9, max_expansions: 30 } } },
     {
       multi_match: {
         query: queryText,
-        fields: ['name^9', 'category^7', 'micro_name^6', 'sub_category_name^5', 'category_path^4', 'vendor_name^2', 'description'],
+        fields: ['name^9', 'category^7', 'micro_name^6', 'sub_category_name^5', 'head_category_name^4', 'category_path^4', 'vendor_name^2', 'description'],
         type: 'best_fields',
         fuzziness: 'AUTO',
+        prefix_length: 1,
+        max_expansions: 40,
+        fuzzy_transpositions: true,
         operator: 'or',
         boost: 3,
       },
@@ -482,6 +565,8 @@ function buildProductSearchQuery({ q, microId, microIds, subCategoryId, headCate
         boost: 2,
       },
     },
+    { match: { semantic_text: { query: expandedText, operator: 'or', boost: 4 } } },
+    { match: { search_text: { query: expandedText, operator: 'or', boost: 2 } } },
   ];
   if (expandedTokens.length) should.push({ terms: { search_tokens: expandedTokens, boost: 8 } });
 
@@ -491,6 +576,7 @@ function buildProductSearchQuery({ q, microId, microIds, subCategoryId, headCate
       score_mode: 'sum',
       functions: [
         { field_value_factor: { field: 'vendor_plan_priority', factor: 0.015, missing: 100 } },
+        { filter: { term: { vendor_verified: true } }, weight: 1.5 },
       ],
       query: {
         bool: {
@@ -550,6 +636,37 @@ function productFromOpenSearchHit(hit = {}) {
   };
 }
 
+function autocompleteSuggestionFromSource(src = {}, hit = {}) {
+  const name = src.name || hit.text || '';
+  if (!name) return null;
+  return {
+    id: src.id || hit._id || slugifySearch(name),
+    name,
+    slug: src.micro_slug || src.category_slug || src.slug || slugifySearch(name),
+    product_slug: src.slug || null,
+    path: src.micro_name ? `Product in ${src.micro_name}` : (src.category || 'Product'),
+    head_id: src.head_category_id || null,
+    sub_id: src.sub_category_id || null,
+    sub_slug: src.sub_category_slug || null,
+    head_slug: src.head_category_slug || null,
+    type: 'product',
+    source: 'opensearch',
+    score: Number(hit._score || hit._ranking_score || 0),
+  };
+}
+
+function mergeAutocompleteSuggestions(...groups) {
+  const seen = new Set();
+  const merged = [];
+  groups.flat().filter(Boolean).forEach((item) => {
+    const key = `${item.type || 'product'}:${item.product_slug || item.slug || item.id || normalizeSearchText(item.name)}`;
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    merged.push(item);
+  });
+  return merged;
+}
+
 export async function searchOpenSearchProducts(options = {}) {
   if (!isOpenSearchCatalogEnabled() || !String(options.q || '').trim()) return { rows: [], totalCount: 0, engine: 'mysql' };
   const limit = Math.min(Math.max(Number(options.limit || 20), 1), 50);
@@ -580,27 +697,68 @@ export async function searchOpenSearchProducts(options = {}) {
 export async function autocompleteOpenSearchProducts(q, { limit = 8 } = {}) {
   const queryText = String(q || '').trim();
   if (!isOpenSearchCatalogEnabled() || queryText.length < 2) return [];
+  const max = Math.min(Math.max(Number(limit), 1), 12);
   const expandedTokens = searchTokens(queryText, 10);
   const should = [
     { match_phrase_prefix: { name: { query: queryText, boost: 12, max_expansions: 30 } } },
     { match_phrase_prefix: { category: { query: queryText, boost: 8, max_expansions: 30 } } },
+    { match_phrase_prefix: { vendor_name: { query: queryText, boost: 4, max_expansions: 20 } } },
     {
       multi_match: {
         query: queryText,
-        fields: ['name^8', 'category^5', 'vendor_name^2'],
+        fields: ['name^8', 'category^5', 'micro_name^4', 'sub_category_name^3', 'vendor_name^2'],
         fuzziness: 'AUTO',
+        prefix_length: 1,
+        max_expansions: 35,
         operator: 'or',
       },
     },
   ];
   if (expandedTokens.length) should.push({ terms: { search_tokens: expandedTokens, boost: 6 } });
 
+  const completion = {
+    field: 'suggest',
+    size: max,
+    skip_duplicates: true,
+  };
+  if (queryText.length >= 3) {
+    completion.fuzzy = {
+      fuzziness: queryText.length > 6 ? 2 : 1,
+      min_length: 3,
+      prefix_length: 1,
+      transpositions: true,
+    };
+  }
+
   const body = {
-    size: Math.min(Math.max(Number(limit), 1), 12),
+    size: max,
+    _source: [
+      'id',
+      'name',
+      'slug',
+      'category',
+      'category_slug',
+      'micro_name',
+      'micro_slug',
+      'sub_category_id',
+      'sub_category_slug',
+      'head_category_id',
+      'head_category_slug',
+      'vendor_plan_priority',
+    ],
+    suggest: {
+      product_suggest: {
+        prefix: queryText,
+        completion,
+      },
+    },
     query: {
       function_score: {
         boost_mode: 'sum',
-        functions: [{ field_value_factor: { field: 'vendor_plan_priority', factor: 0.01, missing: 100 } }],
+        functions: [
+          { field_value_factor: { field: 'vendor_plan_priority', factor: 0.01, missing: 100 } },
+          { filter: { term: { vendor_verified: true } }, weight: 1.25 },
+        ],
         query: {
           bool: {
             filter: [
@@ -622,20 +780,11 @@ export async function autocompleteOpenSearchProducts(q, { limit = 8 } = {}) {
     timeoutMs: 4500,
   });
 
-  return (result?.hits?.hits || []).map((hit) => {
-    const src = hit._source || {};
-    return {
-      id: src.id || hit._id,
-      name: src.name,
-      slug: src.micro_slug || src.category_slug || src.slug || slugifySearch(src.name),
-      product_slug: src.slug || null,
-      path: src.micro_name ? `Product in ${src.micro_name}` : (src.category || 'Product'),
-      head_id: src.head_category_id || null,
-      sub_id: src.sub_category_id || null,
-      sub_slug: src.sub_category_slug || null,
-      head_slug: src.head_category_slug || null,
-      type: 'product',
-      source: 'opensearch',
-    };
-  });
+  const completionOptions = (result?.suggest?.product_suggest || [])
+    .flatMap((group) => group?.options || [])
+    .map((option) => autocompleteSuggestionFromSource(option?._source || {}, option));
+  const hitSuggestions = (result?.hits?.hits || [])
+    .map((hit) => autocompleteSuggestionFromSource(hit?._source || {}, hit));
+
+  return mergeAutocompleteSuggestions(completionOptions, hitSuggestions).slice(0, max);
 }
