@@ -121,6 +121,11 @@ function addSearchTokenVariants(token = '', target = new Set()) {
 
   target.add(value);
 
+  if (value === 'shoes') {
+    target.add('shoe');
+    return;
+  }
+
   if (value.endsWith('ies') && value.length > 4) {
     target.add(`${value.slice(0, -3)}y`);
   }
@@ -278,13 +283,33 @@ function productFromMysqlRow(row = {}) {
   };
 }
 
-function buildHybridWhere({ q, microId, stateId, cityId, useFullText = true, broad = false }) {
+function buildHybridWhere({
+  q,
+  microId,
+  microIds = [],
+  subCategoryId,
+  headCategoryId,
+  stateId,
+  cityId,
+  useFullText = true,
+  broad = false,
+}) {
   const where = ['p.status = ?', 'COALESCE(v.is_active, 1) = 1'];
   const params = ['ACTIVE'];
 
-  if (microId) {
+  const scopedMicroIds = Array.isArray(microIds) ? microIds.filter(Boolean) : [];
+  if (scopedMicroIds.length) {
+    where.push(`p.micro_category_id IN (${scopedMicroIds.map(() => '?').join(', ')})`);
+    params.push(...scopedMicroIds);
+  } else if (microId) {
     where.push('p.micro_category_id = ?');
     params.push(microId);
+  } else if (subCategoryId) {
+    where.push('p.sub_category_id = ?');
+    params.push(subCategoryId);
+  } else if (headCategoryId) {
+    where.push('p.head_category_id = ?');
+    params.push(headCategoryId);
   }
   if (stateId) {
     where.push('v.state_id = ?');
@@ -374,9 +399,33 @@ function orderSqlForHybrid(sort = '') {
   return 'vendor_plan_priority DESC, search_score DESC, p.created_at DESC, p.id DESC';
 }
 
-async function runHybridMysqlSearch({ q, microId, stateId, cityId, sort, limit, offset = 0, useFullText = true, broad = false }) {
+async function runHybridMysqlSearch({
+  q,
+  microId,
+  microIds,
+  subCategoryId,
+  headCategoryId,
+  stateId,
+  cityId,
+  sort,
+  limit,
+  offset = 0,
+  useFullText = true,
+  broad = false,
+  minRelevanceScore = 24,
+}) {
   const { sql: scoreSql, params: scoreParams } = buildHybridScoreSql(q, useFullText && !broad);
-  const { where, params: whereParams } = buildHybridWhere({ q, microId, stateId, cityId, useFullText, broad });
+  const { where, params: whereParams } = buildHybridWhere({
+    q,
+    microId,
+    microIds,
+    subCategoryId,
+    headCategoryId,
+    stateId,
+    cityId,
+    useFullText,
+    broad,
+  });
   const rows = await mysqlQuery(
     `${buildProductRowSelect(scoreSql)}
        FROM products p
@@ -391,9 +440,18 @@ async function runHybridMysqlSearch({ q, microId, stateId, cityId, sort, limit, 
       LIMIT ${limit} OFFSET ${offset}`,
     [...scoreParams, ...whereParams]
   );
+  const mappedRows = rows.map(productFromMysqlRow);
+  const relevantRows = q && !broad
+    ? mappedRows.filter((row) => {
+        const directScore = Number(row.__sortScore || 0);
+        return directScore >= minRelevanceScore;
+      })
+    : mappedRows;
   return {
-    rows: rows.map(productFromMysqlRow),
-    totalCount: rows.length ? Number(rows[0]?.total_count || rows.length) : 0,
+    rows: relevantRows,
+    totalCount: q && !broad
+      ? relevantRows.length
+      : (rows.length ? Number(rows[0]?.total_count || rows.length) : 0),
   };
 }
 
@@ -410,10 +468,13 @@ async function runHybridSearchWithFallback(args) {
   }
 }
 
-async function fetchFuzzyCandidates({ q, microId, stateId, cityId, sort, limit }) {
+async function fetchFuzzyCandidates({ q, microId, microIds, subCategoryId, headCategoryId, stateId, cityId, sort, limit }) {
   const broad = await runHybridMysqlSearch({
     q: '',
     microId,
+    microIds,
+    subCategoryId,
+    headCategoryId,
     stateId,
     cityId,
     sort,
@@ -493,20 +554,76 @@ async function fetchPersonalizedSearchTerms(req) {
   return Array.from(new Set(terms.filter(Boolean).flatMap((value) => expandSemanticTokens(value)))).slice(0, 12);
 }
 
-async function fetchRecommendedProducts({ req, q, microId, stateId, cityId, sort, limit }) {
+async function fetchRecommendedProducts({
+  req,
+  q,
+  microId,
+  microIds,
+  subCategoryId,
+  headCategoryId,
+  stateId,
+  cityId,
+  sort,
+  limit,
+  fallbackScopes = [],
+}) {
   const personalizedTerms = await fetchPersonalizedSearchTerms(req);
   const semanticText = [q, ...personalizedTerms].filter(Boolean).join(' ');
   const primary = semanticText
-    ? await runHybridSearchWithFallback({ q: semanticText, microId, stateId, cityId, sort, limit, offset: 0 })
+    ? await runHybridSearchWithFallback({
+        q: semanticText,
+        microId,
+        microIds,
+        subCategoryId,
+        headCategoryId,
+        stateId,
+        cityId,
+        sort,
+        limit,
+        offset: 0,
+      })
     : { rows: [], totalCount: 0 };
   if (primary.rows.length) return primary.rows.slice(0, limit);
 
-  const fuzzy = q ? await fetchFuzzyCandidates({ q, microId, stateId, cityId, sort, limit }) : { rows: [] };
+  for (const scope of fallbackScopes) {
+    const scopedPrimary = semanticText
+      ? await runHybridSearchWithFallback({
+          q: semanticText,
+          ...scope,
+          stateId,
+          cityId,
+          sort,
+          limit,
+          offset: 0,
+        })
+      : { rows: [] };
+    if (scopedPrimary.rows.length) return scopedPrimary.rows.slice(0, limit);
+  }
+
+  const fuzzy = q ? await fetchFuzzyCandidates({
+    q,
+    microId,
+    microIds,
+    subCategoryId,
+    headCategoryId,
+    stateId,
+    cityId,
+    sort,
+    limit,
+  }) : { rows: [] };
   if (fuzzy.rows.length) return fuzzy.rows.slice(0, limit);
+
+  for (const scope of fallbackScopes) {
+    const scopedFuzzy = q ? await fetchFuzzyCandidates({ q, ...scope, stateId, cityId, sort, limit }) : { rows: [] };
+    if (scopedFuzzy.rows.length) return scopedFuzzy.rows.slice(0, limit);
+  }
 
   const fallback = await runHybridMysqlSearch({
     q: '',
     microId,
+    microIds,
+    subCategoryId,
+    headCategoryId,
     stateId,
     cityId,
     sort,
@@ -515,6 +632,23 @@ async function fetchRecommendedProducts({ req, q, microId, stateId, cityId, sort
     useFullText: false,
     broad: true,
   });
+  if (fallback.rows.length) return fallback.rows.slice(0, limit);
+
+  for (const scope of fallbackScopes) {
+    const scopedFallback = await runHybridMysqlSearch({
+      q: '',
+      ...scope,
+      stateId,
+      cityId,
+      sort,
+      limit,
+      offset: 0,
+      useFullText: false,
+      broad: true,
+    });
+    if (scopedFallback.rows.length) return scopedFallback.rows.slice(0, limit);
+  }
+
   return fallback.rows.slice(0, limit);
 }
 
@@ -648,19 +782,149 @@ function applySort(q, sort) {
   return q.order('created_at', { ascending: false });
 }
 
-async function resolveMicroId(microSlug) {
+async function resolveMicroCategoryContext(microSlug) {
   if (!microSlug) return null;
 
-  const { data: micro, error } = await db
-    .from('micro_categories')
-    .select('id')
-    .eq('slug', microSlug)
-    .order('updated_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const rows = await mysqlQuery(
+    `SELECT mc.id AS micro_id,
+            mc.name AS micro_name,
+            mc.slug AS micro_slug,
+            mc.sub_category_id,
+            sc.name AS sub_category_name,
+            sc.slug AS sub_category_slug,
+            sc.head_category_id,
+            hc.name AS head_category_name,
+            hc.slug AS head_category_slug
+       FROM micro_categories mc
+       LEFT JOIN sub_categories sc ON sc.id = mc.sub_category_id
+       LEFT JOIN head_categories hc ON hc.id = sc.head_category_id
+      WHERE mc.slug = ?
+      ORDER BY mc.updated_at DESC, mc.created_at DESC
+      LIMIT 1`,
+    [microSlug]
+  );
 
-  if (error) throw error;
-  return micro?.id || null;
+  const row = rows?.[0];
+  if (!row?.micro_id) return null;
+
+  return {
+    microId: row.micro_id,
+    microName: row.micro_name || '',
+    microSlug: row.micro_slug || microSlug,
+    subCategoryId: row.sub_category_id || null,
+    subCategoryName: row.sub_category_name || '',
+    subCategorySlug: row.sub_category_slug || '',
+    headCategoryId: row.head_category_id || null,
+    headCategoryName: row.head_category_name || '',
+    headCategorySlug: row.head_category_slug || '',
+  };
+}
+
+async function resolveMicroId(microSlug) {
+  const context = await resolveMicroCategoryContext(microSlug);
+  return context?.microId || null;
+}
+
+function buildCategoryFallbackScopes(categoryContext = {}) {
+  const scopes = [];
+  if (categoryContext?.subCategoryId) {
+    scopes.push({
+      microId: null,
+      subCategoryId: categoryContext.subCategoryId,
+      headCategoryId: null,
+    });
+  }
+  if (categoryContext?.headCategoryId) {
+    scopes.push({
+      microId: null,
+      subCategoryId: null,
+      headCategoryId: categoryContext.headCategoryId,
+    });
+  }
+  return scopes;
+}
+
+function dedupeCategoryScopes(scopes = []) {
+  const seen = new Set();
+  return scopes.filter((scope) => {
+    const key = JSON.stringify({
+      microId: scope.microId || null,
+      microIds: Array.isArray(scope.microIds) ? scope.microIds.filter(Boolean).sort() : [],
+      subCategoryId: scope.subCategoryId || null,
+      headCategoryId: scope.headCategoryId || null,
+    });
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function resolveSearchCategoryFallbackScopes(q) {
+  const terms = expandSemanticTokens(q)
+    .filter((token) => token.length >= 4)
+    .slice(0, 10);
+  if (!terms.length) return [];
+
+  const clauses = [];
+  const params = [];
+  terms.forEach((term) => {
+    const like = `%${term}%`;
+    const slug = `%${slugifySearch(term)}%`;
+    clauses.push(`
+      LOWER(COALESCE(mc.name, '')) LIKE LOWER(?)
+      OR LOWER(COALESCE(mc.slug, '')) LIKE LOWER(?)
+      OR LOWER(COALESCE(sc.name, '')) LIKE LOWER(?)
+      OR LOWER(COALESCE(sc.slug, '')) LIKE LOWER(?)
+    `);
+    params.push(like, slug, like, slug);
+  });
+
+  const rows = await mysqlQuery(
+    `SELECT mc.id AS micro_id,
+            mc.name AS micro_name,
+            mc.slug AS micro_slug,
+            mc.sub_category_id,
+            sc.name AS sub_category_name,
+            sc.slug AS sub_category_slug,
+            sc.head_category_id,
+            hc.name AS head_category_name,
+            hc.slug AS head_category_slug
+       FROM micro_categories mc
+       LEFT JOIN sub_categories sc ON sc.id = mc.sub_category_id
+       LEFT JOIN head_categories hc ON hc.id = sc.head_category_id
+      WHERE COALESCE(mc.is_active, 1) = 1
+        AND (${clauses.map((clause) => `(${clause})`).join(' OR ')})
+      LIMIT 60`,
+    params
+  );
+
+  const scoredRows = rows
+    .map((row) => {
+      const text = normalizeSearchText([
+        row.micro_name,
+        row.micro_slug,
+        row.sub_category_name,
+        row.sub_category_slug,
+        row.head_category_name,
+      ].filter(Boolean).join(' '));
+      const score = terms.reduce((sum, term) => {
+        if (normalizeSearchText(row.micro_name) === term) return sum + 120;
+        if (normalizeSearchText(row.micro_slug).replace(/\s+/g, '-') === slugifySearch(term)) return sum + 100;
+        return sum + (text.includes(term) ? 20 : 0);
+      }, 0);
+      return { ...row, score };
+    })
+    .filter((row) => row.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  const microIds = Array.from(new Set(scoredRows.map((row) => row.micro_id).filter(Boolean))).slice(0, 30);
+  const subIds = Array.from(new Set(scoredRows.map((row) => row.sub_category_id).filter(Boolean))).slice(0, 4);
+  const headIds = Array.from(new Set(scoredRows.map((row) => row.head_category_id).filter(Boolean))).slice(0, 2);
+  const scopes = [];
+  if (microIds.length) scopes.push({ microId: null, microIds, subCategoryId: null, headCategoryId: null });
+  subIds.forEach((subCategoryId) => scopes.push({ microId: null, subCategoryId, headCategoryId: null }));
+  headIds.forEach((headCategoryId) => scopes.push({ microId: null, subCategoryId: null, headCategoryId }));
+  return dedupeCategoryScopes(scopes);
 }
 
 async function fetchRankedProductsViaRpc({ microId, cityId, stateId, q, sort, from, limit }) {
@@ -822,7 +1086,12 @@ async function handleRankedProducts(req, res) {
 
     const from = (page - 1) * limit;
 
-    const microId = await resolveMicroId(microSlug);
+    const categoryContext = await resolveMicroCategoryContext(microSlug);
+    const microId = categoryContext?.microId || null;
+    const fallbackScopes = dedupeCategoryScopes([
+      ...buildCategoryFallbackScopes(categoryContext),
+      ...(q ? await resolveSearchCategoryFallbackScopes(q) : []),
+    ]);
 
     if (q) {
       const hybrid = await runHybridSearchWithFallback({
@@ -848,6 +1117,38 @@ async function handleRankedProducts(req, res) {
             semantic: true,
           },
         });
+      }
+
+      for (const scope of fallbackScopes) {
+        const scopedHybrid = await runHybridSearchWithFallback({
+          q,
+          ...scope,
+          stateId,
+          cityId,
+          sort,
+          limit,
+          offset: from,
+        });
+
+        if (scopedHybrid.rows.length) {
+          return res.json({
+            success: true,
+            data: scopedHybrid.rows,
+            count: scopedHybrid.totalCount,
+            recommendations: scopedHybrid.rows,
+            availability: {
+              exactAvailable: false,
+              message: 'This product is currently not available. You may like these similar products.',
+            },
+            meta: {
+              searchMode: 'hybrid_parent_category',
+              autocomplete: true,
+              fuzzy: true,
+              fullText: true,
+              semantic: true,
+            },
+          });
+        }
       }
     }
 
@@ -1123,7 +1424,12 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
       }
     }
 
-    const microId = await resolveMicroId(microSlug);
+    const categoryContext = await resolveMicroCategoryContext(microSlug);
+    const microId = categoryContext?.microId || null;
+    const fallbackScopes = dedupeCategoryScopes([
+      ...buildCategoryFallbackScopes(categoryContext),
+      ...(q ? await resolveSearchCategoryFallbackScopes(q) : []),
+    ]);
     let { rows, totalCount } = await runHybridSearchWithFallback({
       q,
       microId,
@@ -1141,9 +1447,49 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
     }
 
     const exactAvailable = rows.length > 0;
+    let scopedRecommendations = [];
+    if (!exactAvailable && q) {
+      for (const scope of fallbackScopes) {
+        const scoped = await runHybridSearchWithFallback({
+          q,
+          ...scope,
+          stateId,
+          cityId,
+          sort,
+          limit,
+          offset: 0,
+        });
+        if (scoped.rows.length) {
+          scopedRecommendations = scoped.rows.slice(0, limit);
+          break;
+        }
+      }
+
+      if (!scopedRecommendations.length) {
+        for (const scope of fallbackScopes) {
+          const scopedFuzzy = await fetchFuzzyCandidates({ q, ...scope, stateId, cityId, sort, limit });
+          if (scopedFuzzy.rows.length) {
+            scopedRecommendations = scopedFuzzy.rows.slice(0, limit);
+            break;
+          }
+        }
+      }
+    }
+
     const recommendations = exactAvailable
       ? []
-      : await fetchRecommendedProducts({ req, q, microId, stateId, cityId, sort, limit });
+      : (scopedRecommendations.length
+          ? scopedRecommendations
+          : await fetchRecommendedProducts({
+              req,
+              q,
+              microId,
+              stateId,
+              cityId,
+              sort,
+              limit,
+              fallbackScopes,
+            }));
 
     const responseRows = exactAvailable ? rows : recommendations;
     const response = {
