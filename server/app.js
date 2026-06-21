@@ -163,9 +163,12 @@ backendModules.forEach((moduleConfig) => {
 });
 
 // 9. Health check
-app.get('/health', (req, res) => {
+const sendHealth = (_req, res) => {
   res.json({ status: 'OK', timestamp: new Date() });
-});
+};
+
+app.get('/health', sendHealth);
+app.get('/api/health', sendHealth);
 
 // 10. Global error handler
 app.use((err, req, res, _next) => {

@@ -7,6 +7,8 @@ import { hashPassword, normalizeEmail, normalizeRole, upsertPublicUser } from '.
 import { validateStrongPassword } from '../lib/passwordPolicy.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 import { requireEmployeeRoles } from '../middleware/requireEmployeeRoles.js';
+import { mysqlQuery } from '../lib/mysqlPool.js';
+import { cacheGetJson, cacheSetJson, isRedisConfigured } from '../lib/redisCache.js';
 import {
   buildSearch360ActorFromEmployee,
   createSearch360Escalation,
@@ -808,6 +810,65 @@ const buildSalesPlanLink = (req, { planId, salesCode, vendorId = '' }) => {
   return `${getFrontendBaseUrl(req)}/vendor/services${params.toString() ? `?${params.toString()}` : ''}`;
 };
 
+const encodeCursor = (row = {}) => {
+  const createdAt = row?.created_at || row?.date || null;
+  const id = row?.id || null;
+  if (!createdAt || !id) return null;
+  return Buffer.from(JSON.stringify({ created_at: createdAt, id }), 'utf8').toString('base64url');
+};
+
+const decodeCursor = (value = '') => {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+    if (!parsed?.created_at || !parsed?.id) return null;
+    return { created_at: parsed.created_at, id: parsed.id };
+  } catch {
+    return null;
+  }
+};
+
+const salesDashboardCacheKey = (actor = {}) =>
+  `sales-dashboard:v2:${actor.employee?.role || 'role'}:${actor.salesUserId || actor.employee?.id || 'all'}`;
+
+async function readDashboardSnapshot(metricScope, scopeId, metricKey) {
+  try {
+    const rows = await mysqlQuery(
+      `SELECT payload, computed_at, expires_at
+         FROM dashboard_metric_snapshots
+        WHERE metric_scope = ?
+          AND scope_id = ?
+          AND metric_key = ?
+          AND (expires_at IS NULL OR expires_at > UTC_TIMESTAMP())
+        LIMIT 1`,
+      [metricScope, scopeId, metricKey]
+    );
+    const row = rows?.[0];
+    if (!row?.payload) return null;
+    return typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload;
+  } catch {
+    return null;
+  }
+}
+
+async function writeDashboardSnapshot(metricScope, scopeId, metricKey, payload, ttlSeconds = 180) {
+  try {
+    await mysqlQuery(
+      `INSERT INTO dashboard_metric_snapshots
+        (id, metric_scope, scope_id, metric_key, payload, computed_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, UTC_TIMESTAMP(), DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? SECOND))
+       ON DUPLICATE KEY UPDATE
+        payload = VALUES(payload),
+        computed_at = VALUES(computed_at),
+        expires_at = VALUES(expires_at)`,
+      [randomUUID(), metricScope, scopeId, metricKey, JSON.stringify(payload || {}), ttlSeconds]
+    );
+  } catch {
+    // Snapshot table is an optimization; live route must keep working without it.
+  }
+}
+
 const buildSalesCodeCandidate = (employee, authUser = {}, salt = '') => {
   const namePart =
     normalizeSalesCode(employee?.full_name || employee?.email || authUser?.email || 'SALE').slice(0, 6) || 'SALE';
@@ -1436,16 +1497,63 @@ router.get('/sales/leads', requireAuth(), async (req, res) => {
       return res.status(403).json({ success: false, error: 'Sales access required' });
     }
 
-    const { data, error } = await db
-      .from('leads')
-      .select('*')
-      .order('created_at', { ascending: false });
+    const limitRaw = Number(req.query?.limit || 80);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.trunc(limitRaw), 200) : 80;
+    const cursor = decodeCursor(req.query?.cursor);
+    const status = normalizeTextValue(req.query?.status || '', 80).toUpperCase();
+    const search = normalizeTextValue(req.query?.search || '', 160);
+    const fetchLimit = limit + 1;
 
-    if (error) {
-      return res.status(500).json({ success: false, error: error.message || 'Failed to fetch leads' });
+    const where = ['1 = 1'];
+    const params = [];
+
+    if (cursor) {
+      where.push('(created_at < ? OR (created_at = ? AND id < ?))');
+      params.push(cursor.created_at, cursor.created_at, cursor.id);
     }
 
-    return res.json({ success: true, leads: data || [] });
+    if (status && status !== 'ALL') {
+      where.push('UPPER(COALESCE(status, "")) = ?');
+      params.push(status);
+    }
+
+    if (search) {
+      const like = `%${search}%`;
+      where.push(`(
+        LOWER(COALESCE(title, "")) LIKE LOWER(?)
+        OR LOWER(COALESCE(product_name, "")) LIKE LOWER(?)
+        OR LOWER(COALESCE(category, "")) LIKE LOWER(?)
+        OR LOWER(COALESCE(description, "")) LIKE LOWER(?)
+        OR LOWER(COALESCE(message, "")) LIKE LOWER(?)
+        OR LOWER(COALESCE(buyer_name, "")) LIKE LOWER(?)
+        OR LOWER(COALESCE(buyer_email, "")) LIKE LOWER(?)
+        OR LOWER(COALESCE(buyer_phone, "")) LIKE LOWER(?)
+      )`);
+      params.push(like, like, like, like, like, like, like, like);
+    }
+
+    const rows = await mysqlQuery(
+      `SELECT *
+         FROM leads
+        WHERE ${where.join(' AND ')}
+        ORDER BY created_at DESC, id DESC
+        LIMIT ${fetchLimit}`,
+      params
+    );
+
+    const leads = rows.slice(0, limit);
+    const hasMore = rows.length > limit;
+    const nextCursor = hasMore ? encodeCursor(leads[leads.length - 1]) : null;
+
+    return res.json({
+      success: true,
+      leads,
+      pageInfo: {
+        hasMore,
+        nextCursor,
+        limit,
+      },
+    });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message || 'Failed to fetch leads' });
   }
@@ -1949,6 +2057,29 @@ router.get('/sales/dashboard', requireAuth(), async (req, res) => {
     const actor = await resolveSalesActor(req, res);
     if (!actor) return;
 
+    const cacheKey = salesDashboardCacheKey(actor);
+    const snapshotScope = 'sales_dashboard';
+    const snapshotScopeId = actor.employee.role === 'SALES'
+      ? String(actor.salesUserId || actor.employee.id || 'sales')
+      : String(actor.employee.role || 'all');
+
+    if (isRedisConfigured()) {
+      const cached = await cacheGetJson(cacheKey).catch(() => null);
+      if (cached?.dashboard) {
+        res.setHeader('X-Cache', 'HIT');
+        return res.json(cached);
+      }
+    }
+
+    const snapshot = await readDashboardSnapshot(snapshotScope, snapshotScopeId, 'overview');
+    if (snapshot?.dashboard) {
+      if (isRedisConfigured()) {
+        cacheSetJson(cacheKey, snapshot, 60).catch(() => {});
+      }
+      res.setHeader('X-Cache', 'STALE-SNAPSHOT');
+      return res.json(snapshot);
+    }
+
     const now = new Date();
     const start7 = startOfDay(now);
     start7.setDate(start7.getDate() - 6);
@@ -2031,7 +2162,7 @@ router.get('/sales/dashboard', requireAuth(), async (req, res) => {
       })
       .reduce((sum, row) => sum + safeNum(row?.net_amount ?? row?.amount), 0);
 
-    return res.json({
+    const response = {
       success: true,
       dashboard: {
         profile: {
@@ -2054,7 +2185,14 @@ router.get('/sales/dashboard', requireAuth(), async (req, res) => {
         reminders: remindersResult || [],
         attributed_payments: attributionsResult || [],
       },
-    });
+    };
+
+    writeDashboardSnapshot(snapshotScope, snapshotScopeId, 'overview', response, 180);
+    if (isRedisConfigured()) {
+      cacheSetJson(cacheKey, response, 60).catch(() => {});
+    }
+    res.setHeader('X-Cache', 'MISS');
+    return res.json(response);
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message || 'Failed to load sales dashboard' });
   }

@@ -42,6 +42,7 @@ const mysqlMissingColumns = [
   { table: 'vendor_payments', column: 'sales_engagement_id', definition: 'CHAR(36) NULL' },
   { table: 'vendor_plan_subscriptions', column: 'sales_code', definition: 'VARCHAR(191) NULL' },
   { table: 'vendor_plan_subscriptions', column: 'sales_user_id', definition: 'CHAR(36) NULL' },
+  { table: 'vendors', column: 'profile_template_override', definition: "VARCHAR(32) NOT NULL DEFAULT 'AUTO'" },
   { table: 'website_visitor_events', column: 'visitor_name', definition: 'TEXT NULL' },
   { table: 'website_visitor_events', column: 'visitor_email', definition: 'VARCHAR(191) NULL' },
   { table: 'website_visitor_events', column: 'visitor_phone', definition: 'VARCHAR(64) NULL' },
@@ -73,14 +74,35 @@ const missingIndexes = [
   { table: 'leads', name: 'idx_leads_next_follow_up_at', columns: ['next_follow_up_at'] },
   { table: 'leads', name: 'idx_leads_visitor_id', columns: ['visitor_id'] },
   { table: 'leads', name: 'idx_leads_lead_origin', columns: ['lead_origin'] },
+  { table: 'leads', name: 'idx_leads_created_id', columns: ['created_at', 'id'] },
+  { table: 'leads', name: 'idx_leads_status_created', columns: ['status', 'created_at'] },
+  { table: 'leads', name: 'idx_leads_buyer_user_created', columns: ['buyer_user_id', 'created_at'] },
+  { table: 'leads', name: 'idx_leads_vendor_created', columns: ['vendor_id', 'created_at'] },
+  { table: 'leads', name: 'ft_leads_search', columns: ['title', 'product_name', 'category', 'description', 'message', 'product_interest'], fulltext: true },
+  { table: 'products', name: 'idx_products_status_created_id', columns: ['status', 'created_at', 'id'] },
+  { table: 'products', name: 'idx_products_status_micro_created', columns: ['status', 'micro_category_id', 'created_at'] },
+  { table: 'products', name: 'idx_products_status_vendor_created', columns: ['status', 'vendor_id', 'created_at'] },
+  { table: 'products', name: 'idx_products_status_head_sub', columns: ['status', 'head_category_id', 'sub_category_id'] },
+  { table: 'products', name: 'ft_products_search', columns: ['name', 'description', 'category', 'category_path', 'category_slug'], fulltext: true },
   { table: 'sales_vendor_engagements', name: 'idx_sales_vendor_engagements_lead_id', columns: ['lead_id'] },
   { table: 'sales_vendor_engagements', name: 'idx_sales_vendor_engagements_plan_id', columns: ['plan_id'] },
   { table: 'sales_vendor_engagements', name: 'idx_sales_vendor_engagements_sales_code', columns: ['sales_code'] },
   { table: 'sales_vendor_engagements', name: 'idx_sales_vendor_engagements_next_follow_up_at', columns: ['next_follow_up_at'] },
+  { table: 'sales_vendor_engagements', name: 'idx_sales_vendor_engagements_sales_due', columns: ['sales_user_id', 'next_follow_up_at', 'status'] },
   { table: 'vendor_payments', name: 'idx_vendor_payments_sales_code', columns: ['sales_code'] },
   { table: 'vendor_payments', name: 'idx_vendor_payments_sales_user_id', columns: ['sales_user_id'] },
+  { table: 'vendor_payments', name: 'idx_vendor_payments_payment_date', columns: ['payment_date'] },
+  { table: 'vendor_payments', name: 'idx_vendor_payments_sales_payment_date', columns: ['sales_user_id', 'payment_date'] },
   { table: 'vendor_plan_subscriptions', name: 'idx_vendor_plan_subscriptions_sales_code', columns: ['sales_code'] },
   { table: 'vendor_plan_subscriptions', name: 'idx_vendor_plan_subscriptions_sales_user_id', columns: ['sales_user_id'] },
+  { table: 'vendor_plan_subscriptions', name: 'idx_vendor_plan_subscriptions_active_vendor', columns: ['vendor_id', 'status', 'end_date'] },
+  { table: 'vendors', name: 'idx_vendors_active_created', columns: ['is_active', 'created_at'] },
+  { table: 'vendors', name: 'idx_vendors_active_location', columns: ['is_active', 'state_id', 'city_id'] },
+  { table: 'vendors', name: 'idx_vendors_active_slug', columns: ['is_active', 'slug'] },
+  { table: 'vendors', name: 'ft_vendors_search', columns: ['company_name', 'owner_name', 'city', 'state', 'business_description', 'primary_business_type'], fulltext: true },
+  { table: 'website_visitor_events', name: 'idx_website_visitor_events_search_created', columns: ['event_type', 'created_at'] },
+  { table: 'website_visitor_events', name: 'idx_website_visitor_events_visitor_search', columns: ['visitor_id', 'created_at'] },
+  { table: 'website_visitor_events', name: 'ft_website_visitor_events_search', columns: ['search_query', 'category', 'entity_name'], fulltext: true },
 ];
 
 const obsoleteIndexes = [
@@ -88,6 +110,22 @@ const obsoleteIndexes = [
 ];
 
 async function ensureCompatibilitySchema(connection) {
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS ${quoteIdent('dashboard_metric_snapshots')} (
+      ${quoteIdent('id')} CHAR(36) NOT NULL,
+      ${quoteIdent('metric_scope')} VARCHAR(64) NOT NULL,
+      ${quoteIdent('scope_id')} VARCHAR(191) NOT NULL,
+      ${quoteIdent('metric_key')} VARCHAR(191) NOT NULL,
+      ${quoteIdent('payload')} JSON NOT NULL,
+      ${quoteIdent('computed_at')} DATETIME DEFAULT CURRENT_TIMESTAMP,
+      ${quoteIdent('expires_at')} DATETIME NULL,
+      PRIMARY KEY (${quoteIdent('id')}),
+      UNIQUE KEY ${quoteIdent('uq_dashboard_metric_scope_key')} (${quoteIdent('metric_scope')}, ${quoteIdent('scope_id')}, ${quoteIdent('metric_key')}),
+      KEY ${quoteIdent('idx_dashboard_metric_scope_expires')} (${quoteIdent('metric_scope')}, ${quoteIdent('scope_id')}, ${quoteIdent('expires_at')}),
+      KEY ${quoteIdent('idx_dashboard_metric_computed_at')} (${quoteIdent('computed_at')})
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
   for (const item of mysqlMissingColumns) {
     const [existing] = await connection.query(
       `SELECT 1
@@ -156,9 +194,10 @@ async function ensureCompatibilitySchema(connection) {
     );
     if (existing.length) continue;
 
+    const keyType = item.fulltext ? 'FULLTEXT KEY' : `${item.unique ? 'UNIQUE ' : ''}KEY`;
     await connection.query(
       `ALTER TABLE ${quoteIdent(item.table)}
-        ADD ${item.unique ? 'UNIQUE ' : ''}KEY ${quoteIdent(item.name)} (${item.columns.map(quoteIdent).join(', ')})`
+        ADD ${keyType} ${quoteIdent(item.name)} (${item.columns.map(quoteIdent).join(', ')})`
     );
   }
 }

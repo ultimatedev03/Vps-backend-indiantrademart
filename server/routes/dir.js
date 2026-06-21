@@ -1,8 +1,10 @@
 // ✅ File: server/routes/dir.js
 import { logger } from '../utils/logger.js';
 import express from 'express';
+import { randomUUID } from 'crypto';
 import { db } from '../lib/dbClient.js';
 import { cacheResponse } from '../lib/cacheMiddleware.js';
+import { cacheGetJson, cacheSetJson, isRedisConfigured } from '../lib/redisCache.js';
 import { optionalAuth, requireAuth } from '../middleware/requireAuth.js';
 import { mysqlQuery } from '../lib/mysqlPool.js';
 
@@ -62,6 +64,430 @@ function clampRating(v) {
 
 function safeText(v, max = 1000) {
   return String(v || '').trim().slice(0, max);
+}
+
+function normalizeSearchText(value = '') {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function slugifySearch(value = '') {
+  return normalizeSearchText(value).replace(/\s+/g, '-').replace(/^-|-$/g, '');
+}
+
+function searchTokens(value = '', max = 8) {
+  return Array.from(
+    new Set(
+      normalizeSearchText(value)
+        .split(' ')
+        .map((token) => token.trim())
+        .filter((token) => token.length >= 2)
+    )
+  ).slice(0, max);
+}
+
+const SEMANTIC_TOKEN_MAP = {
+  phone: ['mobile', 'smartphone', 'telephone', 'cellphone'],
+  mobile: ['phone', 'smartphone', 'cellphone'],
+  laptop: ['notebook', 'computer', 'pc'],
+  saree: ['sari', 'fabric', 'textile', 'dress'],
+  consultant: ['consulting', 'service', 'advisor', 'engineer'],
+  design: ['drawing', 'layout', 'planning', 'engineering'],
+  machine: ['machinery', 'equipment', 'tool'],
+  supplier: ['vendor', 'manufacturer', 'dealer'],
+  manufacturer: ['supplier', 'vendor', 'producer'],
+};
+
+function expandSemanticTokens(value = '') {
+  const base = searchTokens(value, 10);
+  const expanded = new Set(base);
+  base.forEach((token) => {
+    (SEMANTIC_TOKEN_MAP[token] || []).forEach((synonym) => expanded.add(synonym));
+  });
+  return Array.from(expanded).slice(0, 16);
+}
+
+function buildBooleanFullTextQuery(value = '') {
+  const tokens = expandSemanticTokens(value)
+    .map((token) => token.replace(/[+\-<>()~*"@]+/g, '').trim())
+    .filter((token) => token.length >= 2)
+    .slice(0, 8);
+  return tokens.length ? tokens.map((token) => `+${token}*`).join(' ') : '';
+}
+
+function levenshteinDistance(a = '', b = '') {
+  const left = String(a || '');
+  const right = String(b || '');
+  if (left === right) return 0;
+  if (!left) return right.length;
+  if (!right) return left.length;
+
+  const prev = Array.from({ length: right.length + 1 }, (_, i) => i);
+  const curr = new Array(right.length + 1);
+  for (let i = 1; i <= left.length; i += 1) {
+    curr[0] = i;
+    for (let j = 1; j <= right.length; j += 1) {
+      const cost = left[i - 1] === right[j - 1] ? 0 : 1;
+      curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+    }
+    for (let j = 0; j <= right.length; j += 1) prev[j] = curr[j];
+  }
+  return prev[right.length];
+}
+
+function fuzzySearchScore(query = '', row = {}) {
+  const q = normalizeSearchText(query);
+  if (!q) return 0;
+  const fields = [row.name, row.category, row.category_path, row.description, row.vendor__company_name]
+    .filter(Boolean)
+    .map((value) => normalizeSearchText(value));
+  let best = 0;
+  fields.forEach((field) => {
+    if (!field) return;
+    if (field === q) best = Math.max(best, 100);
+    if (field.includes(q)) best = Math.max(best, 80);
+    field.split(' ').forEach((word) => {
+      const maxLen = Math.max(word.length, q.length);
+      if (maxLen < 3) return;
+      const distance = levenshteinDistance(word, q);
+      const score = Math.max(0, Math.round((1 - distance / maxLen) * 70));
+      best = Math.max(best, score);
+    });
+  });
+  return best;
+}
+
+function planPriorityCaseSql() {
+  return `CASE
+    WHEN LOWER(COALESCE(vp.name, '')) LIKE '%diamond%' THEN 700
+    WHEN LOWER(COALESCE(vp.name, '')) LIKE '%gold%' THEN 600
+    WHEN LOWER(COALESCE(vp.name, '')) LIKE '%silver%' THEN 500
+    WHEN LOWER(COALESCE(vp.name, '')) LIKE '%boost%' THEN 400
+    WHEN LOWER(COALESCE(vp.name, '')) LIKE '%certif%' THEN 300
+    WHEN LOWER(COALESCE(vp.name, '')) LIKE '%startup%' THEN 200
+    ELSE 100
+  END`;
+}
+
+function buildProductRowSelect(scoreSql = '0') {
+  return `
+    SELECT
+      p.*,
+      v.id AS vendor__id,
+      v.company_name AS vendor__company_name,
+      v.slug AS vendor__slug,
+      v.city AS vendor__city,
+      v.state AS vendor__state,
+      v.state_id AS vendor__state_id,
+      v.city_id AS vendor__city_id,
+      v.seller_rating AS vendor__seller_rating,
+      v.kyc_status AS vendor__kyc_status,
+      v.verification_badge AS vendor__verification_badge,
+      v.trust_score AS vendor__trust_score,
+      v.gst_verified AS vendor__gst_verified,
+      v.year_of_establishment AS vendor__year_of_establishment,
+      v.years_in_business AS vendor__years_in_business,
+      v.response_rate AS vendor__response_rate,
+      COALESCE(vp.name, 'TRIAL') AS vendor_plan_name,
+      ${planPriorityCaseSql()} AS vendor_plan_priority,
+      ${scoreSql} AS search_score,
+      COUNT(*) OVER() AS total_count
+  `;
+}
+
+function productFromMysqlRow(row = {}) {
+  const vendor = {
+    id: row.vendor__id || null,
+    company_name: row.vendor__company_name || null,
+    slug: row.vendor__slug || null,
+    city: row.vendor__city || null,
+    state: row.vendor__state || null,
+    state_id: row.vendor__state_id || null,
+    city_id: row.vendor__city_id || null,
+    seller_rating: row.vendor__seller_rating || null,
+    kyc_status: row.vendor__kyc_status || null,
+    verification_badge: Boolean(row.vendor__verification_badge),
+    trust_score: row.vendor__trust_score || null,
+    gst_verified: Boolean(row.vendor__gst_verified),
+    year_of_establishment: row.vendor__year_of_establishment || null,
+    years_in_business: row.vendor__years_in_business || null,
+    response_rate: row.vendor__response_rate || null,
+    plan_name: row.vendor_plan_name || 'TRIAL',
+    plan_priority: Number(row.vendor_plan_priority || 100),
+  };
+
+  const product = { ...row };
+  Object.keys(product).forEach((key) => {
+    if (key.startsWith('vendor__')) delete product[key];
+  });
+  delete product.total_count;
+
+  return {
+    ...product,
+    vendors: vendor,
+    vendorName: vendor.company_name,
+    vendorId: vendor.id,
+    vendorCity: vendor.city,
+    vendorState: vendor.state,
+    vendorRating: vendor.seller_rating || 4.5,
+    vendorVerified: vendor.kyc_status === 'VERIFIED' || Boolean(vendor.verification_badge),
+    vendorGstVerified: vendor.gst_verified,
+    vendorYearOfEstablishment: vendor.year_of_establishment,
+    vendorYearsInBusiness: vendor.years_in_business,
+    vendorResponseRate: vendor.response_rate,
+    vendorPlanName: row.vendor_plan_name || 'TRIAL',
+    vendor_plan_name: row.vendor_plan_name || 'TRIAL',
+    vendor_plan_priority: Number(row.vendor_plan_priority || 100),
+    __sortScore: Number(row.search_score || 0),
+  };
+}
+
+function buildHybridWhere({ q, microId, stateId, cityId, useFullText = true, broad = false }) {
+  const where = ['p.status = ?', 'COALESCE(v.is_active, 1) = 1'];
+  const params = ['ACTIVE'];
+
+  if (microId) {
+    where.push('p.micro_category_id = ?');
+    params.push(microId);
+  }
+  if (stateId) {
+    where.push('v.state_id = ?');
+    params.push(stateId);
+  }
+  if (cityId) {
+    where.push('v.city_id = ?');
+    params.push(cityId);
+  }
+
+  if (q && !broad) {
+    const like = `%${q}%`;
+    const slug = slugifySearch(q);
+    const expanded = expandSemanticTokens(q).slice(0, 8);
+    const ors = [
+      'LOWER(COALESCE(p.name, "")) LIKE LOWER(?)',
+      'LOWER(COALESCE(p.category, "")) LIKE LOWER(?)',
+      'LOWER(COALESCE(p.description, "")) LIKE LOWER(?)',
+      'LOWER(COALESCE(p.category_path, "")) LIKE LOWER(?)',
+      'LOWER(COALESCE(v.company_name, "")) LIKE LOWER(?)',
+    ];
+    params.push(like, like, like, like, like);
+    if (slug) {
+      ors.push('LOWER(COALESCE(p.slug, "")) LIKE LOWER(?)');
+      ors.push('LOWER(COALESCE(p.category_slug, "")) LIKE LOWER(?)');
+      params.push(`%${slug}%`, `%${slug}%`);
+    }
+    expanded.forEach((token) => {
+      ors.push('LOWER(COALESCE(p.name, "")) LIKE LOWER(?)');
+      ors.push('LOWER(COALESCE(p.category, "")) LIKE LOWER(?)');
+      params.push(`%${token}%`, `%${token}%`);
+    });
+    const booleanQ = buildBooleanFullTextQuery(q);
+    if (useFullText && booleanQ) {
+      ors.push('MATCH(p.name, p.description, p.category, p.category_path, p.category_slug) AGAINST (? IN BOOLEAN MODE)');
+      params.push(booleanQ);
+    }
+    where.push(`(${ors.join(' OR ')})`);
+  }
+
+  return { where, params };
+}
+
+function buildHybridScoreSql(q, useFullText = true) {
+  if (!q) return { sql: '0', params: [] };
+  const like = `%${q}%`;
+  const prefix = `${q}%`;
+  const params = [q, prefix, like, like, like, like];
+  let sql = `(
+    CASE WHEN LOWER(COALESCE(p.name, '')) = LOWER(?) THEN 130 ELSE 0 END +
+    CASE WHEN LOWER(COALESCE(p.name, '')) LIKE LOWER(?) THEN 95 ELSE 0 END +
+    CASE WHEN LOWER(COALESCE(p.name, '')) LIKE LOWER(?) THEN 70 ELSE 0 END +
+    CASE WHEN LOWER(COALESCE(p.category, '')) LIKE LOWER(?) THEN 42 ELSE 0 END +
+    CASE WHEN LOWER(COALESCE(p.description, '')) LIKE LOWER(?) THEN 22 ELSE 0 END +
+    CASE WHEN LOWER(COALESCE(v.company_name, '')) LIKE LOWER(?) THEN 14 ELSE 0 END
+  `;
+  const booleanQ = buildBooleanFullTextQuery(q);
+  if (useFullText && booleanQ) {
+    sql += ' + (MATCH(p.name, p.description, p.category, p.category_path, p.category_slug) AGAINST (? IN BOOLEAN MODE) * 18)';
+    params.push(booleanQ);
+  }
+  sql += ')';
+  return { sql, params };
+}
+
+function orderSqlForHybrid(sort = '') {
+  if (sort === 'price_asc') return 'p.price ASC, vendor_plan_priority DESC, search_score DESC, p.created_at DESC';
+  if (sort === 'price_desc') return 'p.price DESC, vendor_plan_priority DESC, search_score DESC, p.created_at DESC';
+  return 'vendor_plan_priority DESC, search_score DESC, p.created_at DESC, p.id DESC';
+}
+
+async function runHybridMysqlSearch({ q, microId, stateId, cityId, sort, limit, offset = 0, useFullText = true, broad = false }) {
+  const { sql: scoreSql, params: scoreParams } = buildHybridScoreSql(q, useFullText && !broad);
+  const { where, params: whereParams } = buildHybridWhere({ q, microId, stateId, cityId, useFullText, broad });
+  const rows = await mysqlQuery(
+    `${buildProductRowSelect(scoreSql)}
+       FROM products p
+       JOIN vendors v ON v.id = p.vendor_id
+       LEFT JOIN vendor_plan_subscriptions vps
+         ON vps.vendor_id = p.vendor_id
+        AND vps.status = 'ACTIVE'
+        AND (vps.end_date IS NULL OR vps.end_date > UTC_TIMESTAMP())
+       LEFT JOIN vendor_plans vp ON vp.id = vps.plan_id
+      WHERE ${where.join(' AND ')}
+      ORDER BY ${orderSqlForHybrid(sort)}
+      LIMIT ${limit} OFFSET ${offset}`,
+    [...scoreParams, ...whereParams]
+  );
+  return {
+    rows: rows.map(productFromMysqlRow),
+    totalCount: rows.length ? Number(rows[0]?.total_count || rows.length) : 0,
+  };
+}
+
+async function runHybridSearchWithFallback(args) {
+  try {
+    return await runHybridMysqlSearch({ ...args, useFullText: true });
+  } catch (error) {
+    const msg = String(error?.message || '').toLowerCase();
+    if (!msg.includes('fulltext') && !msg.includes('match') && !msg.includes("can't find fulltext")) {
+      throw error;
+    }
+    logger.warn('[dir/hybrid-search] full-text unavailable, falling back to LIKE search:', error?.message);
+    return runHybridMysqlSearch({ ...args, useFullText: false });
+  }
+}
+
+async function fetchFuzzyCandidates({ q, microId, stateId, cityId, sort, limit }) {
+  const broad = await runHybridMysqlSearch({
+    q: '',
+    microId,
+    stateId,
+    cityId,
+    sort,
+    limit: Math.min(Math.max(limit * 8, 80), 240),
+    offset: 0,
+    useFullText: false,
+    broad: true,
+  });
+  const rows = (broad.rows || [])
+    .map((row) => ({ ...row, __sortScore: Math.max(Number(row.__sortScore || 0), fuzzySearchScore(q, row)) }))
+    .filter((row) => Number(row.__sortScore || 0) >= 42)
+    .sort((a, b) => {
+      const scoreDiff = Number(b.__sortScore || 0) - Number(a.__sortScore || 0);
+      if (scoreDiff) return scoreDiff;
+      return Number(b.vendor_plan_priority || 0) - Number(a.vendor_plan_priority || 0);
+    })
+    .slice(0, limit);
+  return { rows, totalCount: rows.length };
+}
+
+async function fetchPersonalizedSearchTerms(req) {
+  const terms = [];
+  const email = String(req.user?.email || req.query?.buyer_email || '').trim().toLowerCase();
+  const userId = String(req.user?.id || '').trim();
+  const visitorId = safeText(req.query?.visitor_id || req.query?.visitorId || req.headers?.['x-visitor-id'], 191);
+
+  try {
+    if (email || userId) {
+      const leadWhere = [];
+      const leadParams = [];
+      if (email) {
+        leadWhere.push('LOWER(COALESCE(buyer_email, "")) = LOWER(?)');
+        leadParams.push(email);
+      }
+      if (userId) {
+        leadWhere.push('buyer_user_id = ?');
+        leadParams.push(userId);
+      }
+      const leads = await mysqlQuery(
+        `SELECT title, product_name, product_interest, category
+           FROM leads
+          WHERE ${leadWhere.join(' OR ')}
+          ORDER BY created_at DESC
+          LIMIT 12`,
+        leadParams
+      );
+      leads.forEach((row) => terms.push(row.title, row.product_name, row.product_interest, row.category));
+
+      const orders = await mysqlQuery(
+        `SELECT l.title, l.product_name, l.product_interest, l.category
+           FROM lead_purchases lp
+           JOIN leads l ON l.id = lp.lead_id
+          WHERE ${leadWhere.map((item) => item.replace(/\bbuyer_email\b/g, 'l.buyer_email').replace(/\bbuyer_user_id\b/g, 'l.buyer_user_id')).join(' OR ')}
+          ORDER BY COALESCE(lp.purchase_datetime, lp.purchase_date, lp.updated_at) DESC
+          LIMIT 12`,
+        leadParams
+      ).catch(() => []);
+      orders.forEach((row) => terms.push(row.title, row.product_name, row.product_interest, row.category));
+    }
+
+    if (visitorId) {
+      const searches = await mysqlQuery(
+        `SELECT search_query, category, entity_name
+           FROM website_visitor_events
+          WHERE visitor_id = ?
+            AND (search_query IS NOT NULL OR category IS NOT NULL OR entity_name IS NOT NULL)
+          ORDER BY created_at DESC
+          LIMIT 12`,
+        [visitorId]
+      ).catch(() => []);
+      searches.forEach((row) => terms.push(row.search_query, row.category, row.entity_name));
+    }
+  } catch (error) {
+    logger.warn('[dir/hybrid-search] personalized terms skipped:', error?.message);
+  }
+
+  return Array.from(new Set(terms.filter(Boolean).flatMap((value) => expandSemanticTokens(value)))).slice(0, 12);
+}
+
+async function fetchRecommendedProducts({ req, q, microId, stateId, cityId, sort, limit }) {
+  const personalizedTerms = await fetchPersonalizedSearchTerms(req);
+  const semanticText = [q, ...personalizedTerms].filter(Boolean).join(' ');
+  const primary = semanticText
+    ? await runHybridSearchWithFallback({ q: semanticText, microId, stateId, cityId, sort, limit, offset: 0 })
+    : { rows: [], totalCount: 0 };
+  if (primary.rows.length) return primary.rows.slice(0, limit);
+
+  const fuzzy = q ? await fetchFuzzyCandidates({ q, microId, stateId, cityId, sort, limit }) : { rows: [] };
+  if (fuzzy.rows.length) return fuzzy.rows.slice(0, limit);
+
+  const fallback = await runHybridMysqlSearch({
+    q: '',
+    microId,
+    stateId,
+    cityId,
+    sort,
+    limit,
+    offset: 0,
+    useFullText: false,
+    broad: true,
+  });
+  return fallback.rows.slice(0, limit);
+}
+
+async function recordSearchEvent(req, { q, resultCount, recommendationCount }) {
+  const query = safeText(q, 191);
+  if (!query) return;
+  const visitorId = safeText(req.query?.visitor_id || req.query?.visitorId || req.headers?.['x-visitor-id'], 191) || null;
+  const sessionId = safeText(req.query?.visitor_session_id || req.query?.visitorSessionId || req.headers?.['x-visitor-session-id'], 191) || null;
+  mysqlQuery(
+    `INSERT INTO website_visitor_events
+      (id, visitor_id, visitor_session_id, visitor_email, event_type, page_url, page_path, search_query, metadata, created_at)
+     VALUES (?, ?, ?, ?, 'SEARCH', ?, ?, ?, ?, UTC_TIMESTAMP())`,
+    [
+      randomUUID(),
+      visitorId,
+      sessionId,
+      req.user?.email || null,
+      safeText(req.headers?.referer || '', 1000) || null,
+      safeText(req.originalUrl || req.url || '', 512),
+      query,
+      JSON.stringify({ resultCount, recommendationCount, source: 'hybrid_search' }),
+    ]
+  ).catch((error) => logger.warn('[dir/hybrid-search] search event skipped:', error?.message));
 }
 
 async function resolveBuyerProfileForUser(user = {}) {
@@ -490,6 +916,191 @@ async function handleRankedProducts(req, res) {
     });
   }
 }
+
+router.get('/autocomplete', cacheResponse('dir:autocomplete', 300), async (req, res) => {
+  try {
+    const q = safeQ(req.query.q || req.query.query || req.query.term);
+    if (q.length < 2) return res.json({ success: true, suggestions: [] });
+
+    const like = `%${q}%`;
+    const [microRows, productRows, vendorRows] = await Promise.all([
+      mysqlQuery(
+        `SELECT mc.id, mc.name, mc.slug,
+                sc.id AS sub_id, sc.name AS sub_name, sc.slug AS sub_slug,
+                hc.id AS head_id, hc.name AS head_name, hc.slug AS head_slug
+           FROM micro_categories mc
+           LEFT JOIN sub_categories sc ON sc.id = mc.sub_category_id
+           LEFT JOIN head_categories hc ON hc.id = sc.head_category_id
+          WHERE COALESCE(mc.is_active, 1) = 1
+            AND LOWER(COALESCE(mc.name, '')) LIKE LOWER(?)
+          ORDER BY mc.sort_order ASC, mc.name ASC
+          LIMIT 8`,
+        [like]
+      ),
+      mysqlQuery(
+        `SELECT p.id, p.name, p.slug, p.micro_category_id,
+                mc.name AS micro_name, mc.slug AS micro_slug,
+                sc.id AS sub_id, sc.slug AS sub_slug,
+                hc.id AS head_id, hc.slug AS head_slug
+           FROM products p
+           JOIN vendors v ON v.id = p.vendor_id
+           LEFT JOIN micro_categories mc ON mc.id = p.micro_category_id
+           LEFT JOIN sub_categories sc ON sc.id = mc.sub_category_id
+           LEFT JOIN head_categories hc ON hc.id = sc.head_category_id
+          WHERE p.status = 'ACTIVE'
+            AND COALESCE(v.is_active, 1) = 1
+            AND LOWER(COALESCE(p.name, '')) LIKE LOWER(?)
+          ORDER BY p.created_at DESC
+          LIMIT 8`,
+        [like]
+      ),
+      mysqlQuery(
+        `SELECT id, company_name, slug, city, state
+           FROM vendors
+          WHERE COALESCE(is_active, 1) = 1
+            AND LOWER(COALESCE(company_name, '')) LIKE LOWER(?)
+          ORDER BY created_at DESC
+          LIMIT 4`,
+        [like]
+      ),
+    ]);
+
+    const suggestions = [];
+    microRows.forEach((item) => {
+      suggestions.push({
+        id: item.id,
+        name: item.name,
+        slug: item.slug,
+        path: [item.head_name, item.sub_name, item.name].filter(Boolean).join(' > '),
+        head_id: item.head_id,
+        sub_id: item.sub_id,
+        sub_slug: item.sub_slug,
+        head_slug: item.head_slug,
+        type: 'micro',
+      });
+    });
+
+    productRows.forEach((item) => {
+      suggestions.push({
+        id: item.id,
+        name: item.name,
+        slug: item.micro_slug || item.slug || slugifySearch(item.name),
+        product_slug: item.slug,
+        path: item.micro_name ? `Product in ${item.micro_name}` : 'Product',
+        head_id: item.head_id,
+        sub_id: item.sub_id,
+        sub_slug: item.sub_slug,
+        head_slug: item.head_slug,
+        type: 'product',
+      });
+    });
+
+    vendorRows.forEach((item) => {
+      suggestions.push({
+        id: item.id,
+        name: item.company_name,
+        slug: item.slug,
+        path: [item.city, item.state].filter(Boolean).join(', ') || 'Company',
+        type: 'vendor',
+      });
+    });
+
+    const seen = new Set();
+    const unique = suggestions.filter((item) => {
+      const key = `${item.type}:${item.slug || item.id}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    res.json({ success: true, suggestions: unique.slice(0, 12) });
+  } catch (error) {
+    logger.warn('[dir/autocomplete] failed:', error?.message);
+    res.status(500).json({ success: false, error: 'AUTOCOMPLETE_FAILED', details: error?.message });
+  }
+});
+
+router.get('/hybrid-search', optionalAuth(), async (req, res) => {
+  try {
+    const q = safeQ(req.query.q || req.query.query || req.query.term);
+    const microSlug = safeQ(req.query.microSlug || req.query.micro || req.query.micro_slug);
+    const sort = String(req.query.sort || '').trim();
+    const page = clampInt(req.query.page, 1, 1, 5000);
+    const limit = clampInt(req.query.limit, 20, 1, 50);
+    const stateId = isValidId(req.query.stateId) ? req.query.stateId : (isValidId(req.query.state_id) ? req.query.state_id : null);
+    const cityId = isValidId(req.query.cityId) ? req.query.cityId : (isValidId(req.query.city_id) ? req.query.city_id : null);
+    const offset = (page - 1) * limit;
+    const visitorId = safeText(req.query?.visitor_id || req.query?.visitorId || req.headers?.['x-visitor-id'], 191);
+    const personalized = Boolean(req.user?.id || req.user?.email || visitorId);
+    const cacheKey = `hybrid:v2:${JSON.stringify({ q, microSlug, sort, page, limit, stateId, cityId })}`;
+
+    if (!personalized && isRedisConfigured()) {
+      const cached = await cacheGetJson(cacheKey).catch(() => null);
+      if (cached) {
+        res.setHeader('X-Cache', 'HIT');
+        return res.json(cached);
+      }
+    }
+
+    const microId = await resolveMicroId(microSlug);
+    let { rows, totalCount } = await runHybridSearchWithFallback({
+      q,
+      microId,
+      stateId,
+      cityId,
+      sort,
+      limit,
+      offset,
+    });
+
+    if (!rows.length && q) {
+      const fuzzy = await fetchFuzzyCandidates({ q, microId, stateId, cityId, sort, limit });
+      rows = fuzzy.rows;
+      totalCount = fuzzy.totalCount;
+    }
+
+    const exactAvailable = rows.length > 0;
+    const recommendations = exactAvailable
+      ? []
+      : await fetchRecommendedProducts({ req, q, microId, stateId, cityId, sort, limit });
+
+    const responseRows = exactAvailable ? rows : recommendations;
+    const response = {
+      success: true,
+      data: responseRows,
+      count: exactAvailable ? totalCount : recommendations.length,
+      recommendations,
+      availability: {
+        exactAvailable,
+        message: exactAvailable
+          ? ''
+          : 'This product is currently not available. You may like these similar products.',
+      },
+      meta: {
+        searchMode: 'hybrid',
+        autocomplete: true,
+        fuzzy: true,
+        fullText: true,
+        semantic: true,
+        personalized: Boolean(personalized),
+        page,
+        limit,
+      },
+    };
+
+    recordSearchEvent(req, { q, resultCount: rows.length, recommendationCount: recommendations.length });
+
+    if (!personalized && isRedisConfigured()) {
+      cacheSetJson(cacheKey, response, 120).catch((error) => logger.warn('[dir/hybrid-search] cache set failed:', error?.message));
+    }
+
+    res.setHeader('X-Cache', 'MISS');
+    return res.json(response);
+  } catch (error) {
+    logger.error('[dir/hybrid-search] failed:', error);
+    return res.status(500).json({ success: false, error: 'HYBRID_SEARCH_FAILED', details: error?.message });
+  }
+});
 
 // ✅ IMPORTANT: your UI search page calls /api/dir/search
 router.get('/search', cacheResponse('dir:search', 120), handleRankedProducts);

@@ -892,7 +892,7 @@ router.get("/vendors", async (req, res) => {
       let query = db
         .from("vendors")
         .select(
-          "id, vendor_id, company_name, owner_name, email, phone, kyc_status, created_at, is_active, status, terminated_at, joined_on, joined_at, registration_date, registered_at",
+          "id, vendor_id, company_name, owner_name, email, phone, kyc_status, created_at, is_active, status, terminated_at, joined_on, joined_at, registration_date, registered_at, profile_template_override",
           { count: "exact" }
         )
         .order("created_at", { ascending: false });
@@ -1260,6 +1260,51 @@ router.get("/vendors/:vendorId/products", async (req, res) => {
     }));
 
     return res.json({ success: true, vendor, products: out });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.put("/vendors/:vendorId/profile-template", async (req, res) => {
+  try {
+    const { vendorId } = req.params;
+    const template = String(req.body?.profile_template_override || req.body?.profile_template || "AUTO")
+      .trim()
+      .toUpperCase();
+    const allowedTemplates = new Set(["AUTO", "STANDARD", "PREMIUM"]);
+
+    if (!allowedTemplates.has(template)) {
+      return res.status(400).json({ success: false, error: "Invalid profile template" });
+    }
+
+    const { data: existing, error: findErr } = await resolveVendorRecordForAdmin(vendorId);
+    if (findErr) {
+      return res.status(500).json({ success: false, error: findErr.message });
+    }
+    if (!existing) {
+      return res.status(404).json({ success: false, error: "Vendor not found" });
+    }
+
+    const { data, error } = await db
+      .from("vendors")
+      .update({ profile_template_override: template, updated_at: new Date().toISOString() })
+      .eq("id", existing.id)
+      .select()
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ success: false, error: error.message });
+
+    const updatedVendor = data || { ...existing, profile_template_override: template };
+    await writeAuditLog({
+      req,
+      actor: req.actor,
+      action: "VENDOR_PROFILE_TEMPLATE_UPDATE",
+      entityType: "vendors",
+      entityId: existing.id,
+      details: { profile_template_override: template },
+    });
+
+    return res.json({ success: true, vendor: updatedVendor });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });
   }

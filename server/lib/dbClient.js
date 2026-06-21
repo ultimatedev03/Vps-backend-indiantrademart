@@ -853,8 +853,16 @@ async function executeDirRankedProducts(params = {}) {
     sqlParams.push(params.p_micro_id);
   }
   if (params.p_q) {
-    where.push('LOWER(p.name) LIKE LOWER(?)');
-    sqlParams.push(`%${params.p_q}%`);
+    where.push(`(
+      LOWER(COALESCE(p.name, '')) LIKE LOWER(?)
+      OR LOWER(COALESCE(p.category, '')) LIKE LOWER(?)
+      OR LOWER(COALESCE(p.description, '')) LIKE LOWER(?)
+      OR LOWER(COALESCE(p.category_path, '')) LIKE LOWER(?)
+      OR LOWER(COALESCE(p.category_slug, '')) LIKE LOWER(?)
+      OR LOWER(COALESCE(v.company_name, '')) LIKE LOWER(?)
+    )`);
+    const like = `%${params.p_q}%`;
+    sqlParams.push(like, like, like, like, like, like);
   }
   if (params.p_state_id) {
     where.push('v.state_id = ?');

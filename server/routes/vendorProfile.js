@@ -7,6 +7,7 @@ import { normalizeEmail } from '../lib/auth.js';
 import { optionalAuth, requireAuth } from '../middleware/requireAuth.js';
 import { notifyRole, notifyUser } from '../lib/notify.js';
 import { consumeLeadForVendorWithCompat } from '../lib/leadConsumptionCompat.js';
+import { sendGuestBuyerOnboardingEmail } from '../lib/emailService.js';
 
 const router = express.Router();
 
@@ -583,6 +584,75 @@ async function resolveActiveSubscriptionForVendor(vendorId) {
   return (rows || []).find((row) => !row?.end_date || String(row.end_date) > nowIso) || null;
 }
 
+const normalizeProfileTemplateOverride = (value = '') => {
+  const token = String(value || '').trim().toUpperCase();
+  if (['STANDARD', 'PREMIUM'].includes(token)) return token;
+  return 'AUTO';
+};
+
+const isPremiumProfilePlan = (plan = null) => {
+  if (!plan) return false;
+  const planName = String(plan?.name || '').trim().toLowerCase();
+  const price = Number(plan?.price || 0);
+  return (
+    price >= 100000 ||
+    ['premium', 'enterprise', 'diamond', 'platinum', 'gold', 'growth', 'pro'].some((word) => planName.includes(word))
+  );
+};
+
+async function resolveActiveSubscriptionWithPlan(vendorId) {
+  const subscription = await resolveActiveSubscriptionForVendor(vendorId);
+  if (!subscription?.plan_id) return { subscription, plan: null };
+
+  const { data: plan, error } = await db
+    .from('vendor_plans')
+    .select('id, name, price, features')
+    .eq('id', subscription.plan_id)
+    .maybeSingle();
+
+  if (error) {
+    if (isMissingRelationError(error, 'vendor_plans') || isMissingColumnError(error)) {
+      return { subscription, plan: null };
+    }
+    throw new Error(error.message || 'Failed to load vendor plan');
+  }
+
+  return { subscription, plan: plan || null };
+}
+
+async function decorateVendorProfilePresentation(vendor = null) {
+  if (!vendor?.id) return vendor;
+
+  const override = normalizeProfileTemplateOverride(vendor.profile_template_override);
+  const { subscription, plan } = await resolveActiveSubscriptionWithPlan(vendor.id);
+  const template = override === 'AUTO'
+    ? (isPremiumProfilePlan(plan) ? 'PREMIUM' : 'STANDARD')
+    : override;
+
+  return {
+    ...vendor,
+    profile_template_override: override,
+    profile_template: template,
+    active_subscription: subscription
+      ? {
+          id: subscription.id,
+          plan_id: subscription.plan_id,
+          status: subscription.status,
+          start_date: subscription.start_date,
+          end_date: subscription.end_date,
+        }
+      : null,
+    active_plan: plan
+      ? {
+          id: plan.id,
+          name: plan.name,
+          price: Number(plan.price || 0),
+          features: plan.features || null,
+        }
+      : null,
+  };
+}
+
 async function resolveBuyerId(userOrId = {}) {
   const userId = typeof userOrId === 'string' ? userOrId : String(userOrId?.id || '').trim();
   const email = typeof userOrId === 'object' ? normalizeEmail(userOrId?.email || '') : '';
@@ -759,7 +829,12 @@ async function resolvePublicVendorRecord(identifier) {
   for (const resolveVendor of resolvers) {
     const result = await resolveVendor();
     if (result?.error) return result;
-    if (result?.vendor) return result;
+    if (result?.vendor) {
+      return {
+        vendor: await decorateVendorProfilePresentation(result.vendor),
+        error: null,
+      };
+    }
   }
 
   return { vendor: null, error: null };
@@ -4108,6 +4183,7 @@ router.post('/:vendorId/leads', optionalAuth(), async (req, res) => {
       buyerProfile?.company_name || payload.company_name,
       200
     );
+    const isGuestBuyer = !buyerProfile?.id;
 
     if (!buyerName) {
       return res.status(400).json({ success: false, error: 'Buyer name is required' });
@@ -4160,8 +4236,19 @@ router.post('/:vendorId/leads', optionalAuth(), async (req, res) => {
     const normalizedPublicSource = rawSource
       ? rawSource.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
       : null;
-    const leadSource = vendor?.id ? 'DIRECT' : normalizedPublicSource || 'MARKETPLACE';
+    const leadSource = vendor?.id
+      ? normalizedPublicSource || (isGuestBuyer ? 'DIRECT_GUEST_ENQUIRY' : 'DIRECT')
+      : normalizedPublicSource || 'MARKETPLACE';
     const createdAt = new Date().toISOString();
+    const guestSalesNote = isGuestBuyer
+      ? [
+          'Guest buyer enquiry: sales onboarding required.',
+          buyerName ? `Buyer: ${buyerName}` : '',
+          buyerEmail ? `Email: ${String(buyerEmail).toLowerCase().trim()}` : '',
+          buyerPhone ? `Phone: ${buyerPhone}` : '',
+          vendor?.company_name ? `Supplier: ${vendor.company_name}` : '',
+        ].filter(Boolean).join(' ')
+      : null;
 
     const proposalBasePayload = {
       vendor_id: vendor?.id || null,
@@ -4272,6 +4359,7 @@ router.post('/:vendorId/leads', optionalAuth(), async (req, res) => {
       referrer,
       user_agent: userAgent,
       consent_source: consentSource,
+      sales_note: guestSalesNote,
       status: 'AVAILABLE',
       created_at: createdAt,
       expires_at: addDays(createdAt, LEAD_EXPIRY_DAYS)?.toISOString() || null,
@@ -4399,6 +4487,29 @@ router.post('/:vendorId/leads', optionalAuth(), async (req, res) => {
           logger.warn('Vendor lead notification failed:', notifError?.message || notifError);
         }
       }
+    }
+
+    if (isGuestBuyer) {
+      if (buyerEmail) {
+        sendGuestBuyerOnboardingEmail({
+          to: String(buyerEmail).toLowerCase().trim(),
+          fullName: buyerName,
+          supplierName: vendor?.company_name || vendorEmail || 'the supplier',
+          requirementTitle: title,
+        }).catch((emailError) => {
+          logger.warn('Guest buyer onboarding email failed:', emailError?.message || emailError);
+        });
+      }
+
+      notifyRole('SALES', {
+        type: 'GUEST_BUYER_LEAD',
+        title: 'Guest buyer enquiry needs onboarding',
+        message: `${buyerName || 'Guest buyer'} sent an enquiry for ${title || 'a listing'}. Please onboard the buyer account.`,
+        link: '/employee/sales/leads',
+        reference_id: createdLead?.id || createdProposal?.id || null,
+      }).catch((salesNotifError) => {
+        logger.warn('Guest buyer sales notification failed:', salesNotifError?.message || salesNotifError);
+      });
     }
 
     return res.status(201).json({

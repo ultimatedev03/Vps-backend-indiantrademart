@@ -368,6 +368,51 @@ export const sendWelcomeEmail = async ({
   });
 };
 
+export const sendGuestBuyerOnboardingEmail = async ({
+  to,
+  fullName = '',
+  supplierName = '',
+  requirementTitle = '',
+  registerUrl = '',
+} = {}) => {
+  const email = String(to || '').trim().toLowerCase();
+  if (!email) throw new Error('Recipient email is required');
+
+  const name = String(fullName || '').trim() || email.split('@')[0] || 'there';
+  const supplier = String(supplierName || '').trim() || 'the supplier';
+  const requirement = String(requirementTitle || '').trim() || 'your enquiry';
+  const resolvedRegisterUrl =
+    String(registerUrl || '').trim() ||
+    `${DEFAULT_FRONTEND_URL}/buyer/register?email=${encodeURIComponent(email)}`;
+
+  return sendEmail({
+    to: email,
+    purpose: 'welcome',
+    subject: `Create your ${APP_NAME} buyer account`,
+    text: `Hi ${name}, your enquiry for ${requirement} has been sent to ${supplier}. Create your buyer account to track enquiries and receive supplier responses: ${resolvedRegisterUrl}`,
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 640px; margin: 0 auto; padding: 24px; color: #1f2937;">
+        <h1 style="margin: 0 0 12px; color: #003D82;">Your enquiry has been sent</h1>
+        <p style="margin: 0 0 12px;">Hi ${escapeHtml(name)},</p>
+        <p style="margin: 0 0 12px;">
+          We have shared your enquiry for <strong>${escapeHtml(requirement)}</strong> with ${escapeHtml(supplier)}.
+        </p>
+        <p style="margin: 0 0 18px;">
+          Create a free buyer account to track enquiries, get faster supplier responses, and manage your requirements from one dashboard.
+        </p>
+        <p style="margin: 0 0 18px;">
+          <a href="${escapeHtml(resolvedRegisterUrl)}" style="display:inline-block;padding:12px 18px;background:#003D82;color:#fff;text-decoration:none;border-radius:8px;">
+            Create Buyer Account
+          </a>
+        </p>
+        <p style="margin: 0; font-size: 13px; color: #6b7280;">
+          Our sales team may contact you to help complete onboarding.
+        </p>
+      </div>
+    `,
+  });
+};
+
 export const sendTemporaryPasswordEmail = async ({
   to,
   fullName = '',
