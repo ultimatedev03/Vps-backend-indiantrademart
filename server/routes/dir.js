@@ -94,6 +94,9 @@ const SEMANTIC_TOKEN_MAP = {
   phone: ['mobile', 'smartphone', 'telephone', 'cellphone'],
   mobile: ['phone', 'smartphone', 'cellphone'],
   laptop: ['notebook', 'computer', 'pc'],
+  shoe: ['shoes', 'footwear', 'sneaker', 'sneakers', 'slipper', 'slippers', 'sandal', 'sandals', 'boot', 'boots'],
+  shoes: ['shoe', 'footwear', 'sneaker', 'sneakers', 'slipper', 'slippers', 'sandal', 'sandals', 'boot', 'boots'],
+  footwear: ['shoe', 'shoes', 'sneaker', 'sneakers', 'slipper', 'slippers', 'sandal', 'sandals', 'boot', 'boots'],
   saree: ['sari', 'fabric', 'textile', 'dress'],
   consultant: ['consulting', 'service', 'advisor', 'engineer'],
   design: ['drawing', 'layout', 'planning', 'engineering'],
@@ -106,9 +109,32 @@ function expandSemanticTokens(value = '') {
   const base = searchTokens(value, 10);
   const expanded = new Set(base);
   base.forEach((token) => {
+    addSearchTokenVariants(token, expanded);
     (SEMANTIC_TOKEN_MAP[token] || []).forEach((synonym) => expanded.add(synonym));
   });
   return Array.from(expanded).slice(0, 16);
+}
+
+function addSearchTokenVariants(token = '', target = new Set()) {
+  const value = String(token || '').trim();
+  if (value.length < 2) return;
+
+  target.add(value);
+
+  if (value.endsWith('ies') && value.length > 4) {
+    target.add(`${value.slice(0, -3)}y`);
+  }
+  if (value.endsWith('es') && value.length > 3) {
+    target.add(value.slice(0, -2));
+  }
+  if (value.endsWith('s') && value.length > 3) {
+    target.add(value.slice(0, -1));
+  } else if (value.endsWith('e') && value.length >= 3) {
+    target.add(`${value}s`);
+  } else if (value.length >= 3) {
+    target.add(`${value}s`);
+    target.add(`${value}es`);
+  }
 }
 
 function buildBooleanFullTextQuery(value = '') {
@@ -142,7 +168,8 @@ function levenshteinDistance(a = '', b = '') {
 function fuzzySearchScore(query = '', row = {}) {
   const q = normalizeSearchText(query);
   if (!q) return 0;
-  const fields = [row.name, row.category, row.category_path, row.description, row.vendor__company_name]
+  const queryTokens = expandSemanticTokens(query);
+  const fields = [row.name, row.category, row.category_path, row.category_slug, row.description, row.vendor__company_name]
     .filter(Boolean)
     .map((value) => normalizeSearchText(value));
   let best = 0;
@@ -150,12 +177,17 @@ function fuzzySearchScore(query = '', row = {}) {
     if (!field) return;
     if (field === q) best = Math.max(best, 100);
     if (field.includes(q)) best = Math.max(best, 80);
+    queryTokens.forEach((token) => {
+      if (field.includes(token)) best = Math.max(best, 72);
+    });
     field.split(' ').forEach((word) => {
-      const maxLen = Math.max(word.length, q.length);
-      if (maxLen < 3) return;
-      const distance = levenshteinDistance(word, q);
-      const score = Math.max(0, Math.round((1 - distance / maxLen) * 70));
-      best = Math.max(best, score);
+      queryTokens.forEach((token) => {
+        const maxLen = Math.max(word.length, token.length);
+        if (maxLen < 3) return;
+        const distance = levenshteinDistance(word, token);
+        const score = Math.max(0, Math.round((1 - distance / maxLen) * 70));
+        best = Math.max(best, score);
+      });
     });
   });
   return best;
@@ -266,7 +298,7 @@ function buildHybridWhere({ q, microId, stateId, cityId, useFullText = true, bro
   if (q && !broad) {
     const like = `%${q}%`;
     const slug = slugifySearch(q);
-    const expanded = expandSemanticTokens(q).slice(0, 8);
+    const expanded = expandSemanticTokens(q).slice(0, 12);
     const ors = [
       'LOWER(COALESCE(p.name, "")) LIKE LOWER(?)',
       'LOWER(COALESCE(p.category, "")) LIKE LOWER(?)',
@@ -283,7 +315,10 @@ function buildHybridWhere({ q, microId, stateId, cityId, useFullText = true, bro
     expanded.forEach((token) => {
       ors.push('LOWER(COALESCE(p.name, "")) LIKE LOWER(?)');
       ors.push('LOWER(COALESCE(p.category, "")) LIKE LOWER(?)');
-      params.push(`%${token}%`, `%${token}%`);
+      ors.push('LOWER(COALESCE(p.description, "")) LIKE LOWER(?)');
+      ors.push('LOWER(COALESCE(p.category_path, "")) LIKE LOWER(?)');
+      ors.push('LOWER(COALESCE(p.category_slug, "")) LIKE LOWER(?)');
+      params.push(`%${token}%`, `%${token}%`, `%${token}%`, `%${token}%`, `%${slugifySearch(token)}%`);
     });
     const booleanQ = buildBooleanFullTextQuery(q);
     if (useFullText && booleanQ) {
@@ -309,6 +344,21 @@ function buildHybridScoreSql(q, useFullText = true) {
     CASE WHEN LOWER(COALESCE(p.description, '')) LIKE LOWER(?) THEN 22 ELSE 0 END +
     CASE WHEN LOWER(COALESCE(v.company_name, '')) LIKE LOWER(?) THEN 14 ELSE 0 END
   `;
+
+  expandSemanticTokens(q)
+    .filter((token) => token !== normalizeSearchText(q))
+    .slice(0, 8)
+    .forEach((token) => {
+      sql += `
+        + CASE WHEN LOWER(COALESCE(p.name, '')) LIKE LOWER(?) THEN 38 ELSE 0 END
+        + CASE WHEN LOWER(COALESCE(p.category, '')) LIKE LOWER(?) THEN 30 ELSE 0 END
+        + CASE WHEN LOWER(COALESCE(p.category_path, '')) LIKE LOWER(?) THEN 24 ELSE 0 END
+        + CASE WHEN LOWER(COALESCE(p.description, '')) LIKE LOWER(?) THEN 14 ELSE 0 END
+      `;
+      const tokenLike = `%${token}%`;
+      params.push(tokenLike, tokenLike, tokenLike, tokenLike);
+    });
+
   const booleanQ = buildBooleanFullTextQuery(q);
   if (useFullText && booleanQ) {
     sql += ' + (MATCH(p.name, p.description, p.category, p.category_path, p.category_slug) AGAINST (? IN BOOLEAN MODE) * 18)';
@@ -774,6 +824,33 @@ async function handleRankedProducts(req, res) {
 
     const microId = await resolveMicroId(microSlug);
 
+    if (q) {
+      const hybrid = await runHybridSearchWithFallback({
+        q,
+        microId,
+        stateId,
+        cityId,
+        sort,
+        limit,
+        offset: from,
+      });
+
+      if (hybrid.rows.length) {
+        return res.json({
+          success: true,
+          data: hybrid.rows,
+          count: hybrid.totalCount,
+          meta: {
+            searchMode: 'hybrid',
+            autocomplete: true,
+            fuzzy: true,
+            fullText: true,
+            semantic: true,
+          },
+        });
+      }
+    }
+
     // ✅ Preferred path: slot-aware ranking via DB RPC (capacity-based seats).
     // If the migration isn't applied yet, we fall back to legacy tier buckets.
     try {
@@ -922,7 +999,11 @@ router.get('/autocomplete', cacheResponse('dir:autocomplete', 300), async (req, 
     const q = safeQ(req.query.q || req.query.query || req.query.term);
     if (q.length < 2) return res.json({ success: true, suggestions: [] });
 
-    const like = `%${q}%`;
+    const expandedTerms = expandSemanticTokens(q).slice(0, 8);
+    const likeTerms = expandedTerms.length ? expandedTerms : [q];
+    const buildLikeOr = (columnSql) => likeTerms.map(() => `LOWER(COALESCE(${columnSql}, '')) LIKE LOWER(?)`).join(' OR ');
+    const likeParams = () => likeTerms.map((term) => `%${term}%`);
+
     const [microRows, productRows, vendorRows] = await Promise.all([
       mysqlQuery(
         `SELECT mc.id, mc.name, mc.slug,
@@ -932,10 +1013,10 @@ router.get('/autocomplete', cacheResponse('dir:autocomplete', 300), async (req, 
            LEFT JOIN sub_categories sc ON sc.id = mc.sub_category_id
            LEFT JOIN head_categories hc ON hc.id = sc.head_category_id
           WHERE COALESCE(mc.is_active, 1) = 1
-            AND LOWER(COALESCE(mc.name, '')) LIKE LOWER(?)
+            AND (${buildLikeOr('mc.name')})
           ORDER BY mc.sort_order ASC, mc.name ASC
           LIMIT 8`,
-        [like]
+        likeParams()
       ),
       mysqlQuery(
         `SELECT p.id, p.name, p.slug, p.micro_category_id,
@@ -949,19 +1030,19 @@ router.get('/autocomplete', cacheResponse('dir:autocomplete', 300), async (req, 
            LEFT JOIN head_categories hc ON hc.id = sc.head_category_id
           WHERE p.status = 'ACTIVE'
             AND COALESCE(v.is_active, 1) = 1
-            AND LOWER(COALESCE(p.name, '')) LIKE LOWER(?)
+            AND ((${buildLikeOr('p.name')}) OR (${buildLikeOr('p.category')}) OR (${buildLikeOr('p.category_path')}))
           ORDER BY p.created_at DESC
           LIMIT 8`,
-        [like]
+        [...likeParams(), ...likeParams(), ...likeParams()]
       ),
       mysqlQuery(
         `SELECT id, company_name, slug, city, state
            FROM vendors
           WHERE COALESCE(is_active, 1) = 1
-            AND LOWER(COALESCE(company_name, '')) LIKE LOWER(?)
+            AND (${buildLikeOr('company_name')})
           ORDER BY created_at DESC
           LIMIT 4`,
-        [like]
+        likeParams()
       ),
     ]);
 
