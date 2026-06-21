@@ -7,6 +7,11 @@ import { cacheResponse } from '../lib/cacheMiddleware.js';
 import { cacheGetJson, cacheSetJson, isRedisConfigured } from '../lib/redisCache.js';
 import { optionalAuth, requireAuth } from '../middleware/requireAuth.js';
 import { mysqlQuery } from '../lib/mysqlPool.js';
+import {
+  autocompleteOpenSearchProducts,
+  isOpenSearchCatalogEnabled,
+  searchOpenSearchProducts,
+} from '../lib/openSearchCatalog.js';
 
 const router = express.Router();
 
@@ -456,6 +461,15 @@ async function runHybridMysqlSearch({
 }
 
 async function runHybridSearchWithFallback(args) {
+  if (args?.q && isOpenSearchCatalogEnabled()) {
+    try {
+      const result = await searchOpenSearchProducts(args);
+      if (result.rows?.length) return result;
+    } catch (error) {
+      logger.warn('[dir/hybrid-search] OpenSearch unavailable, using MySQL fallback:', error?.message);
+    }
+  }
+
   try {
     return await runHybridMysqlSearch({ ...args, useFullText: true });
   } catch (error) {
@@ -1170,7 +1184,10 @@ async function handleRankedProducts(req, res) {
           data: responseRows,
           count: Math.max(hybrid.totalCount, responseRows.length),
           meta: {
-            searchMode: responseRows.length > hybrid.rows.length ? 'hybrid_category_expanded' : 'hybrid',
+            searchMode: hybrid.engine === 'opensearch'
+              ? (responseRows.length > hybrid.rows.length ? 'opensearch_category_expanded' : 'opensearch_hybrid')
+              : (responseRows.length > hybrid.rows.length ? 'hybrid_category_expanded' : 'hybrid'),
+            searchEngine: hybrid.engine || 'mysql',
             autocomplete: true,
             fuzzy: true,
             fullText: true,
@@ -1209,7 +1226,8 @@ async function handleRankedProducts(req, res) {
               message: '',
             },
             meta: {
-              searchMode: 'hybrid_parent_category_expanded',
+              searchMode: scopedHybrid.engine === 'opensearch' ? 'opensearch_parent_category_expanded' : 'hybrid_parent_category_expanded',
+              searchEngine: scopedHybrid.engine || 'mysql',
               autocomplete: true,
               fuzzy: true,
               fullText: true,
@@ -1400,7 +1418,7 @@ router.get('/autocomplete', cacheResponse('dir:autocomplete', 300), async (req, 
     const buildLikeOr = (columnSql) => likeTerms.map(() => `LOWER(COALESCE(${columnSql}, '')) LIKE LOWER(?)`).join(' OR ');
     const likeParams = () => likeTerms.map((term) => `%${term}%`);
 
-    const [microRows, productRows, vendorRows] = await Promise.all([
+    const [microRows, productRows, vendorRows, openSearchSuggestions] = await Promise.all([
       mysqlQuery(
         `SELECT mc.id, mc.name, mc.slug,
                 sc.id AS sub_id, sc.name AS sub_name, sc.slug AS sub_slug,
@@ -1440,9 +1458,13 @@ router.get('/autocomplete', cacheResponse('dir:autocomplete', 300), async (req, 
           LIMIT 4`,
         likeParams()
       ),
+      autocompleteOpenSearchProducts(q, { limit: 8 }).catch((error) => {
+        logger.warn('[dir/autocomplete] OpenSearch suggestions skipped:', error?.message);
+        return [];
+      }),
     ]);
 
-    const suggestions = [];
+    const suggestions = [...openSearchSuggestions];
     microRows.forEach((item) => {
       suggestions.push({
         id: item.id,
@@ -1509,7 +1531,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
     const offset = (page - 1) * limit;
     const visitorId = safeText(req.query?.visitor_id || req.query?.visitorId || req.headers?.['x-visitor-id'], 191);
     const personalized = Boolean(req.user?.id || req.user?.email || visitorId);
-    const cacheKey = `hybrid:v3:${JSON.stringify({ q, microSlug, sort, page, limit, stateId, cityId })}`;
+    const cacheKey = `hybrid:v4:${JSON.stringify({ q, microSlug, sort, page, limit, stateId, cityId })}`;
 
     if (!personalized && isRedisConfigured()) {
       const cached = await cacheGetJson(cacheKey).catch(() => null);
@@ -1613,6 +1635,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
           limit,
         });
     const hasResults = responseRows.length > 0;
+    const searchEngine = responseRows.some((row) => row?.__searchEngine === 'opensearch') ? 'opensearch' : 'mysql';
     const response = {
       success: true,
       data: responseRows,
@@ -1625,7 +1648,8 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
           : 'This product is currently not available. You may like these similar products.',
       },
       meta: {
-        searchMode: 'hybrid',
+        searchMode: searchEngine === 'opensearch' ? 'opensearch_hybrid' : 'hybrid',
+        searchEngine,
         autocomplete: true,
         fuzzy: true,
         fullText: true,

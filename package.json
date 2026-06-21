@@ -10,6 +10,8 @@
     "db:migrate:supabase": "node server/scripts/migrateSupabaseToMysql.js",
     "db:migrate:postgres": "node server/scripts/migratePostgresToMysql.js",
     "storage:migrate:supabase": "node server/scripts/migrateSupabaseStorageToLocal.js",
+    "search:setup": "node server/scripts/setupOpenSearchCatalog.js",
+    "search:reindex": "node server/scripts/reindexOpenSearchProducts.js",
     "admin:create": "node server/scripts/createAdmin.js",
     "admin:password": "node server/scripts/changeAdminPassword.js"
   },
