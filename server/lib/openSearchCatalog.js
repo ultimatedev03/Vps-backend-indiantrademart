@@ -421,6 +421,8 @@ function documentFromProductRow(row = {}) {
 }
 
 export async function fetchProductRowsForOpenSearch({ limit = 500, offset = 0 } = {}) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 500, 1), 1000);
+  const safeOffset = Math.max(Number(offset) || 0, 0);
   return mysqlQuery(
     `SELECT p.id, p.vendor_id, p.name, p.slug, p.description, p.price, p.price_unit, p.images,
             p.status, p.category, p.category_path, p.category_slug,
@@ -448,8 +450,7 @@ export async function fetchProductRowsForOpenSearch({ limit = 500, offset = 0 } 
       WHERE p.status = 'ACTIVE'
         AND COALESCE(v.is_active, 1) = 1
       ORDER BY p.updated_at DESC, p.created_at DESC, p.id DESC
-      LIMIT ? OFFSET ?`,
-    [Number(limit), Number(offset)]
+      LIMIT ${safeLimit} OFFSET ${safeOffset}`
   );
 }
 
