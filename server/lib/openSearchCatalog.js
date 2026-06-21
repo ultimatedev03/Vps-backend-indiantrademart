@@ -493,7 +493,7 @@ export async function reindexOpenSearchProducts({ batchSize = 500, recreate = fa
     await bulkIndexProductRows(rows);
     total += rows.length;
     offset += rows.length;
-    logger.info(`[opensearch] indexed ${total} products`);
+    logger.log(`[opensearch] indexed ${total} products`);
     if (rows.length < batchSize) break;
   }
 
