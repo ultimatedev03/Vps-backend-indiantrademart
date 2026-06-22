@@ -43,6 +43,7 @@ const mysqlMissingColumns = [
   { table: 'vendor_plan_subscriptions', column: 'sales_code', definition: 'VARCHAR(191) NULL' },
   { table: 'vendor_plan_subscriptions', column: 'sales_user_id', definition: 'CHAR(36) NULL' },
   { table: 'vendors', column: 'profile_template_override', definition: "VARCHAR(32) NOT NULL DEFAULT 'AUTO'" },
+  { table: 'vendors', column: 'portfolio_settings', definition: 'JSON NULL' },
   { table: 'website_visitor_events', column: 'visitor_name', definition: 'TEXT NULL' },
   { table: 'website_visitor_events', column: 'visitor_email', definition: 'VARCHAR(191) NULL' },
   { table: 'website_visitor_events', column: 'visitor_phone', definition: 'VARCHAR(64) NULL' },

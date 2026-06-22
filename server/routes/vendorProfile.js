@@ -9,6 +9,7 @@ import { notifyRole, notifyUser } from '../lib/notify.js';
 import { consumeLeadForVendorWithCompat } from '../lib/leadConsumptionCompat.js';
 import { sendGuestBuyerOnboardingEmail } from '../lib/emailService.js';
 import {
+  asPlanObject,
   getPlanEntitlements,
   isPremiumPortfolioPlan,
 } from '../lib/vendorPlanCatalog.js';
@@ -1972,6 +1973,83 @@ async function consumeLeadForVendor({ vendorId, leadId, mode = 'AUTO', purchaseP
   });
 }
 
+const RESERVED_VENDOR_PROFILE_SLUGS = new Set([
+  'me',
+  'api',
+  'admin',
+  'login',
+  'register',
+  'dashboard',
+  'support',
+  'settings',
+  'products',
+  'pricing',
+  'blog',
+  'directory',
+  'vendor',
+  'vendors',
+  'indiantrademart',
+]);
+
+const cleanPortfolioText = (value = '', max = 220) =>
+  String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+
+const cleanPortfolioSlug = (value = '') =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\s_-]/g, '')
+    .replace(/[\s_]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+
+const cleanPortfolioList = (value, maxItems = 6, maxLength = 80) => {
+  const items = Array.isArray(value)
+    ? value
+    : String(value || '')
+        .split(',')
+        .map((item) => item.trim());
+  return Array.from(new Set(items.map((item) => cleanPortfolioText(item, maxLength)).filter(Boolean))).slice(0, maxItems);
+};
+
+const cleanPortfolioSections = (value) =>
+  (Array.isArray(value) ? value : [])
+    .map((section) => ({
+      title: cleanPortfolioText(section?.title, 90),
+      body: cleanPortfolioText(section?.body, 700),
+    }))
+    .filter((section) => section.title || section.body)
+    .slice(0, 6);
+
+const ensurePortfolioAccess = (condition, res, message) => {
+  if (condition) return true;
+  res.status(403).json({ success: false, error: message });
+  return false;
+};
+
+async function ensureVendorSlugAvailable(slug, vendorId) {
+  const normalized = cleanPortfolioSlug(slug);
+  if (!normalized || normalized.length < 3) {
+    throw new Error('Profile URL must be at least 3 characters.');
+  }
+  if (RESERVED_VENDOR_PROFILE_SLUGS.has(normalized)) {
+    throw new Error('This profile URL is reserved. Choose another one.');
+  }
+
+  const { data, error } = await db
+    .from('vendors')
+    .select('id')
+    .eq('slug', normalized)
+    .neq('id', vendorId)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw new Error(error.message || 'Unable to validate profile URL');
+  if (data?.id) throw new Error('This profile URL is already taken.');
+  return normalized;
+}
+
 // ✅ Current vendor profile (auth-required)
 router.get('/me', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
   try {
@@ -2081,6 +2159,137 @@ router.put('/me', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
     return res.json({ success: true, vendor: buildVendorResponse(data || { ...vendor, ...payload }) });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get('/me/portfolio-settings', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
+  try {
+    const vendor = buildVendorResponse(await decorateVendorProfilePresentation(await resolveVendorForUser(req.user)));
+    if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
+
+    const settings = asPlanObject(vendor.portfolio_settings);
+    const publicSlug = cleanPortfolioSlug(vendor.slug || vendor.vendor_id || vendor.id);
+
+    return res.json({
+      success: true,
+      vendor,
+      settings,
+      entitlements: vendor.plan_entitlements || null,
+      active_plan: vendor.active_plan || null,
+      public_profile_path: publicSlug ? `/directory/vendor/${publicSlug}` : '',
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.put('/me/portfolio-settings', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
+  try {
+    const vendorRaw = buildVendorResponse(await resolveVendorForUser(req.user));
+    if (!vendorRaw) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
+
+    const { subscription, plan } = await resolveActiveSubscriptionWithPlan(vendorRaw.id);
+    const entitlements = plan ? getPlanEntitlements(plan) : null;
+    const portfolio = entitlements?.portfolio || {};
+    const seo = entitlements?.seo || {};
+    const sitemap = entitlements?.sitemap || {};
+
+    const incoming = req.body || {};
+    const existing = asPlanObject(vendorRaw.portfolio_settings);
+    const next = {
+      ...existing,
+      updated_at: new Date().toISOString(),
+    };
+    const updatePayload = {
+      updated_at: new Date().toISOString(),
+    };
+
+    if (Object.prototype.hasOwnProperty.call(incoming, 'profile_slug')) {
+      if (!ensurePortfolioAccess(portfolio.custom_url, res, 'Custom profile URL is not available on your active plan.')) return;
+      const nextSlug = await ensureVendorSlugAvailable(incoming.profile_slug, vendorRaw.id);
+      updatePayload.slug = nextSlug;
+      next.profile_slug = nextSlug;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(incoming, 'profile_template')) {
+      const template = String(incoming.profile_template || '').trim().toUpperCase();
+      if (template && !['AUTO', 'STANDARD', 'PREMIUM'].includes(template)) {
+        return res.status(400).json({ success: false, error: 'Invalid profile template.' });
+      }
+      if (template === 'PREMIUM' && !portfolio.premium) {
+        return res.status(403).json({ success: false, error: 'Premium portfolio is not available on your active plan.' });
+      }
+      updatePayload.profile_template_override = template || 'AUTO';
+      next.profile_template = template || 'AUTO';
+    }
+
+    const hasPortfolioContent =
+      Object.prototype.hasOwnProperty.call(incoming, 'tagline') ||
+      Object.prototype.hasOwnProperty.call(incoming, 'intro') ||
+      Object.prototype.hasOwnProperty.call(incoming, 'featured_highlights') ||
+      Object.prototype.hasOwnProperty.call(incoming, 'custom_sections');
+
+    if (hasPortfolioContent) {
+      if (!ensurePortfolioAccess(portfolio.customizable || portfolio.custom_sections, res, 'Portfolio customization is not available on your active plan.')) return;
+      if (Object.prototype.hasOwnProperty.call(incoming, 'tagline')) next.tagline = cleanPortfolioText(incoming.tagline, 140);
+      if (Object.prototype.hasOwnProperty.call(incoming, 'intro')) next.intro = cleanPortfolioText(incoming.intro, 900);
+      if (Object.prototype.hasOwnProperty.call(incoming, 'featured_highlights')) {
+        next.featured_highlights = cleanPortfolioList(incoming.featured_highlights, 8, 70);
+      }
+      if (Object.prototype.hasOwnProperty.call(incoming, 'custom_sections')) {
+        if (!ensurePortfolioAccess(portfolio.custom_sections, res, 'Custom sections are not available on your active plan.')) return;
+        next.custom_sections = cleanPortfolioSections(incoming.custom_sections);
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(incoming, 'seo')) {
+      if (!ensurePortfolioAccess(seo.enabled, res, 'SEO profile controls are not available on your active plan.')) return;
+      const seoPayload = asPlanObject(incoming.seo);
+      next.seo = {
+        ...asPlanObject(existing.seo),
+        title: cleanPortfolioText(seoPayload.title, 90),
+        description: cleanPortfolioText(seoPayload.description, 220),
+        keywords: cleanPortfolioList(seoPayload.keywords, 15, 48),
+      };
+    }
+
+    if (Object.prototype.hasOwnProperty.call(incoming, 'sitemap')) {
+      if (!ensurePortfolioAccess(sitemap.customizable, res, 'Sitemap customization is not available on your active plan.')) return;
+      const sitemapPayload = asPlanObject(incoming.sitemap);
+      next.sitemap = {
+        ...asPlanObject(existing.sitemap),
+        enabled: sitemapPayload.enabled !== false,
+        priority_keywords: cleanPortfolioList(sitemapPayload.priority_keywords, 12, 48),
+      };
+    }
+
+    updatePayload.portfolio_settings = next;
+
+    const { data, error } = await db
+      .from('vendors')
+      .update(updatePayload)
+      .eq('id', vendorRaw.id)
+      .select('*')
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ success: false, error: error.message });
+
+    clearVendorCacheEntries(vendorRaw.id);
+    const vendor = buildVendorResponse(await decorateVendorProfilePresentation(data || { ...vendorRaw, ...updatePayload }));
+    const publicSlug = cleanPortfolioSlug(vendor.slug || vendor.vendor_id || vendor.id);
+
+    return res.json({
+      success: true,
+      vendor,
+      settings: asPlanObject(vendor.portfolio_settings),
+      entitlements,
+      active_plan: vendor.active_plan || (plan ? { id: plan.id, name: plan.name, price: Number(plan.price || 0), entitlements } : null),
+      active_subscription: subscription || null,
+      public_profile_path: publicSlug ? `/directory/vendor/${publicSlug}` : '',
+    });
+  } catch (e) {
+    const status = /taken|reserved|at least|invalid/i.test(String(e?.message || '')) ? 400 : 500;
+    return res.status(status).json({ success: false, error: e.message });
   }
 });
 

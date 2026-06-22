@@ -192,12 +192,8 @@ export const generateVendorCertificatePDF = ({ vendor = {}, plan = {}, subscript
 
   withOpacity(pdf, 0.07, () => {
     if (brandMark) {
-      pdf.addImage(brandMark, 'PNG', centerX - 142, 158, 284, 284, undefined, 'FAST');
+      pdf.addImage(brandMark, 'PNG', centerX - 155, 152, 310, 310, undefined, 'FAST');
     }
-    pdf.setFont('helvetica', 'bold');
-    pdf.setFontSize(52);
-    pdf.setTextColor(...colors.primary);
-    pdf.text('INDIANTRADEMART', centerX, 328, { align: 'center', angle: -24 });
   });
 
   pdf.setDrawColor(...colors.primary);
@@ -231,14 +227,14 @@ export const generateVendorCertificatePDF = ({ vendor = {}, plan = {}, subscript
   }
 
   pdf.setFont('helvetica', 'bold');
-  pdf.setFontSize(18);
-  pdf.setTextColor(...colors.primary);
-  pdf.text('INDIAN TRADE MART', centerX, 92, { align: 'center' });
+  pdf.setFontSize(10);
+  pdf.setTextColor(...colors.metal);
+  pdf.text('OFFICIAL VENDOR CERTIFICATE', centerX, 88, { align: 'center' });
 
   pdf.setFont('helvetica', 'normal');
-  pdf.setFontSize(8.5);
+  pdf.setFontSize(8);
   pdf.setTextColor(75, 85, 99);
-  pdf.text('CONNECT & GROW', centerX, 109, { align: 'center' });
+  pdf.text('INDIANTRADEMART VERIFIED BUSINESS PRESENCE', centerX, 106, { align: 'center' });
 
   pdf.setFillColor(...colors.primary);
   pdf.roundedRect(pageWidth - 190, 74, 112, 30, 15, 15, 'F');

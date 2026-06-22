@@ -1588,6 +1588,7 @@ CREATE TABLE IF NOT EXISTS `vendors` (
   `years_in_business` INT NULL,
   `response_rate` INT NULL,
   `slug` VARCHAR(191) NULL,
+  `portfolio_settings` JSON NULL,
   `status` VARCHAR(191) NULL,
   `suspension_at` DATETIME NULL,
   `suspension_reason` TEXT NULL,
