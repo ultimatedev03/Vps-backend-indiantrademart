@@ -12,6 +12,7 @@
     "storage:migrate:supabase": "node server/scripts/migrateSupabaseStorageToLocal.js",
     "search:setup": "node server/scripts/setupOpenSearchCatalog.js",
     "search:reindex": "node server/scripts/reindexOpenSearchProducts.js",
+    "plans:seed": "node server/scripts/seedVendorPlanCatalog.js",
     "admin:create": "node server/scripts/createAdmin.js",
     "admin:password": "node server/scripts/changeAdminPassword.js"
   },

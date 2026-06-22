@@ -8,6 +8,14 @@ import { optionalAuth, requireAuth } from '../middleware/requireAuth.js';
 import { notifyRole, notifyUser } from '../lib/notify.js';
 import { consumeLeadForVendorWithCompat } from '../lib/leadConsumptionCompat.js';
 import { sendGuestBuyerOnboardingEmail } from '../lib/emailService.js';
+import {
+  getPlanEntitlements,
+  isPremiumPortfolioPlan,
+} from '../lib/vendorPlanCatalog.js';
+import {
+  buildVendorCertificateMeta,
+  generateVendorCertificatePDF,
+} from '../lib/vendorCertificate.js';
 
 const router = express.Router();
 
@@ -592,12 +600,7 @@ const normalizeProfileTemplateOverride = (value = '') => {
 
 const isPremiumProfilePlan = (plan = null) => {
   if (!plan) return false;
-  const planName = String(plan?.name || '').trim().toLowerCase();
-  const price = Number(plan?.price || 0);
-  return (
-    price >= 100000 ||
-    ['premium', 'enterprise', 'diamond', 'platinum', 'gold', 'growth', 'pro'].some((word) => planName.includes(word))
-  );
+  return isPremiumPortfolioPlan(plan);
 };
 
 async function resolveActiveSubscriptionWithPlan(vendorId) {
@@ -625,6 +628,10 @@ async function decorateVendorProfilePresentation(vendor = null) {
 
   const override = normalizeProfileTemplateOverride(vendor.profile_template_override);
   const { subscription, plan } = await resolveActiveSubscriptionWithPlan(vendor.id);
+  const entitlements = plan ? getPlanEntitlements(plan) : null;
+  const certificate = plan && subscription
+    ? buildVendorCertificateMeta({ vendor, plan, subscription })
+    : null;
   const template = override === 'AUTO'
     ? (isPremiumProfilePlan(plan) ? 'PREMIUM' : 'STANDARD')
     : override;
@@ -648,8 +655,11 @@ async function decorateVendorProfilePresentation(vendor = null) {
           name: plan.name,
           price: Number(plan.price || 0),
           features: plan.features || null,
+          entitlements,
         }
       : null,
+    plan_entitlements: entitlements,
+    certificate,
   };
 }
 
@@ -1965,7 +1975,7 @@ async function consumeLeadForVendor({ vendorId, leadId, mode = 'AUTO', purchaseP
 // ✅ Current vendor profile (auth-required)
 router.get('/me', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
   try {
-    const vendor = buildVendorResponse(await resolveVendorForUser(req.user));
+    const vendor = buildVendorResponse(await decorateVendorProfilePresentation(await resolveVendorForUser(req.user)));
     if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
     const ck = `me:${vendor.id}`;
     const hit = _getCached(_cacheVendorMe, ck);
@@ -1973,6 +1983,71 @@ router.get('/me', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
     const payload = { success: true, vendor };
     _setCached(_cacheVendorMe, ck, payload, 30000);
     return res.json(payload);
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get('/me/certificate', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
+  try {
+    const vendor = buildVendorResponse(await resolveVendorForUser(req.user));
+    if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
+
+    const { subscription, plan } = await resolveActiveSubscriptionWithPlan(vendor.id);
+    const certificate = plan && subscription
+      ? buildVendorCertificateMeta({ vendor, plan, subscription })
+      : null;
+
+    if (!certificate) {
+      return res.status(403).json({
+        success: false,
+        error: 'Certificate is available only on certified sales-assisted plans.',
+      });
+    }
+
+    return res.json({
+      success: true,
+      certificate,
+      plan: plan
+        ? {
+            id: plan.id,
+            name: plan.name,
+            price: Number(plan.price || 0),
+            entitlements: getPlanEntitlements(plan),
+          }
+        : null,
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get('/me/certificate.pdf', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
+  try {
+    const vendor = buildVendorResponse(await resolveVendorForUser(req.user));
+    if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
+
+    const { subscription, plan } = await resolveActiveSubscriptionWithPlan(vendor.id);
+    const pdfBuffer = plan && subscription
+      ? generateVendorCertificatePDF({ vendor, plan, subscription })
+      : null;
+
+    if (!pdfBuffer) {
+      return res.status(403).json({
+        success: false,
+        error: 'Certificate is available only on certified sales-assisted plans.',
+      });
+    }
+
+    const safeVendorName = String(vendor.company_name || vendor.vendor_id || 'vendor')
+      .trim()
+      .replace(/[^a-zA-Z0-9_-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 80) || 'vendor';
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeVendorName}-indiantrademart-certificate.pdf"`);
+    return res.send(pdfBuffer);
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });
   }

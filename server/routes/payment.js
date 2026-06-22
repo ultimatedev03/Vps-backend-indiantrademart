@@ -15,6 +15,7 @@ import {
   getReferralOfferForVendor,
   normalizeReferralCode,
 } from '../lib/referralProgram.js';
+import { isDirectPurchasePlan, isVisibleCatalogPlan } from '../lib/vendorPlanCatalog.js';
 
 const router = express.Router();
 
@@ -463,6 +464,12 @@ router.post('/initiate', async (req, res) => {
       return res.status(404).json({ error: 'Plan not found' });
     }
 
+    if (!isDirectPurchasePlan(plan)) {
+      return res.status(400).json({
+        error: 'This plan is sales-assisted. Please contact the sales team to activate it.',
+      });
+    }
+
     const baseAmount = Number(plan.price || 0);
     if (!Number.isFinite(baseAmount) || baseAmount <= 0) {
       return res.status(400).json({ error: 'Invalid plan price' });
@@ -581,6 +588,12 @@ router.post('/verify', async (req, res) => {
 
     if (!vendor || !plan) {
       return res.status(404).json({ error: 'Vendor or plan not found' });
+    }
+
+    if (!isDirectPurchasePlan(plan)) {
+      return res.status(400).json({
+        error: 'This plan is sales-assisted and cannot be activated through self-serve checkout.',
+      });
     }
 
     // Coupon re-validation
@@ -1332,7 +1345,7 @@ router.get('/plans', async (req, res) => {
       return res.status(500).json({ error: error.message });
     }
 
-    res.json({ success: true, data: plans || [] });
+    res.json({ success: true, data: (plans || []).filter(isVisibleCatalogPlan) });
   } catch (error) {
     logger.error('Plans retrieval error:', error);
     res.status(500).json({ error: error.message });

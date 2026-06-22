@@ -28,6 +28,7 @@ import {
   searchVendors360,
   updateSearch360CaseStatus,
 } from '../lib/search360.js';
+import { normalizePlanFeatures } from '../lib/vendorPlanCatalog.js';
 
 const router = express.Router();
 
@@ -377,7 +378,7 @@ function buildPlanFeatures(existingFeatures, payload = {}) {
     if (citiesLimit !== undefined) next.cities_limit = citiesLimit;
   }
 
-  return next;
+  return normalizePlanFeatures(next, payload);
 }
 
 function isMissingVendorPlanColumnError(error, columnName) {
@@ -1479,7 +1480,24 @@ router.put('/plans/:planId', async (req, res) => {
       hasOwn(req.body, 'badge_label') ||
       hasOwn(req.body, 'badge_variant') ||
       hasOwn(req.body, 'states_limit') ||
-      hasOwn(req.body, 'cities_limit');
+      hasOwn(req.body, 'cities_limit') ||
+      hasOwn(req.body, 'purchase_channel') ||
+      hasOwn(req.body, 'public_purchase_enabled') ||
+      hasOwn(req.body, 'sales_assisted') ||
+      hasOwn(req.body, 'sales_cta_label') ||
+      hasOwn(req.body, 'portfolio_template') ||
+      hasOwn(req.body, 'portfolio_customizable') ||
+      hasOwn(req.body, 'custom_url_enabled') ||
+      hasOwn(req.body, 'portfolio_custom_sections') ||
+      hasOwn(req.body, 'sitemap_customization') ||
+      hasOwn(req.body, 'sitemap_url_boost') ||
+      hasOwn(req.body, 'certificate_enabled') ||
+      hasOwn(req.body, 'certificate_tier') ||
+      hasOwn(req.body, 'certificate_title') ||
+      hasOwn(req.body, 'certificate_label') ||
+      hasOwn(req.body, 'seo_enabled') ||
+      hasOwn(req.body, 'seo_url_aliases') ||
+      hasOwn(req.body, 'seo_city_category_pages');
 
     if (hasFeatureUpdate) {
       updates.features = buildPlanFeatures(existing.features, req.body);

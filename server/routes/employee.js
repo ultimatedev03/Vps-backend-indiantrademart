@@ -1,6 +1,7 @@
 import express from 'express';
 import { randomUUID } from 'crypto';
 import { db } from '../lib/dbClient.js';
+import { logger } from '../utils/logger.js';
 import { inferCloudinaryResourceType, isCloudinaryConfigured, uploadBufferToCloudinary } from '../lib/cloudinaryUpload.js';
 import { writeAuditLog } from '../lib/audit.js';
 import { hashPassword, normalizeEmail, normalizeRole, upsertPublicUser } from '../lib/auth.js';
@@ -15,6 +16,7 @@ import {
   searchVendors360,
   updateSearch360CaseStatus,
 } from '../lib/search360.js';
+import { getPlanEntitlements, isSalesAssistedPlan, isVisibleCatalogPlan } from '../lib/vendorPlanCatalog.js';
 
 const router = express.Router();
 
@@ -1703,10 +1705,12 @@ router.get('/sales/plans', requireAuth(), async (req, res) => {
 
     if (error) return res.status(500).json({ success: false, error: error.message || 'Failed to fetch plans' });
 
-    const plans = (data || []).map((plan) => ({
-      ...plan,
-      sales_link: buildSalesPlanLink(req, { planId: plan.id, salesCode: actor.salesCode }),
-    }));
+    const plans = (data || [])
+      .filter(isVisibleCatalogPlan)
+      .map((plan) => ({
+        ...plan,
+        sales_link: buildSalesPlanLink(req, { planId: plan.id, salesCode: actor.salesCode }),
+      }));
     return res.json({ success: true, plans });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message || 'Failed to fetch plans' });
@@ -2010,6 +2014,147 @@ router.post('/sales/plan-shares', requireAuth(), async (req, res) => {
     });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message || 'Failed to share plan' });
+  }
+});
+
+router.post('/sales/activate-plan', requireAuth(), async (req, res) => {
+  try {
+    const actor = await resolveSalesActor(req, res);
+    if (!actor) return;
+
+    const vendorId = normalizeTextValue(req.body?.vendor_id || '', 80);
+    const planId = normalizeTextValue(req.body?.plan_id || '', 80);
+    const notes = normalizeTextValue(req.body?.notes || '', 2000);
+    const amountRaw = Number(req.body?.amount ?? req.body?.net_amount ?? 0);
+    const amount = Number.isFinite(amountRaw) && amountRaw >= 0 ? amountRaw : 0;
+
+    if (!vendorId || !planId) {
+      return res.status(400).json({ success: false, error: 'vendor_id and plan_id are required' });
+    }
+
+    const [{ data: vendor, error: vendorError }, { data: plan, error: planError }] = await Promise.all([
+      db.from('vendors').select('id, vendor_id, company_name, email, phone').eq('id', vendorId).maybeSingle(),
+      db.from('vendor_plans').select('*').eq('id', planId).maybeSingle(),
+    ]);
+
+    if (vendorError) return res.status(500).json({ success: false, error: vendorError.message || 'Failed to validate vendor' });
+    if (planError) return res.status(500).json({ success: false, error: planError.message || 'Failed to validate plan' });
+    if (!vendor?.id) return res.status(404).json({ success: false, error: 'Vendor not found' });
+    if (!plan?.id || plan.is_active === false) return res.status(404).json({ success: false, error: 'Active plan not found' });
+
+    const entitlements = getPlanEntitlements(plan);
+    const durationDays = Math.max(1, Number(req.body?.duration_days || plan.duration_days || 365));
+    const startDate = new Date();
+    const endDate = new Date(startDate.getTime() + durationDays * 24 * 60 * 60 * 1000);
+
+    await db
+      .from('vendor_plan_subscriptions')
+      .update({ status: 'INACTIVE' })
+      .eq('vendor_id', vendorId)
+      .eq('status', 'ACTIVE');
+
+    const { data: subscription, error: subscriptionError } = await db
+      .from('vendor_plan_subscriptions')
+      .insert([{
+        vendor_id: vendorId,
+        plan_id: planId,
+        start_date: startDate.toISOString(),
+        end_date: endDate.toISOString(),
+        status: 'ACTIVE',
+        plan_duration_days: durationDays,
+        sales_code: actor.salesCode,
+        sales_user_id: actor.salesUserId,
+        auto_renewal_enabled: false,
+        renewal_notification_sent: false,
+      }])
+      .select('*')
+      .maybeSingle();
+
+    if (subscriptionError) {
+      return res.status(500).json({ success: false, error: subscriptionError.message || 'Failed to activate plan' });
+    }
+
+    const quotaPayload = {
+      vendor_id: vendorId,
+      plan_id: planId,
+      daily_used: 0,
+      daily_limit: Math.max(0, Number(plan?.daily_limit || 0)),
+      weekly_used: 0,
+      weekly_limit: Math.max(0, Number(plan?.weekly_limit || 0)),
+      yearly_used: 0,
+      yearly_limit: Math.max(0, Number(plan?.yearly_limit || 0)),
+      last_reset_date: startDate.toISOString(),
+      updated_at: startDate.toISOString(),
+    };
+
+    const { data: existingQuota } = await db
+      .from('vendor_lead_quota')
+      .select('id')
+      .eq('vendor_id', vendorId)
+      .maybeSingle();
+
+    if (existingQuota?.id) {
+      await db.from('vendor_lead_quota').update(quotaPayload).eq('vendor_id', vendorId);
+    } else {
+      await db.from('vendor_lead_quota').insert([quotaPayload]);
+    }
+
+    let payment = null;
+    if (amount > 0) {
+      const { data: paymentRow, error: paymentError } = await db
+        .from('vendor_payments')
+        .insert([{
+          vendor_id: vendorId,
+          plan_id: planId,
+          subscription_id: subscription?.id || null,
+          amount,
+          net_amount: amount,
+          discount_amount: 0,
+          description: `${plan.name} sales-assisted activation`,
+          status: 'COMPLETED',
+          payment_method: 'OFFLINE_SALES',
+          transaction_id: `SALES-${Date.now()}-${randomUUID().slice(0, 8)}`,
+          payment_date: startDate.toISOString(),
+          sales_code: actor.salesCode,
+          sales_user_id: actor.salesUserId,
+        }])
+        .select('*')
+        .maybeSingle();
+      if (paymentError) {
+        logger.warn('[sales] Offline payment record failed:', paymentError?.message || paymentError);
+      } else {
+        payment = paymentRow || null;
+      }
+    }
+
+    await writeAuditLog({
+      req,
+      actor: req.actor || { email: actor.employee.email, role: actor.employee.role },
+      action: isSalesAssistedPlan(plan) ? 'SALES_ASSISTED_PLAN_ACTIVATED' : 'SALES_PLAN_ACTIVATED',
+      entityType: 'vendor_plan_subscriptions',
+      entityId: subscription?.id || null,
+      details: {
+        vendor_id: vendorId,
+        plan_id: planId,
+        sales_code: actor.salesCode,
+        amount,
+        notes: notes || null,
+        entitlements,
+      },
+    });
+
+    return res.status(201).json({
+      success: true,
+      subscription,
+      payment,
+      vendor,
+      plan: {
+        ...plan,
+        entitlements,
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message || 'Failed to activate sales plan' });
   }
 });
 
