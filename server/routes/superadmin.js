@@ -1,6 +1,7 @@
 import { logger } from '../utils/logger.js';
 import express from 'express';
 import { db } from '../lib/dbClient.js';
+import { mysqlQuery } from '../lib/mysqlPool.js';
 import { notifyUser } from '../lib/notify.js';
 import { writeAuditLog } from '../lib/audit.js';
 import {
@@ -639,6 +640,89 @@ async function deleteVendorCascade(vendorId) {
   }
 
   return vendor;
+}
+
+async function loadVendorLeadStats(vendorIds = []) {
+  const ids = Array.from(new Set((vendorIds || []).map((id) => String(id || '').trim()).filter(Boolean)));
+  const emptyStats = () => ({
+    direct_total: 0,
+    direct_opened: 0,
+    direct_unopened: 0,
+    purchased_total: 0,
+    purchased_opened: 0,
+    purchased_unopened: 0,
+    total_leads: 0,
+    total_opened: 0,
+    total_unopened: 0,
+  });
+
+  const statsByVendor = new Map(ids.map((id) => [id, emptyStats()]));
+  if (!ids.length) return statsByVendor;
+
+  const placeholders = ids.map(() => '?').join(',');
+
+  const [directRows, purchaseRows] = await Promise.all([
+    mysqlQuery(
+      `SELECT vendor_id,
+              COUNT(*) AS direct_total,
+              SUM(
+                CASE
+                  WHEN UPPER(COALESCE(status, '')) NOT IN ('', 'NEW', 'OPEN', 'AVAILABLE')
+                  THEN 1 ELSE 0
+                END
+              ) AS direct_opened
+         FROM leads
+        WHERE vendor_id IN (${placeholders})
+        GROUP BY vendor_id`,
+      ids
+    ).catch((error) => {
+      logger.warn('[SuperAdmin] Direct lead stats failed:', error?.message || error);
+      return [];
+    }),
+    mysqlQuery(
+      `SELECT vendor_id,
+              COUNT(*) AS purchased_total,
+              SUM(
+                CASE
+                  WHEN UPPER(COALESCE(lead_status, '')) NOT IN ('', 'NEW', 'ACTIVE', 'UNREAD')
+                  THEN 1 ELSE 0
+                END
+              ) AS purchased_opened
+         FROM lead_purchases
+        WHERE vendor_id IN (${placeholders})
+        GROUP BY vendor_id`,
+      ids
+    ).catch((error) => {
+      logger.warn('[SuperAdmin] Purchased lead stats failed:', error?.message || error);
+      return [];
+    }),
+  ]);
+
+  (directRows || []).forEach((row) => {
+    const vendorId = String(row?.vendor_id || '').trim();
+    if (!vendorId || !statsByVendor.has(vendorId)) return;
+    const stats = statsByVendor.get(vendorId);
+    stats.direct_total = Number(row?.direct_total || 0);
+    stats.direct_opened = Number(row?.direct_opened || 0);
+    stats.direct_unopened = Math.max(0, stats.direct_total - stats.direct_opened);
+  });
+
+  (purchaseRows || []).forEach((row) => {
+    const vendorId = String(row?.vendor_id || '').trim();
+    if (!vendorId || !statsByVendor.has(vendorId)) return;
+    const stats = statsByVendor.get(vendorId);
+    stats.purchased_total = Number(row?.purchased_total || 0);
+    stats.purchased_opened = Number(row?.purchased_opened || 0);
+    stats.purchased_unopened = Math.max(0, stats.purchased_total - stats.purchased_opened);
+  });
+
+  statsByVendor.forEach((stats) => {
+    stats.total_leads = stats.direct_total + stats.purchased_total;
+    stats.total_opened = stats.direct_opened + stats.purchased_opened;
+    stats.total_unopened = stats.direct_unopened + stats.purchased_unopened;
+  });
+
+  return statsByVendor;
 }
 
 // -----------------------
@@ -1286,6 +1370,22 @@ router.get('/vendors', async (req, res) => {
       return res.status(500).json({ success: false, error: error.message });
     }
 
+    const statsByVendor = await loadVendorLeadStats((data || []).map((vendor) => vendor?.id));
+    const vendors = (data || []).map((vendor) => ({
+      ...vendor,
+      lead_stats: statsByVendor.get(vendor?.id) || {
+        direct_total: 0,
+        direct_opened: 0,
+        direct_unopened: 0,
+        purchased_total: 0,
+        purchased_opened: 0,
+        purchased_unopened: 0,
+        total_leads: 0,
+        total_opened: 0,
+        total_unopened: 0,
+      },
+    }));
+
     await writeAuditLog({
       req,
       actor: req.actor,
@@ -1296,7 +1396,7 @@ router.get('/vendors', async (req, res) => {
 
     return res.json({
       success: true,
-      vendors: data || [],
+      vendors,
       total: Number(count) || 0,
       limit,
       offset,
@@ -1587,17 +1687,40 @@ router.delete('/plans/:planId', async (req, res) => {
       });
     }
 
-    if ((activeSubscriptionCount || 0) > 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'Plan has active vendor subscriptions. Disable it instead of deleting.',
-      });
-    }
+    const hasDependencies =
+      (activeSubscriptionCount || 0) > 0 ||
+      (subscriptionHistoryCount || 0) > 0 ||
+      (paymentHistoryCount || 0) > 0;
 
-    if ((subscriptionHistoryCount || 0) > 0 || (paymentHistoryCount || 0) > 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'Plan has subscription/payment history. Keep it inactive instead of deleting.',
+    if (hasDependencies) {
+      const { data: hiddenPlan, error: hideError } = await updateVendorPlanWithFallback(planId, {
+        is_active: false,
+      });
+
+      if (hideError) {
+        return res.status(500).json({ success: false, error: hideError.message || 'Failed to hide plan' });
+      }
+
+      await writeAuditLog({
+        req,
+        actor: req.actor,
+        action: 'VENDOR_PLAN_HIDDEN_INSTEAD_OF_DELETED',
+        entityType: 'vendor_plans',
+        entityId: planId,
+        details: {
+          name: existing.name || null,
+          active_subscriptions: activeSubscriptionCount || 0,
+          subscription_history: subscriptionHistoryCount || 0,
+          payment_history: paymentHistoryCount || 0,
+        },
+      });
+
+      return res.json({
+        success: true,
+        planId,
+        plan: hiddenPlan || { ...existing, is_active: false },
+        soft_deleted: true,
+        message: 'Plan has active/history records, so it was hidden instead of hard deleted.',
       });
     }
 
@@ -1607,6 +1730,32 @@ router.delete('/plans/:planId', async (req, res) => {
       .eq('id', planId);
 
     if (deleteError) {
+      const { data: hiddenPlan, error: hideError } = await updateVendorPlanWithFallback(planId, {
+        is_active: false,
+      });
+
+      if (!hideError) {
+        await writeAuditLog({
+          req,
+          actor: req.actor,
+          action: 'VENDOR_PLAN_HIDDEN_AFTER_DELETE_FAILED',
+          entityType: 'vendor_plans',
+          entityId: planId,
+          details: {
+            name: existing.name || null,
+            delete_error: deleteError.message || null,
+          },
+        });
+
+        return res.json({
+          success: true,
+          planId,
+          plan: hiddenPlan || { ...existing, is_active: false },
+          soft_deleted: true,
+          message: 'Plan could not be hard deleted, so it was hidden from active catalog.',
+        });
+      }
+
       return res.status(500).json({ success: false, error: deleteError.message });
     }
 

@@ -2392,6 +2392,17 @@ router.put('/me/preferences', requireAuth({ roles: ['VENDOR'] }), async (req, re
     if (body.min_budget !== undefined) updates.min_budget = parseBudget(body.min_budget);
     if (body.max_budget !== undefined) updates.max_budget = parseBudget(body.max_budget);
 
+    const limits = await resolveActivePlanLimits(vendor.id);
+    if (Array.isArray(updates.preferred_states)) {
+      updates.preferred_states = updates.preferred_states.slice(0, Math.max(0, Number(limits.coverage.states_limit || 0)));
+    }
+    if (Array.isArray(updates.preferred_cities)) {
+      updates.preferred_cities = updates.preferred_cities.slice(0, Math.max(0, Number(limits.coverage.cities_limit || 0)));
+    }
+    if (Array.isArray(updates.preferred_micro_categories)) {
+      updates.preferred_micro_categories = updates.preferred_micro_categories.slice(0, Math.max(0, Number(limits.categories_limit || 0)));
+    }
+
     const { data: existing, error: existingError } = await db
       .from('vendor_preferences')
       .select('id')
@@ -2416,6 +2427,7 @@ router.put('/me/preferences', requireAuth({ roles: ['VENDOR'] }), async (req, re
       states: result.data?.preferred_states || [],
       cities: result.data?.preferred_cities || [],
       categories: result.data?.preferred_micro_categories || [],
+      ...limits.coverage,
     } });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });

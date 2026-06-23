@@ -1670,6 +1670,228 @@ router.patch('/sales/leads/:leadId/status', requireAuth(), async (req, res) => {
   }
 });
 
+router.get('/sales/lead-vendor-matches', requireAuth(), async (req, res) => {
+  try {
+    const actor = await resolveSalesActor(req, res);
+    if (!actor) return;
+
+    const limitRaw = Number(req.query?.limit || 30);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.trunc(limitRaw), 80) : 30;
+    const leadId = normalizeTextValue(req.query?.lead_id || '', 80);
+    let search = normalizeTextValue(req.query?.q || '', 160);
+
+    if (!search && leadId) {
+      const { data: lead, error: leadError } = await db
+        .from('leads')
+        .select('title, product_name, product_interest, category, description, message, city, state')
+        .eq('id', leadId)
+        .maybeSingle();
+      if (leadError) return res.status(500).json({ success: false, error: leadError.message || 'Failed to read lead' });
+      search = [
+        lead?.product_name,
+        lead?.product_interest,
+        lead?.title,
+        lead?.category,
+        lead?.description,
+        lead?.message,
+        lead?.city,
+        lead?.state,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .slice(0, 160);
+    }
+
+    const term = search.trim();
+    const like = `%${term}%`;
+    const where = [`COALESCE(v.is_active, 1) = 1`];
+    const params = [];
+
+    if (term) {
+      where.push(`(
+        LOWER(COALESCE(v.company_name, '')) LIKE LOWER(?)
+        OR LOWER(COALESCE(v.owner_name, '')) LIKE LOWER(?)
+        OR LOWER(COALESCE(v.vendor_id, '')) LIKE LOWER(?)
+        OR LOWER(COALESCE(v.email, '')) LIKE LOWER(?)
+        OR LOWER(COALESCE(v.phone, '')) LIKE LOWER(?)
+        OR LOWER(COALESCE(v.city, '')) LIKE LOWER(?)
+        OR LOWER(COALESCE(v.state, '')) LIKE LOWER(?)
+        OR LOWER(COALESCE(p.name, '')) LIKE LOWER(?)
+        OR LOWER(COALESCE(p.category, '')) LIKE LOWER(?)
+        OR LOWER(COALESCE(p.category_path, '')) LIKE LOWER(?)
+        OR LOWER(COALESCE(p.description, '')) LIKE LOWER(?)
+        OR LOWER(COALESCE(ap.plan_name, '')) LIKE LOWER(?)
+      )`);
+      params.push(like, like, like, like, like, like, like, like, like, like, like, like);
+    }
+
+    const rows = await mysqlQuery(
+      `SELECT
+          v.id,
+          v.vendor_id,
+          v.company_name,
+          v.owner_name,
+          v.email,
+          v.phone,
+          v.city,
+          v.state,
+          v.kyc_status,
+          COALESCE(v.is_verified, 0) AS is_verified,
+          COALESCE(v.profile_completion, 0) AS profile_completion,
+          COALESCE(MAX(ap.plan_price), 0) AS active_plan_price,
+          SUBSTRING_INDEX(GROUP_CONCAT(DISTINCT ap.plan_id ORDER BY ap.plan_price DESC SEPARATOR '||'), '||', 1) AS active_plan_id,
+          SUBSTRING_INDEX(GROUP_CONCAT(DISTINCT ap.plan_name ORDER BY ap.plan_price DESC SEPARATOR '||'), '||', 1) AS active_plan_name,
+          COUNT(DISTINCT CASE
+            WHEN ?
+             AND (
+              LOWER(COALESCE(p.name, '')) LIKE LOWER(?)
+              OR LOWER(COALESCE(p.category, '')) LIKE LOWER(?)
+              OR LOWER(COALESCE(p.category_path, '')) LIKE LOWER(?)
+              OR LOWER(COALESCE(p.description, '')) LIKE LOWER(?)
+             )
+            THEN p.id
+          END) AS matched_products,
+          MAX(CASE WHEN ? AND LOWER(COALESCE(v.company_name, '')) LIKE LOWER(?) THEN 1 ELSE 0 END) AS company_match,
+          MAX(CASE WHEN ? AND LOWER(COALESCE(ap.plan_name, '')) LIKE LOWER(?) THEN 1 ELSE 0 END) AS plan_match
+        FROM vendors v
+        LEFT JOIN products p
+          ON p.vendor_id = v.id
+         AND COALESCE(p.status, 'ACTIVE') = 'ACTIVE'
+        LEFT JOIN (
+          SELECT s.vendor_id, s.plan_id, p2.name AS plan_name, COALESCE(p2.price, 0) AS plan_price
+            FROM vendor_plan_subscriptions s
+            JOIN vendor_plans p2 ON p2.id = s.plan_id
+           WHERE s.status = 'ACTIVE'
+             AND (s.end_date IS NULL OR s.end_date > UTC_TIMESTAMP())
+        ) ap ON ap.vendor_id = v.id
+       WHERE ${where.join(' AND ')}
+       GROUP BY v.id, v.vendor_id, v.company_name, v.owner_name, v.email, v.phone, v.city, v.state, v.kyc_status, v.is_verified, v.profile_completion
+       ORDER BY
+          company_match DESC,
+          matched_products DESC,
+          active_plan_price DESC,
+          plan_match DESC,
+          v.company_name ASC
+       LIMIT ?`,
+      [
+        Boolean(term),
+        like,
+        like,
+        like,
+        like,
+        Boolean(term),
+        like,
+        Boolean(term),
+        like,
+        ...params,
+        limit,
+      ]
+    );
+
+    return res.json({ success: true, vendors: rows || [], query: term });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message || 'Failed to match vendors for lead' });
+  }
+});
+
+router.post('/sales/leads/:leadId/assign-vendor', requireAuth(), async (req, res) => {
+  try {
+    const actor = await resolveSalesActor(req, res);
+    if (!actor) return;
+
+    const leadId = normalizeTextValue(req.params?.leadId || '', 80);
+    const vendorId = normalizeTextValue(req.body?.vendor_id || '', 80);
+    const salesNote = normalizeTextValue(req.body?.sales_note || '', 1200);
+
+    if (!leadId || !vendorId) {
+      return res.status(400).json({ success: false, error: 'leadId and vendor_id are required' });
+    }
+
+    const [{ data: lead, error: leadError }, { data: vendor, error: vendorError }] = await Promise.all([
+      db.from('leads').select('*').eq('id', leadId).maybeSingle(),
+      db.from('vendors').select('id, vendor_id, company_name, email, phone, city, state').eq('id', vendorId).maybeSingle(),
+    ]);
+
+    if (leadError) return res.status(500).json({ success: false, error: leadError.message || 'Failed to validate lead' });
+    if (vendorError) return res.status(500).json({ success: false, error: vendorError.message || 'Failed to validate vendor' });
+    if (!lead?.id) return res.status(404).json({ success: false, error: 'Lead not found' });
+    if (!vendor?.id) return res.status(404).json({ success: false, error: 'Vendor not found' });
+
+    const updates = {
+      vendor_id: vendorId,
+      assigned_to: actor.employee.id,
+      assigned_sales_user_id: actor.salesUserId,
+      status: 'SENT_TO_VENDOR',
+      updated_at: new Date().toISOString(),
+    };
+    if (salesNote) updates.sales_note = salesNote;
+
+    let { data: updatedLead, error: updateError } = await db
+      .from('leads')
+      .update(updates)
+      .eq('id', leadId)
+      .select('*')
+      .maybeSingle();
+
+    if (updateError && updates.sales_note !== undefined && isMissingColumnError(updateError, 'sales_note')) {
+      const retryUpdates = { ...updates };
+      delete retryUpdates.sales_note;
+      ({ data: updatedLead, error: updateError } = await db
+        .from('leads')
+        .update(retryUpdates)
+        .eq('id', leadId)
+        .select('*')
+        .maybeSingle());
+    }
+
+    if (updateError) {
+      return res.status(500).json({ success: false, error: updateError.message || 'Failed to assign lead' });
+    }
+
+    try {
+      await db.from('sales_vendor_engagements').insert([
+        {
+          vendor_id: vendorId,
+          lead_id: leadId,
+          sales_user_id: actor.salesUserId,
+          engagement_type: 'LEAD_HANDOFF',
+          channel: 'SALES_PORTAL',
+          status: 'SENT',
+          notes: salesNote || null,
+          sales_code: actor.salesCode,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ]);
+    } catch (engagementError) {
+      logger.warn('[sales/leads/assign-vendor] engagement insert failed:', engagementError?.message || engagementError);
+    }
+
+    await writeAuditLog({
+      req,
+      actor: req.actor || { email: actor.employee.email, role: actor.employee.role },
+      action: 'SALES_LEAD_ASSIGNED_TO_VENDOR',
+      entityType: 'leads',
+      entityId: leadId,
+      details: {
+        vendor_id: vendorId,
+        vendor_name: vendor.company_name || null,
+        sales_user_id: actor.salesUserId,
+      },
+    });
+
+    return res.json({
+      success: true,
+      lead: {
+        ...(updatedLead || { ...lead, ...updates }),
+        assigned_vendor: vendor,
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message || 'Failed to assign lead to vendor' });
+  }
+});
+
 router.get('/sales/profile', requireAuth(), async (req, res) => {
   try {
     const actor = await resolveSalesActor(req, res);

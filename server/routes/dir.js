@@ -317,12 +317,30 @@ function buildHybridWhere({
     params.push(headCategoryId);
   }
   if (stateId) {
-    where.push('v.state_id = ?');
-    params.push(stateId);
+    where.push(`(
+      (
+        JSON_LENGTH(COALESCE(vpref.preferred_states, JSON_ARRAY())) > 0
+        AND JSON_CONTAINS(COALESCE(vpref.preferred_states, JSON_ARRAY()), JSON_QUOTE(?))
+      )
+      OR (
+        JSON_LENGTH(COALESCE(vpref.preferred_states, JSON_ARRAY())) = 0
+        AND v.state_id = ?
+      )
+    )`);
+    params.push(stateId, stateId);
   }
   if (cityId) {
-    where.push('v.city_id = ?');
-    params.push(cityId);
+    where.push(`(
+      (
+        JSON_LENGTH(COALESCE(vpref.preferred_cities, JSON_ARRAY())) > 0
+        AND JSON_CONTAINS(COALESCE(vpref.preferred_cities, JSON_ARRAY()), JSON_QUOTE(?))
+      )
+      OR (
+        JSON_LENGTH(COALESCE(vpref.preferred_cities, JSON_ARRAY())) = 0
+        AND v.city_id = ?
+      )
+    )`);
+    params.push(cityId, cityId);
   }
 
   if (q && !broad) {
@@ -440,6 +458,7 @@ async function runHybridMysqlSearch({
         AND vps.status = 'ACTIVE'
         AND (vps.end_date IS NULL OR vps.end_date > UTC_TIMESTAMP())
        LEFT JOIN vendor_plans vp ON vp.id = vps.plan_id
+       LEFT JOIN vendor_preferences vpref ON vpref.vendor_id = p.vendor_id
       WHERE ${where.join(' AND ')}
       ORDER BY ${orderSqlForHybrid(sort)}
       LIMIT ${limit} OFFSET ${offset}`,
@@ -461,7 +480,8 @@ async function runHybridMysqlSearch({
 }
 
 async function runHybridSearchWithFallback(args) {
-  if (args?.q && isOpenSearchCatalogEnabled()) {
+  const hasCoverageFilter = Boolean(args?.stateId || args?.cityId);
+  if (args?.q && !hasCoverageFilter && isOpenSearchCatalogEnabled()) {
     try {
       const result = await searchOpenSearchProducts(args);
       if (result.rows?.length) return result;
@@ -1574,6 +1594,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
 
     const exactAvailable = rows.length > 0;
     let scopedRecommendations = [];
+    let locationRelaxed = false;
     if (!exactAvailable && q) {
       for (const scope of fallbackScopes) {
         const scoped = await runHybridSearchWithFallback({
@@ -1609,7 +1630,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
       }
     }
 
-    const recommendations = exactAvailable
+    let recommendations = exactAvailable
       ? []
       : (scopedRecommendations.length
           ? scopedRecommendations
@@ -1623,29 +1644,78 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
               limit,
               fallbackScopes,
             }));
+    let recommendationStateId = stateId;
+    let recommendationCityId = cityId;
+
+    if (!exactAvailable && !recommendations.length && q && (stateId || cityId)) {
+      locationRelaxed = true;
+      recommendationStateId = null;
+      recommendationCityId = null;
+
+      for (const scope of fallbackScopes) {
+        const scoped = await runHybridSearchWithFallback({
+          q,
+          ...scope,
+          stateId: null,
+          cityId: null,
+          sort,
+          limit,
+          offset: 0,
+        });
+        if (scoped.rows.length) {
+          recommendations = await augmentWithBroadCategoryRows({
+            rows: scoped.rows,
+            fallbackScopes,
+            stateId: null,
+            cityId: null,
+            sort,
+            limit,
+          });
+          break;
+        }
+      }
+
+      if (!recommendations.length) {
+        recommendations = await fetchRecommendedProducts({
+          req,
+          q,
+          microId,
+          stateId: null,
+          cityId: null,
+          sort,
+          limit,
+          fallbackScopes,
+        });
+      }
+    }
 
     const responseRows = exactAvailable
       ? rows
       : await augmentWithBroadCategoryRows({
           rows: recommendations,
           fallbackScopes,
-          stateId,
-          cityId,
+          stateId: recommendationStateId,
+          cityId: recommendationCityId,
           sort,
           limit,
         });
     const hasResults = responseRows.length > 0;
     const searchEngine = responseRows.some((row) => row?.__searchEngine === 'opensearch') ? 'opensearch' : 'mysql';
+    const availabilityMessage = exactAvailable
+      ? ''
+      : (locationRelaxed
+          ? 'This product is currently not available in the selected location. You may like these similar products from other locations.'
+          : 'This product is currently not available. You may like these similar products.');
     const response = {
       success: true,
       data: responseRows,
       count: exactAvailable ? Math.max(totalCount, responseRows.length) : responseRows.length,
       recommendations: exactAvailable ? [] : responseRows,
       availability: {
-        exactAvailable: hasResults,
-        message: hasResults
-          ? ''
-          : 'This product is currently not available. You may like these similar products.',
+        exactAvailable,
+        hasResults,
+        locationRelaxed,
+        message: availabilityMessage,
       },
       meta: {
         searchMode: searchEngine === 'opensearch' ? 'opensearch_hybrid' : 'hybrid',
@@ -1655,6 +1725,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
         fullText: true,
         semantic: true,
         personalized: Boolean(personalized),
+        locationRelaxed,
         page,
         limit,
       },
