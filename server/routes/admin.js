@@ -40,6 +40,15 @@ function getAdminScope(req) {
 
 const SYSTEM_CONFIG_KEY = "maintenance_mode";
 
+const booleanValue = (value, fallback = false) => {
+  if (value === true || value === 1) return true;
+  if (value === false || value === 0) return false;
+  const token = String(value ?? "").trim().toLowerCase();
+  if (["true", "1", "yes", "y", "on"].includes(token)) return true;
+  if (["false", "0", "no", "n", "off"].includes(token)) return false;
+  return fallback;
+};
+
 async function ensureAdminSystemConfigRow(adminId) {
   const { data, error } = await db
     .from("system_config")
@@ -646,7 +655,15 @@ async function createSupportStatusTicket({
 router.get("/system-config", async (req, res) => {
   try {
     const row = await ensureAdminSystemConfigRow(req.employee?.id || req.user?.id);
-    return res.json({ success: true, config: row });
+    return res.json({
+      success: true,
+      config: {
+        ...row,
+        maintenance_mode: booleanValue(row?.maintenance_mode, false),
+        allow_vendor_registration: booleanValue(row?.allow_vendor_registration, true),
+        public_notice_enabled: booleanValue(row?.public_notice_enabled, false),
+      },
+    });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message || "Failed to load settings" });
   }
@@ -660,19 +677,19 @@ router.put("/system-config", async (req, res) => {
 
     const payload = {
       config_key: SYSTEM_CONFIG_KEY,
-      maintenance_mode: req.body?.maintenance_mode === true,
+      maintenance_mode: booleanValue(req.body?.maintenance_mode, false),
       maintenance_message: String(req.body?.maintenance_message ?? existing.maintenance_message ?? ""),
       allow_vendor_registration:
-        typeof req.body?.allow_vendor_registration === "boolean"
-          ? req.body.allow_vendor_registration
-          : existing.allow_vendor_registration ?? true,
+        Object.prototype.hasOwnProperty.call(req.body || {}, "allow_vendor_registration")
+          ? booleanValue(req.body?.allow_vendor_registration, true)
+          : booleanValue(existing.allow_vendor_registration, true),
       commission_rate: Number.isFinite(commissionRate)
         ? Math.min(Math.max(commissionRate, 0), 100)
         : existing.commission_rate ?? 5,
       max_upload_size_mb: Number.isFinite(maxUploadSizeMb)
         ? Math.min(Math.max(maxUploadSizeMb, 1), 100)
         : existing.max_upload_size_mb ?? 10,
-      public_notice_enabled: existing.public_notice_enabled === true,
+      public_notice_enabled: booleanValue(existing.public_notice_enabled, false),
       public_notice_message: existing.public_notice_message || "",
       public_notice_variant: existing.public_notice_variant || "info",
       updated_at: new Date().toISOString(),
@@ -701,7 +718,16 @@ router.put("/system-config", async (req, res) => {
       },
     });
 
-    return res.json({ success: true, config: data || payload });
+    const saved = data || payload;
+    return res.json({
+      success: true,
+      config: {
+        ...saved,
+        maintenance_mode: booleanValue(saved?.maintenance_mode, false),
+        allow_vendor_registration: booleanValue(saved?.allow_vendor_registration, true),
+        public_notice_enabled: booleanValue(saved?.public_notice_enabled, false),
+      },
+    });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message || "Failed to save settings" });
   }

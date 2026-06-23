@@ -62,6 +62,15 @@ const normalizeImpersonationTarget = (value) => {
   return IMPERSONATION_TARGETS.has(normalized) ? normalized : '';
 };
 
+const normalizeBooleanInput = (value, fallback = false) => {
+  if (value === true || value === 1) return true;
+  if (value === false || value === 0) return false;
+  const token = String(value ?? '').trim().toLowerCase();
+  if (['true', '1', 'yes', 'y', 'on'].includes(token)) return true;
+  if (['false', '0', 'no', 'n', 'off'].includes(token)) return false;
+  return fallback;
+};
+
 async function findPublicUserByEmail(email) {
   const target = normalizeEmail(email);
   if (!target) return null;
@@ -1496,7 +1505,7 @@ router.post('/plans', async (req, res) => {
       weekly_limit: toNonNegativeInteger(req.body?.weekly_limit, 0),
       yearly_limit: toNonNegativeInteger(req.body?.yearly_limit, 0),
       duration_days: toPositiveInteger(req.body?.duration_days, 365),
-      is_active: req.body?.is_active !== false,
+      is_active: normalizeBooleanInput(req.body?.is_active, true),
       features: buildPlanFeatures({}, req.body),
     };
 
@@ -1567,7 +1576,7 @@ router.put('/plans/:planId', async (req, res) => {
     if (hasOwn(req.body, 'weekly_limit')) updates.weekly_limit = toNonNegativeInteger(req.body?.weekly_limit, 0);
     if (hasOwn(req.body, 'yearly_limit')) updates.yearly_limit = toNonNegativeInteger(req.body?.yearly_limit, 0);
     if (hasOwn(req.body, 'duration_days')) updates.duration_days = toPositiveInteger(req.body?.duration_days, 365);
-    if (hasOwn(req.body, 'is_active')) updates.is_active = req.body?.is_active === true;
+    if (hasOwn(req.body, 'is_active')) updates.is_active = normalizeBooleanInput(req.body?.is_active, false);
 
     const hasFeatureUpdate =
       hasOwn(req.body, 'features') ||
@@ -1864,7 +1873,15 @@ router.get('/finance/payments', async (req, res) => {
 router.get('/system-config', async (req, res) => {
   try {
     const row = await ensureSystemConfigRow(req.superadmin?.id);
-    return res.json({ success: true, config: row });
+    return res.json({
+      success: true,
+      config: {
+        ...row,
+        maintenance_mode: normalizeBooleanInput(row?.maintenance_mode, false),
+        allow_vendor_registration: normalizeBooleanInput(row?.allow_vendor_registration, true),
+        public_notice_enabled: normalizeBooleanInput(row?.public_notice_enabled, false),
+      },
+    });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
@@ -1876,19 +1893,19 @@ router.put('/system-config', async (req, res) => {
 
     const payload = {
       config_key: 'maintenance_mode',
-      maintenance_mode: req.body?.maintenance_mode === true,
+      maintenance_mode: normalizeBooleanInput(req.body?.maintenance_mode, false),
       maintenance_message: String(req.body?.maintenance_message || ''),
       allow_vendor_registration:
-        typeof req.body?.allow_vendor_registration === 'boolean'
-          ? req.body.allow_vendor_registration
-          : existing.allow_vendor_registration ?? true,
+        hasOwn(req.body || {}, 'allow_vendor_registration')
+          ? normalizeBooleanInput(req.body?.allow_vendor_registration, true)
+          : normalizeBooleanInput(existing.allow_vendor_registration, true),
       commission_rate:
         req.body?.commission_rate != null ? Number(req.body.commission_rate) || 0 : existing.commission_rate,
       max_upload_size_mb:
         req.body?.max_upload_size_mb != null
           ? Number(req.body.max_upload_size_mb) || 0
           : existing.max_upload_size_mb,
-      public_notice_enabled: req.body?.public_notice_enabled === true,
+      public_notice_enabled: normalizeBooleanInput(req.body?.public_notice_enabled, false),
       public_notice_message: String(req.body?.public_notice_message || ''),
       public_notice_variant: String(req.body?.public_notice_variant || existing.public_notice_variant || 'info'),
       updated_at: nowIso(),
@@ -1919,7 +1936,16 @@ router.put('/system-config', async (req, res) => {
       },
     });
 
-    return res.json({ success: true, config: data || payload });
+    const saved = data || payload;
+    return res.json({
+      success: true,
+      config: {
+        ...saved,
+        maintenance_mode: normalizeBooleanInput(saved?.maintenance_mode, false),
+        allow_vendor_registration: normalizeBooleanInput(saved?.allow_vendor_registration, true),
+        public_notice_enabled: normalizeBooleanInput(saved?.public_notice_enabled, false),
+      },
+    });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
@@ -1939,7 +1965,13 @@ router.get('/page-status', async (_req, res) => {
       return res.status(500).json({ success: false, error: error.message });
     }
 
-    return res.json({ success: true, pages: data || [] });
+    return res.json({
+      success: true,
+      pages: (data || []).map((page) => ({
+        ...page,
+        is_blanked: normalizeBooleanInput(page?.is_blanked, false),
+      })),
+    });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
@@ -1999,7 +2031,9 @@ router.put('/page-status/:pageId', async (req, res) => {
       updated_at: nowIso(),
     };
 
-    if (typeof req.body?.is_blanked === 'boolean') updates.is_blanked = req.body.is_blanked;
+    if (hasOwn(req.body || {}, 'is_blanked')) {
+      updates.is_blanked = normalizeBooleanInput(req.body?.is_blanked, false);
+    }
     if (req.body?.error_message != null) updates.error_message = String(req.body.error_message || '');
     if (req.body?.page_title != null) updates.page_title = String(req.body.page_title || '');
     if (req.body?.page_description != null) updates.page_description = String(req.body.page_description || '');
@@ -2024,7 +2058,10 @@ router.put('/page-status/:pageId', async (req, res) => {
       details: updates,
     });
 
-    return res.json({ success: true, page: data || null });
+    return res.json({
+      success: true,
+      page: data ? { ...data, is_blanked: normalizeBooleanInput(data?.is_blanked, false) } : null,
+    });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
