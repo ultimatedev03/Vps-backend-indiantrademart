@@ -183,6 +183,39 @@ const resolvePlanBillingQuote = (plan, requestedBillingCycle = 'YEARLY') => {
   return getPlanBillingQuote(plan, billingCycle);
 };
 
+const toPlanLimit = (value) => Math.max(0, Number(value || 0));
+
+async function upsertVendorLeadQuota({ vendor_id, plan_id, plan, resetDate = new Date() }) {
+  const resetIso = resetDate instanceof Date ? resetDate.toISOString() : new Date(resetDate).toISOString();
+  const quotaPayload = {
+    vendor_id,
+    plan_id,
+    daily_used: 0,
+    daily_limit: toPlanLimit(plan?.daily_limit),
+    weekly_used: 0,
+    weekly_limit: toPlanLimit(plan?.weekly_limit),
+    yearly_used: 0,
+    yearly_limit: toPlanLimit(plan?.yearly_limit),
+    last_reset_date: resetIso,
+    updated_at: resetIso,
+  };
+
+  const { data: existingQuota } = await db
+    .from('vendor_lead_quota')
+    .select('id')
+    .eq('vendor_id', vendor_id)
+    .maybeSingle();
+
+  if (existingQuota?.id) {
+    return db
+      .from('vendor_lead_quota')
+      .update(quotaPayload)
+      .eq('vendor_id', vendor_id);
+  }
+
+  return db.from('vendor_lead_quota').insert([quotaPayload]);
+}
+
 const normalizeCountryCode = (value) => {
   const code = String(value || '')
     .trim()
@@ -489,33 +522,7 @@ async function activateCouponCoveredSubscription({
     throw error;
   }
 
-  const quotaPayload = {
-    vendor_id,
-    plan_id,
-    daily_used: 0,
-    daily_limit: Math.max(0, Number(plan?.daily_limit || 0)),
-    weekly_used: 0,
-    weekly_limit: Math.max(0, Number(plan?.weekly_limit || 0)),
-    yearly_used: 0,
-    yearly_limit: 0,
-    last_reset_date: startDate.toISOString(),
-    updated_at: startDate.toISOString(),
-  };
-
-  const { data: existingQuota } = await db
-    .from('vendor_lead_quota')
-    .select('id')
-    .eq('vendor_id', vendor_id)
-    .maybeSingle();
-
-  if (existingQuota?.id) {
-    await db
-      .from('vendor_lead_quota')
-      .update(quotaPayload)
-      .eq('vendor_id', vendor_id);
-  } else {
-    await db.from('vendor_lead_quota').insert([quotaPayload]);
-  }
+  await upsertVendorLeadQuota({ vendor_id, plan_id, plan, resetDate: startDate });
 
   const transactionId = `COUPON-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
   const invoicePdfData = {
@@ -884,6 +891,37 @@ router.post('/verify', async (req, res) => {
       return res.status(400).json({ error: 'Invalid payment signature' });
     }
 
+    const { data: existingPayment, error: existingPaymentError } = await db
+      .from('vendor_payments')
+      .select('*')
+      .eq('transaction_id', payment_id)
+      .maybeSingle();
+
+    if (existingPaymentError) {
+      logger.warn('[payment] existing payment lookup failed:', existingPaymentError?.message || existingPaymentError);
+    }
+
+    if (existingPayment?.id) {
+      let existingSubscription = null;
+      if (existingPayment.subscription_id) {
+        const { data: subRow } = await db
+          .from('vendor_plan_subscriptions')
+          .select('*')
+          .eq('id', existingPayment.subscription_id)
+          .maybeSingle();
+        existingSubscription = subRow || null;
+      }
+
+      return res.json({
+        success: true,
+        message: 'Payment already verified and subscription is active',
+        already_verified: true,
+        billing_cycle: existingPayment.billing_cycle || normalizeBillingCycle(req.body?.billing_cycle),
+        subscription: existingSubscription,
+        payment: existingPayment,
+      });
+    }
+
     // Fetch vendor and plan
     const { data: vendor } = await db
       .from('vendors')
@@ -986,35 +1024,7 @@ router.post('/verify', async (req, res) => {
       return res.status(500).json({ error: 'Failed to create subscription' });
     }
 
-    const quotaPayload = {
-      vendor_id,
-      plan_id,
-      daily_used: 0,
-      daily_limit: Math.max(0, Number(plan?.daily_limit || 0)),
-      weekly_used: 0,
-      weekly_limit: Math.max(0, Number(plan?.weekly_limit || 0)),
-      yearly_used: 0,
-      yearly_limit: 0,
-      last_reset_date: startDate.toISOString(),
-      updated_at: startDate.toISOString(),
-    };
-
-    const { data: existingQuota } = await db
-      .from('vendor_lead_quota')
-      .select('id')
-      .eq('vendor_id', vendor_id)
-      .maybeSingle();
-
-    if (existingQuota?.id) {
-      await db
-        .from('vendor_lead_quota')
-        .update(quotaPayload)
-        .eq('vendor_id', vendor_id);
-    } else {
-      await db
-        .from('vendor_lead_quota')
-        .insert([quotaPayload]);
-    }
+    await upsertVendorLeadQuota({ vendor_id, plan_id, plan, resetDate: startDate });
 
     // Record payment
     const invoicePdfData = {
