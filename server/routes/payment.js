@@ -15,7 +15,13 @@ import {
   getReferralOfferForVendor,
   normalizeReferralCode,
 } from '../lib/referralProgram.js';
-import { isDirectPurchasePlan, isVisibleCatalogPlan } from '../lib/vendorPlanCatalog.js';
+import {
+  getPlanBillingQuote,
+  isDirectPurchasePlan,
+  isMonthlyBillingEnabled,
+  isVisibleCatalogPlan,
+  normalizeBillingCycle,
+} from '../lib/vendorPlanCatalog.js';
 
 const router = express.Router();
 
@@ -166,6 +172,15 @@ const getPlanCurrency = (plan) => {
     .trim()
     .toUpperCase();
   return currency || 'INR';
+};
+
+const resolvePlanBillingQuote = (plan, requestedBillingCycle = 'YEARLY') => {
+  const billingCycle = normalizeBillingCycle(requestedBillingCycle);
+  if (billingCycle === 'MONTHLY' && !isMonthlyBillingEnabled(plan)) {
+    throw new Error('Monthly payment is available only for Startup, Certified and Booster plans.');
+  }
+
+  return getPlanBillingQuote(plan, billingCycle);
 };
 
 const normalizeCountryCode = (value) => {
@@ -428,6 +443,7 @@ async function resolveOfferForPayment({
 router.post('/initiate', async (req, res) => {
   try {
     const { vendor_id, plan_id } = req.body;
+    const requestedBillingCycle = normalizeBillingCycle(req.body?.billing_cycle);
     const coupon_code = normalizeCouponCode(req.body?.coupon_code);
     const salesAttribution = await resolveSalesAttribution(req.body?.sales_code || req.query?.sales_code);
 
@@ -470,7 +486,14 @@ router.post('/initiate', async (req, res) => {
       });
     }
 
-    const baseAmount = Number(plan.price || 0);
+    let billingQuote;
+    try {
+      billingQuote = resolvePlanBillingQuote(plan, requestedBillingCycle);
+    } catch (quoteError) {
+      return res.status(400).json({ error: quoteError.message || 'Invalid billing cycle' });
+    }
+
+    const baseAmount = Number(billingQuote.amount || 0);
     if (!Number.isFinite(baseAmount) || baseAmount <= 0) {
       return res.status(400).json({ error: 'Invalid plan price' });
     }
@@ -514,6 +537,8 @@ router.post('/initiate', async (req, res) => {
         plan_id,
         vendor_email: vendor.email,
         vendor_name: vendor.company_name,
+        billing_cycle: billingQuote.billing_cycle,
+        plan_duration_days: String(billingQuote.duration_days || ''),
         coupon_code: offerCode || '',
         sales_code: salesAttribution.salesCode || '',
       },
@@ -531,8 +556,12 @@ router.post('/initiate', async (req, res) => {
         vendor_id,
         plan_id,
         plan_name: plan.name,
+        billing_cycle: billingQuote.billing_cycle,
+        billing_label: billingQuote.label,
+        plan_duration_days: billingQuote.duration_days,
         vendor_email: vendor.email,
         net_amount: netAmount,
+        base_amount: baseAmount,
         discount_amount: discountAmount,
         coupon_code: offerCode || null,
         offer_type: offerType,
@@ -555,6 +584,7 @@ router.post('/initiate', async (req, res) => {
 router.post('/verify', async (req, res) => {
   try {
     const { order_id, payment_id, signature, vendor_id, plan_id } = req.body;
+    const requestedBillingCycle = normalizeBillingCycle(req.body?.billing_cycle);
     const coupon_code = normalizeCouponCode(req.body?.coupon_code);
     const salesAttribution = await resolveSalesAttribution(req.body?.sales_code || req.query?.sales_code);
 
@@ -596,27 +626,55 @@ router.post('/verify', async (req, res) => {
       });
     }
 
+    let orderDetails = null;
+    try {
+      orderDetails = await razorpayInstance.orders.fetch(order_id);
+    } catch (orderFetchError) {
+      logger.warn('[payment] Razorpay order fetch failed:', orderFetchError?.message || orderFetchError);
+    }
+
+    const orderBillingCycle = normalizeBillingCycle(orderDetails?.notes?.billing_cycle || requestedBillingCycle);
+    let billingQuote;
+    try {
+      billingQuote = resolvePlanBillingQuote(plan, orderBillingCycle);
+    } catch (quoteError) {
+      return res.status(400).json({ error: quoteError.message || 'Invalid billing cycle' });
+    }
+
     // Coupon re-validation
     const offer = await resolveOfferForPayment({
       couponCode: coupon_code,
       vendor,
       plan,
-      baseAmount: Number(plan.price || 0),
+      baseAmount: Number(billingQuote.amount || 0),
       strictCoupon: false,
     });
     const discountAmount = Number(offer?.discountAmount || 0);
-    const netAmount = Number(offer?.netAmount ?? Number(plan.price || 0));
+    const netAmount = Number(offer?.netAmount ?? Number(billingQuote.amount || 0));
     const coupon = offer?.coupon || null;
     const offerType = offer?.offerType || null;
     const offerCode = offer?.offerCode || (coupon_code || null);
     const referralId = offer?.referralId || null;
+
+    if (orderDetails?.amount !== undefined && orderDetails?.amount !== null) {
+      const expectedAmount = Math.max(1, Math.round(netAmount * 100));
+      if (Number(orderDetails.amount) !== expectedAmount) {
+        logger.warn('[payment] order amount mismatch', {
+          order_id,
+          expectedAmount,
+          receivedAmount: orderDetails.amount,
+          billing_cycle: billingQuote.billing_cycle,
+        });
+        return res.status(400).json({ error: 'Payment amount mismatch. Please restart checkout.' });
+      }
+    }
 
     const invoiceNumber = generateInvoiceNumber();
 
     // Create subscription
     const startDate = new Date();
     const endDate = new Date(startDate);
-    endDate.setDate(endDate.getDate() + (plan.duration_days || 365));
+    endDate.setDate(endDate.getDate() + (billingQuote.duration_days || 365));
 
     await db
       .from('vendor_plan_subscriptions')
@@ -633,7 +691,8 @@ router.post('/verify', async (req, res) => {
           start_date: startDate.toISOString(),
           end_date: endDate.toISOString(),
           status: 'ACTIVE',
-          plan_duration_days: plan.duration_days || 365,
+          plan_duration_days: billingQuote.duration_days || 365,
+          billing_cycle: billingQuote.billing_cycle,
           sales_code: salesAttribution.salesCode || null,
           sales_user_id: salesAttribution.salesUserId || null,
         },
@@ -683,7 +742,7 @@ router.post('/verify', async (req, res) => {
       dueDate: new Date(),
       vendor,
       plan,
-      amount: plan.price,
+      amount: billingQuote.amount,
       discount_amount: discountAmount,
       coupon_code: offerCode || null,
       tax: 0,
@@ -701,15 +760,17 @@ router.post('/verify', async (req, res) => {
           vendor_id,
           plan_id,
           subscription_id: subscription.id,
-          amount: plan.price,
+          amount: billingQuote.amount,
           discount_amount: discountAmount,
           net_amount: netAmount,
-          description: `Subscription: ${plan.name}`,
+          description: `${billingQuote.label} subscription: ${plan.name}`,
           status: 'COMPLETED',
           payment_method: 'Razorpay',
           transaction_id: payment_id,
           payment_date: new Date(),
           invoice_url: invoicePdf,
+          billing_cycle: billingQuote.billing_cycle,
+          plan_duration_days: billingQuote.duration_days || 365,
           coupon_code: offerCode || null,
           offer_type: offerType,
           offer_code: offerCode || null,
@@ -772,7 +833,7 @@ router.post('/verify', async (req, res) => {
                 sales_code: salesAttribution.salesCode,
                 engagement_type: 'CONVERTED',
                 status: 'CLOSED',
-                notes: `Vendor purchased ${plan.name} via sales code ${salesAttribution.salesCode}`,
+                notes: `Vendor purchased ${billingQuote.label} ${plan.name} via sales code ${salesAttribution.salesCode}`,
                 created_at: new Date().toISOString(),
                 updated_at: new Date().toISOString(),
               },
@@ -809,7 +870,9 @@ router.post('/verify', async (req, res) => {
           plan_id,
           subscription_id: subscription.id,
           transaction_id: payment_id,
-          amount: plan.price,
+          billing_cycle: billingQuote.billing_cycle,
+          plan_duration_days: billingQuote.duration_days || 365,
+          amount: billingQuote.amount,
           discount_amount: discountAmount,
           net_amount: netAmount,
           coupon_code: offerCode || null,
@@ -830,12 +893,12 @@ router.post('/verify', async (req, res) => {
           html: `
             <h2>Subscription Confirmation</h2>
             <p>Dear ${vendor.company_name},</p>
-            <p>Your subscription has been successfully activated.</p>
+            <p>Your ${billingQuote.label.toLowerCase()} subscription has been successfully activated.</p>
             ${invoiceSummary}
             <p><strong>Subscription Period:</strong> ${new Date().toLocaleDateString('en-IN')} to ${endDate.toLocaleDateString('en-IN')}</p>
             <p>Thank you for choosing Indian Trade Mart!</p>
           `,
-          text: `Subscription Confirmation\n\nDear ${vendor.company_name},\n\nYour subscription has been successfully activated.\n\nSubscription Period: ${new Date().toLocaleDateString('en-IN')} to ${endDate.toLocaleDateString('en-IN')}\n\nThank you for choosing Indian Trade Mart!`,
+          text: `Subscription Confirmation\n\nDear ${vendor.company_name},\n\nYour ${billingQuote.label.toLowerCase()} subscription has been successfully activated.\n\nSubscription Period: ${new Date().toLocaleDateString('en-IN')} to ${endDate.toLocaleDateString('en-IN')}\n\nThank you for choosing Indian Trade Mart!`,
           purpose: 'billing',
           attachments: [
             {
@@ -859,6 +922,7 @@ router.post('/verify', async (req, res) => {
     res.json({
       success: true,
       message: 'Payment verified and subscription activated',
+      billing_cycle: billingQuote.billing_cycle,
       subscription,
       payment,
     });

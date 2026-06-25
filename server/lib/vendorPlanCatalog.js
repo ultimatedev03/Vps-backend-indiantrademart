@@ -1,5 +1,8 @@
 const DIRECT_CHANNEL = 'DIRECT';
 const SALES_ASSISTED_CHANNEL = 'SALES_ASSISTED';
+const MONTHLY_BILLING_CYCLE = 'MONTHLY';
+const YEARLY_BILLING_CYCLE = 'YEARLY';
+const MONTHLY_SELF_SERVE_PLAN_NAMES = new Set(['startup', 'certified', 'booster']);
 
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
 
@@ -29,6 +32,12 @@ const normalizePositiveInt = (value, fallback = 0) => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return fallback;
   return Math.floor(parsed);
+};
+
+const normalizePositiveAmount = (value, fallback = 0) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return Number(parsed.toFixed(2));
 };
 
 const normalizeTier = (value = '') => {
@@ -238,6 +247,61 @@ export const isSalesAssistedPlan = (plan = null) => getPlanEntitlements(plan).pu
 export const isDirectPurchasePlan = (plan = null) =>
   getPlanEntitlements(plan).purchase.public_purchase_enabled;
 
+export const normalizeBillingCycle = (value = '') => {
+  const token = String(value || '').trim().toUpperCase().replace(/[^A-Z]/g, '');
+  if (['MONTH', 'MONTHLY'].includes(token)) return MONTHLY_BILLING_CYCLE;
+  return YEARLY_BILLING_CYCLE;
+};
+
+export const isMonthlyBillingEnabled = (plan = null) => {
+  if (!plan || !isDirectPurchasePlan(plan)) return false;
+  const name = String(plan?.name || '').trim().toLowerCase();
+  if (!MONTHLY_SELF_SERVE_PLAN_NAMES.has(name)) return false;
+  const pricing = asPlanObject(asPlanObject(plan?.features).pricing);
+  return pricing.monthly_enabled !== false;
+};
+
+export const getPlanBillingQuote = (plan = null, billingCycle = YEARLY_BILLING_CYCLE) => {
+  const cycle = normalizeBillingCycle(billingCycle);
+  const pricing = asPlanObject(asPlanObject(plan?.features).pricing);
+  const yearlyAmount = normalizePositiveAmount(plan?.price, 0);
+  const yearlyOriginalAmount = normalizePositiveAmount(pricing.original_price, 0);
+  const monthlyEnabled = isMonthlyBillingEnabled(plan);
+
+  if (cycle === MONTHLY_BILLING_CYCLE && monthlyEnabled) {
+    const configuredMonthly = normalizePositiveAmount(pricing.monthly_price, 0);
+    const fallbackMonthly = yearlyAmount > 0 ? Number((yearlyAmount / 12).toFixed(2)) : 0;
+    const monthlyAmount = configuredMonthly > 0 ? configuredMonthly : fallbackMonthly;
+    const configuredOriginalMonthly = normalizePositiveAmount(
+      pricing.monthly_original_price ?? pricing.original_monthly_price,
+      0
+    );
+    const fallbackOriginalMonthly = yearlyOriginalAmount > 0
+      ? Number((yearlyOriginalAmount / 12).toFixed(2))
+      : 0;
+
+    return {
+      billing_cycle: MONTHLY_BILLING_CYCLE,
+      amount: monthlyAmount,
+      original_amount: configuredOriginalMonthly > 0 ? configuredOriginalMonthly : fallbackOriginalMonthly,
+      duration_days: normalizePositiveInt(pricing.monthly_duration_days, 30) || 30,
+      label: 'Monthly',
+      interval: 'month',
+      monthly_enabled: true,
+    };
+  }
+
+  return {
+    billing_cycle: YEARLY_BILLING_CYCLE,
+    amount: yearlyAmount,
+    original_amount: yearlyOriginalAmount,
+    duration_days: normalizePositiveInt(plan?.duration_days, 365) || 365,
+    label: 'Yearly',
+    interval: 'year',
+    monthly_enabled: monthlyEnabled,
+  };
+};
+
 export const isPremiumPortfolioPlan = (plan = null) =>
   getPlanEntitlements(plan).portfolio.template === 'PREMIUM';
 
@@ -325,7 +389,16 @@ export const VENDOR_PLAN_CATALOG = [
       support: { level: 'priority', response_sla_hours: 24 },
       analytics: { enabled: true },
       coverage: { states_limit: 3, cities_limit: 30 },
-      pricing: { currency: 'INR', original_price: 20000, discount_percent: 25, discount_label: '25% OFF' },
+      pricing: {
+        currency: 'INR',
+        original_price: 20000,
+        discount_percent: 25,
+        discount_label: '25% OFF',
+        monthly_enabled: true,
+        monthly_price: 1250,
+        monthly_original_price: 1667,
+        monthly_duration_days: 30,
+      },
       portfolio: { enabled: true, template: 'STANDARD' },
       certificate: { enabled: false },
       seo: { enabled: true, sitemap: true, city_category_pages: 10 },
@@ -348,7 +421,16 @@ export const VENDOR_PLAN_CATALOG = [
       support: { level: 'priority', response_sla_hours: 12 },
       analytics: { enabled: true, export_csv: true },
       coverage: { states_limit: 5, cities_limit: 40 },
-      pricing: { currency: 'INR', original_price: 30000, discount_percent: 25, discount_label: '25% OFF' },
+      pricing: {
+        currency: 'INR',
+        original_price: 30000,
+        discount_percent: 25,
+        discount_label: '25% OFF',
+        monthly_enabled: true,
+        monthly_price: 1875,
+        monthly_original_price: 2500,
+        monthly_duration_days: 30,
+      },
       portfolio: { enabled: true, template: 'STANDARD', custom_url: false },
       certificate: { enabled: false },
       seo: { enabled: true, sitemap: true, city_category_pages: 25 },
@@ -371,7 +453,16 @@ export const VENDOR_PLAN_CATALOG = [
       support: { level: 'priority', response_sla_hours: 12 },
       analytics: { enabled: true, export_csv: true },
       coverage: { states_limit: 7, cities_limit: 50 },
-      pricing: { currency: 'INR', original_price: 40000, discount_percent: 25, discount_label: '25% OFF' },
+      pricing: {
+        currency: 'INR',
+        original_price: 40000,
+        discount_percent: 25,
+        discount_label: '25% OFF',
+        monthly_enabled: true,
+        monthly_price: 2500,
+        monthly_original_price: 3334,
+        monthly_duration_days: 30,
+      },
       portfolio: { enabled: true, template: 'STANDARD', custom_url: false },
       certificate: { enabled: false },
       seo: { enabled: true, sitemap: true, city_category_pages: 35 },
