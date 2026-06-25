@@ -126,21 +126,45 @@ const optionalRows = async (fn, tableName) => {
   }
 };
 
+const truthyDbFlag = (value) => {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  return value === true || value === 1 || normalized === '1' || normalized === 'true' || normalized === 'yes';
+};
+
+const hasApprovedKyc = (value) => {
+  const status = String(value || '').trim().toUpperCase();
+  return status === 'APPROVED' || status === 'VERIFIED';
+};
+
+const isVendorVerified = (vendor = {}) => (
+  truthyDbFlag(vendor.is_verified) ||
+  truthyDbFlag(vendor.verification_badge) ||
+  Boolean(vendor.verified_at) ||
+  hasApprovedKyc(vendor.kyc_status)
+);
+
 const normalizeVendorStatus = (vendor = {}) => {
   const accountStatus = String(vendor.account_status || vendor.status || '').trim().toUpperCase();
   const isSuspendedText = String(vendor.is_suspended || '').trim().toLowerCase();
   const inactive = vendor.is_active === 0 || vendor.is_active === false || String(vendor.is_active).toLowerCase() === 'false';
+  const verified = isVendorVerified(vendor);
   const suspended =
     accountStatus === 'SUSPENDED' ||
     accountStatus === 'TERMINATED' ||
     isSuspendedText === 'true' ||
     isSuspendedText === '1' ||
     Boolean(vendor.suspended_at || vendor.suspension_at || vendor.terminated_at);
+  const rawStatusLabel = suspended ? accountStatus || 'SUSPENDED' : inactive ? 'INACTIVE' : accountStatus || 'ACTIVE';
+  const statusLabel =
+    !suspended && !inactive && verified && ['UNVERIFIED', 'PENDING', 'SUBMITTED'].includes(rawStatusLabel)
+      ? 'ACTIVE'
+      : rawStatusLabel;
 
   return {
     is_active: !inactive && !suspended,
     is_suspended: suspended,
-    status_label: suspended ? accountStatus || 'SUSPENDED' : inactive ? 'INACTIVE' : accountStatus || 'ACTIVE',
+    is_verified: verified,
+    status_label: statusLabel,
     reason:
       vendor.suspension_reason ||
       vendor.suspension_message ||
