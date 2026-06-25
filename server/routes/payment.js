@@ -373,7 +373,8 @@ async function resolveOfferForPayment({
         couponFailureMessage = 'Coupon not valid for this plan';
       } else {
         let discountAmount = 0;
-        if (cpn.discount_type === 'PERCENT') {
+        const discountType = String(cpn.discount_type || '').trim().toUpperCase();
+        if (discountType === 'PERCENT') {
           discountAmount = (amount * Number(cpn.value)) / 100;
         } else {
           discountAmount = Number(cpn.value || 0);
@@ -436,6 +437,237 @@ async function resolveOfferForPayment({
   return fallback;
 }
 
+async function activateCouponCoveredSubscription({
+  req,
+  vendor,
+  plan,
+  vendor_id,
+  plan_id,
+  billingQuote,
+  discountAmount = 0,
+  netAmount = 0,
+  coupon = null,
+  offerType = null,
+  offerCode = null,
+  referralId = null,
+  salesAttribution = {},
+}) {
+  const invoiceNumber = generateInvoiceNumber();
+  const startDate = new Date();
+  const endDate = new Date(startDate);
+  const durationDays = billingQuote.duration_days || 365;
+  endDate.setDate(endDate.getDate() + durationDays);
+
+  await db
+    .from('vendor_plan_subscriptions')
+    .update({ status: 'INACTIVE' })
+    .eq('vendor_id', vendor_id)
+    .eq('status', 'ACTIVE');
+
+  const { data: subscription, error: subscriptionError } = await db
+    .from('vendor_plan_subscriptions')
+    .insert([
+      {
+        vendor_id,
+        plan_id,
+        start_date: startDate.toISOString(),
+        end_date: endDate.toISOString(),
+        status: 'ACTIVE',
+        plan_duration_days: durationDays,
+        billing_cycle: billingQuote.billing_cycle,
+        sales_code: salesAttribution.salesCode || null,
+        sales_user_id: salesAttribution.salesUserId || null,
+      },
+    ])
+    .select()
+    .single();
+
+  if (subscriptionError || !subscription?.id) {
+    logger.error('Coupon subscription creation error:', subscriptionError);
+    const error = new Error('Failed to activate coupon subscription');
+    error.statusCode = 500;
+    throw error;
+  }
+
+  const quotaPayload = {
+    vendor_id,
+    plan_id,
+    daily_used: 0,
+    daily_limit: Math.max(0, Number(plan?.daily_limit || 0)),
+    weekly_used: 0,
+    weekly_limit: Math.max(0, Number(plan?.weekly_limit || 0)),
+    yearly_used: 0,
+    yearly_limit: 0,
+    last_reset_date: startDate.toISOString(),
+    updated_at: startDate.toISOString(),
+  };
+
+  const { data: existingQuota } = await db
+    .from('vendor_lead_quota')
+    .select('id')
+    .eq('vendor_id', vendor_id)
+    .maybeSingle();
+
+  if (existingQuota?.id) {
+    await db
+      .from('vendor_lead_quota')
+      .update(quotaPayload)
+      .eq('vendor_id', vendor_id);
+  } else {
+    await db.from('vendor_lead_quota').insert([quotaPayload]);
+  }
+
+  const transactionId = `COUPON-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+  const invoicePdfData = {
+    invoiceNumber,
+    invoiceDate: new Date(),
+    dueDate: new Date(),
+    vendor,
+    plan,
+    amount: billingQuote.amount,
+    discount_amount: discountAmount,
+    coupon_code: offerCode || null,
+    tax: 0,
+    totalAmount: netAmount,
+    paymentMethod: 'Coupon',
+    transactionId,
+  };
+
+  const invoicePdf = generateInvoicePDF(invoicePdfData);
+  const { data: payment, error: paymentError } = await db
+    .from('vendor_payments')
+    .insert([
+      {
+        vendor_id,
+        plan_id,
+        subscription_id: subscription.id,
+        amount: billingQuote.amount,
+        discount_amount: discountAmount,
+        net_amount: netAmount,
+        description: `${billingQuote.label} subscription: ${plan.name}`,
+        status: 'COMPLETED',
+        payment_method: 'Coupon',
+        transaction_id: transactionId,
+        payment_date: new Date(),
+        invoice_url: invoicePdf,
+        billing_cycle: billingQuote.billing_cycle,
+        plan_duration_days: durationDays,
+        coupon_code: offerCode || null,
+        offer_type: offerType,
+        offer_code: offerCode || null,
+        referral_id: referralId,
+        sales_code: salesAttribution.salesCode || null,
+        sales_user_id: salesAttribution.salesUserId || null,
+      },
+    ])
+    .select()
+    .single();
+
+  if (paymentError) {
+    logger.error('Coupon payment record error:', paymentError);
+  } else if (coupon) {
+    await db
+      .from('vendor_plan_coupons')
+      .update({ used_count: (Number(coupon.used_count || 0) || 0) + 1 })
+      .eq('id', coupon.id);
+    await db.from('vendor_coupon_usages').insert([
+      {
+        coupon_id: coupon.id,
+        payment_id: payment?.id || null,
+        vendor_id,
+        plan_id,
+        discount_amount: discountAmount,
+        net_amount: netAmount,
+      },
+    ]);
+  }
+
+  if (!paymentError && payment && offerType === 'REFERRAL') {
+    try {
+      await applyReferralRewardAfterPayment(
+        {
+          referredVendorId: vendor_id,
+          plan,
+          paymentRow: payment,
+          netAmount,
+        },
+        db
+      );
+    } catch (referralRewardError) {
+      logger.warn('[payment] referral reward application failed:', referralRewardError?.message || referralRewardError);
+    }
+  }
+
+  if (!paymentError && payment) {
+    const vendorActor = {
+      id: vendor.user_id || vendor_id,
+      type: 'VENDOR',
+      role: 'VENDOR',
+      email: vendor.email || null,
+    };
+
+    await writeAuditLog({
+      req,
+      actor: vendorActor,
+      action: 'PAYMENT_COMPLETED',
+      entityType: 'vendor_payments',
+      entityId: payment.id,
+      details: {
+        vendor_id,
+        plan_id,
+        subscription_id: subscription.id,
+        transaction_id: transactionId,
+        billing_cycle: billingQuote.billing_cycle,
+        plan_duration_days: durationDays,
+        amount: billingQuote.amount,
+        discount_amount: discountAmount,
+        net_amount: netAmount,
+        coupon_code: offerCode || null,
+        offer_type: offerType,
+        offer_code: offerCode || null,
+        referral_id: referralId || null,
+      },
+    });
+  }
+
+  try {
+    if (vendor.email) {
+      const invoiceSummary = generateInvoiceSummary(invoicePdfData);
+      await sendEmail({
+        to: vendor.email,
+        subject: `Invoice ${invoiceNumber} - Subscription Activated`,
+        html: `
+          <h2>Subscription Confirmation</h2>
+          <p>Dear ${vendor.company_name},</p>
+          <p>Your ${billingQuote.label.toLowerCase()} subscription has been activated using coupon ${offerCode || ''}.</p>
+          ${invoiceSummary}
+          <p><strong>Subscription Period:</strong> ${new Date().toLocaleDateString('en-IN')} to ${endDate.toLocaleDateString('en-IN')}</p>
+          <p>Thank you for choosing Indian Trade Mart!</p>
+        `,
+        text: `Subscription Confirmation\n\nDear ${vendor.company_name},\n\nYour ${billingQuote.label.toLowerCase()} subscription has been activated using coupon ${offerCode || ''}.\n\nSubscription Period: ${new Date().toLocaleDateString('en-IN')} to ${endDate.toLocaleDateString('en-IN')}\n\nThank you for choosing Indian Trade Mart!`,
+        purpose: 'billing',
+        attachments: [
+          {
+            filename: `${invoiceNumber}.pdf`,
+            content: invoicePdf.split(',')[1],
+            encoding: 'base64',
+          },
+        ],
+      });
+    }
+  } catch (emailError) {
+    logger.error('Coupon activation email error:', emailError);
+  }
+
+  try {
+    await sendSubscriptionActivatedNotification(vendor_id, plan.name, endDate);
+  } catch (notifError) {
+    logger.error('Coupon activation notification error:', notifError);
+  }
+
+  return { subscription, payment: payment || null, invoiceNumber, endDate, transactionId };
+}
+
 /**
  * POST /api/payment/initiate
  * Initiate a Razorpay payment order for subscription
@@ -446,12 +678,6 @@ router.post('/initiate', async (req, res) => {
     const requestedBillingCycle = normalizeBillingCycle(req.body?.billing_cycle);
     const coupon_code = normalizeCouponCode(req.body?.coupon_code);
     const salesAttribution = await resolveSalesAttribution(req.body?.sales_code || req.query?.sales_code);
-
-    // Check if Razorpay keys are configured
-    if (!process.env.RAZORPAY_KEY_ID || process.env.RAZORPAY_KEY_ID.includes('your_razorpay')) {
-      logger.error('âŒ Razorpay KEY_ID not configured');
-      return res.status(500).json({ error: 'Payment gateway not configured. Please add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to .env.local' });
-    }
 
     if (!vendor_id || !plan_id) {
       return res.status(400).json({ error: 'Missing vendor_id or plan_id' });
@@ -521,6 +747,61 @@ router.post('/initiate', async (req, res) => {
     const offerType = offer?.offerType || null;
     const offerCode = offer?.offerCode || (coupon_code || null);
     const referralId = offer?.referralId || null;
+
+    if (netAmount <= 0) {
+      const activation = await activateCouponCoveredSubscription({
+        req,
+        vendor,
+        plan,
+        vendor_id,
+        plan_id,
+        billingQuote,
+        discountAmount,
+        netAmount: 0,
+        coupon: offer?.coupon || null,
+        offerType,
+        offerCode,
+        referralId,
+        salesAttribution,
+      });
+
+      return res.json({
+        success: true,
+        activated: true,
+        message: 'Coupon applied. Subscription activated without payment.',
+        key_id: process.env.RAZORPAY_KEY_ID,
+        subscription: activation.subscription,
+        payment: activation.payment,
+        order: {
+          id: activation.transactionId,
+          amount: 0,
+          currency: 'INR',
+          vendor_id,
+          plan_id,
+          plan_name: plan.name,
+          billing_cycle: billingQuote.billing_cycle,
+          billing_label: billingQuote.label,
+          plan_duration_days: billingQuote.duration_days,
+          vendor_email: vendor.email,
+          net_amount: 0,
+          base_amount: baseAmount,
+          discount_amount: discountAmount,
+          coupon_code: offerCode || null,
+          offer_type: offerType,
+          referral_id: referralId,
+          sales_code: salesAttribution.salesCode || null,
+          sales_user_id: salesAttribution.salesUserId || null,
+          sales_code_valid: Boolean(salesAttribution.salesUserId),
+          activated_without_payment: true,
+        },
+      });
+    }
+
+    // Check if Razorpay keys are configured only when there is an online amount to collect.
+    if (!process.env.RAZORPAY_KEY_ID || process.env.RAZORPAY_KEY_ID.includes('your_razorpay')) {
+      logger.error('Razorpay KEY_ID not configured');
+      return res.status(500).json({ error: 'Payment gateway not configured. Please add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to .env.local' });
+    }
 
     const amount = Math.max(1, Math.round(netAmount * 100)); // paise, min 1 to keep Razorpay happy
 
