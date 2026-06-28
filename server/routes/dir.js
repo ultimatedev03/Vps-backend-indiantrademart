@@ -84,15 +84,32 @@ function slugifySearch(value = '') {
   return normalizeSearchText(value).replace(/\s+/g, '-').replace(/^-|-$/g, '');
 }
 
+const GENERIC_SEARCH_TOKENS = new Set([
+  'service',
+  'services',
+  'supplier',
+  'suppliers',
+  'manufacturer',
+  'manufacturers',
+  'company',
+  'companies',
+  'provider',
+  'providers',
+  'product',
+  'products',
+]);
+
 function searchTokens(value = '', max = 8) {
-  return Array.from(
+  const tokens = Array.from(
     new Set(
       normalizeSearchText(value)
         .split(' ')
         .map((token) => token.trim())
         .filter((token) => token.length >= 2)
     )
-  ).slice(0, max);
+  );
+  const meaningful = tokens.filter((token) => !GENERIC_SEARCH_TOKENS.has(token));
+  return (meaningful.length ? meaningful : tokens).slice(0, max);
 }
 
 const SEMANTIC_TOKEN_MAP = {
@@ -106,6 +123,10 @@ const SEMANTIC_TOKEN_MAP = {
   consultant: ['consulting', 'service', 'advisor', 'engineer'],
   design: ['drawing', 'layout', 'planning', 'engineering'],
   machine: ['machinery', 'equipment', 'tool'],
+  survey: ['surveyor', 'surveying', 'topographic', 'dgps', 'total station', 'land survey'],
+  surveyor: ['survey', 'surveying', 'topographic', 'dgps', 'total station', 'land survey'],
+  surveyors: ['survey', 'surveyor', 'surveying', 'topographic', 'dgps', 'total station', 'land survey'],
+  surveying: ['survey', 'surveyor', 'topographic', 'dgps', 'total station', 'land survey'],
   supplier: ['vendor', 'manufacturer', 'dealer'],
   manufacturer: ['supplier', 'vendor', 'producer'],
 };
@@ -147,12 +168,31 @@ function addSearchTokenVariants(token = '', target = new Set()) {
   }
 }
 
+function searchTokenVariants(token = '', includeSemantic = true) {
+  const variants = new Set();
+  addSearchTokenVariants(token, variants);
+  if (includeSemantic) {
+    (SEMANTIC_TOKEN_MAP[token] || []).forEach((synonym) => addSearchTokenVariants(synonym, variants));
+  }
+  return Array.from(variants).filter((value) => /^[a-z0-9]+$/.test(value));
+}
+
+function wholeTokenRegex(token = '') {
+  const variants = searchTokenVariants(token);
+  if (!variants.length) return '';
+  return `(^|[^[:alnum:]])(${variants.join('|')})([^[:alnum:]]|$)`;
+}
+
 function buildBooleanFullTextQuery(value = '') {
-  const tokens = expandSemanticTokens(value)
-    .map((token) => token.replace(/[+\-<>()~*"@]+/g, '').trim())
-    .filter((token) => token.length >= 2)
-    .slice(0, 8);
-  return tokens.length ? tokens.map((token) => `+${token}*`).join(' ') : '';
+  const groups = searchTokens(value, 8)
+    .map((token) => searchTokenVariants(token)
+      .map((variant) => variant.replace(/[+\-<>()~*"@]+/g, '').trim())
+      .filter((variant) => variant.length >= 2)
+      .slice(0, 8))
+    .filter((variants) => variants.length);
+  return groups.length
+    ? groups.map((variants) => `+(${variants.map((variant) => `${variant}*`).join(' ')})`).join(' ')
+    : '';
 }
 
 function levenshteinDistance(a = '', b = '') {
@@ -201,6 +241,117 @@ function fuzzySearchScore(query = '', row = {}) {
     });
   });
   return best;
+}
+
+function fieldHasSearchToken(field = '', token = '') {
+  const normalizedField = normalizeSearchText(field);
+  if (!normalizedField) return false;
+  return searchTokenVariants(token).some((variant) => {
+    if (!variant) return false;
+    return normalizedField === variant || normalizedField.startsWith(`${variant} `) || normalizedField.endsWith(` ${variant}`) || normalizedField.includes(` ${variant} `);
+  });
+}
+
+const LAND_SURVEY_TOKENS = new Set(['survey', 'surveyor', 'surveyors', 'surveying', 'topographic', 'dgps']);
+const SURVEY_PRIMARY_NAME_RE = /\b(land\s+survey|land\s+surveyor|survey|surveyor|surveying|topographic|topographical|dgps|total\s+station|route\s+survey|contour\s+survey|cadastral\s+survey)\b/;
+const SURVEY_SUPPORTING_NAME_RE = /\b(gps|ts\s+survey|levelling|leveling|mapping|demarcation)\b/;
+const NON_SURVEY_ENGINEERING_RE = /\b(geotechnical|geo\s*technical|soil\s+testing|soil|investigation|pile|plate\s+load|thermal\s+resistivity|borehole|cross\s+hole|hydro\s+geological)\b/;
+
+function isLandSurveyIntent(query = '', tokens = searchTokens(query, 8)) {
+  const normalized = normalizeSearchText(query);
+  const hasSurvey = tokens.some((token) => LAND_SURVEY_TOKENS.has(token)) || /\bsurvey(or|ors|ing)?\b/.test(normalized);
+  const hasLand = tokens.includes('land') || /\bland\b/.test(normalized);
+  return hasSurvey && (hasLand || /\b(topographic|dgps|total\s+station|route\s+survey)\b/.test(normalized));
+}
+
+function surveyIntentBonus(query = '', row = {}) {
+  const tokens = searchTokens(query, 8);
+  const surveyIntent = tokens.some((token) => LAND_SURVEY_TOKENS.has(token)) || /\bsurvey(or|ors|ing)?\b/.test(normalizeSearchText(query));
+  if (!surveyIntent) return 0;
+
+  const landIntent = isLandSurveyIntent(query, tokens);
+  const name = normalizeSearchText(row?.name || row?.product_name || row?.title || '');
+  const category = normalizeSearchText(row?.category || row?.micro_category_name || '');
+  const categoryPath = normalizeSearchText(row?.category_path || row?.category_slug || '');
+  const text = `${name} ${category} ${categoryPath}`;
+  let bonus = 0;
+
+  if (/\bland\s+(survey|surveyor|surveying)\b/.test(name)) bonus += landIntent ? 760 : 520;
+  if (/\b(total\s+station|topographic|topographical|dgps|route\s+survey|contour\s+survey|cadastral\s+survey)\b/.test(name)) bonus += landIntent ? 560 : 380;
+  if (SURVEY_PRIMARY_NAME_RE.test(name)) bonus += landIntent ? 360 : 240;
+  if (SURVEY_SUPPORTING_NAME_RE.test(name)) bonus += 120;
+  if (/\b(land\s+survey|survey|surveyor|surveying)\b/.test(category)) bonus += 140;
+  if (/\b(survey|surveyor|surveying|topographic|dgps|total\s+station)\b/.test(categoryPath)) bonus += 70;
+
+  if (!SURVEY_PRIMARY_NAME_RE.test(text) && !SURVEY_SUPPORTING_NAME_RE.test(text)) bonus -= landIntent ? 240 : 120;
+  if (NON_SURVEY_ENGINEERING_RE.test(name)) bonus -= landIntent ? 420 : 180;
+  if (landIntent && NON_SURVEY_ENGINEERING_RE.test(name) && !SURVEY_PRIMARY_NAME_RE.test(name)) bonus -= 220;
+
+  return bonus;
+}
+
+function surveyIntentRank(query = '', row = {}) {
+  if (!isLandSurveyIntent(query)) return 0;
+
+  const name = normalizeSearchText(row?.name || row?.product_name || row?.title || '');
+  const category = normalizeSearchText(row?.category || row?.micro_category_name || '');
+  const categoryPath = normalizeSearchText(row?.category_path || row?.category_slug || '');
+  const text = `${name} ${category} ${categoryPath}`;
+
+  if (/\bland\s+(survey|surveyor|surveying)\b/.test(name)) return 70;
+  if (/\b(total\s+station|topographic|topographical|dgps|route\s+survey|contour\s+survey|cadastral\s+survey)\b/.test(name)) return 60;
+  if (SURVEY_PRIMARY_NAME_RE.test(name)) return 52;
+  if (/\b(land\s+survey|survey|surveyor|surveying|topographic|dgps|total\s+station)\b/.test(category)) return 42;
+  if (/\b(land\s+survey|survey|surveyor|surveying|topographic|dgps|total\s+station)\b/.test(categoryPath)) return 36;
+  if (SURVEY_SUPPORTING_NAME_RE.test(text)) return 24;
+  if (NON_SURVEY_ENGINEERING_RE.test(name) && !SURVEY_PRIMARY_NAME_RE.test(name)) return 4;
+  return 12;
+}
+
+function catalogIntentScore(query = '', row = {}) {
+  const q = normalizeSearchText(query);
+  if (!q) return 0;
+
+  const tokens = searchTokens(query, 8);
+  const name = normalizeSearchText(row?.name || row?.product_name || row?.title || '');
+  const category = normalizeSearchText(row?.category || row?.micro_category_name || '');
+  const categoryPath = normalizeSearchText(row?.category_path || row?.category_slug || '');
+  const description = normalizeSearchText(row?.description || '');
+  let score = 0;
+
+  if (name === q) score += 500;
+  if (name.includes(q)) score += 260;
+  if (category.includes(q)) score += 120;
+
+  tokens.forEach((token) => {
+    if (fieldHasSearchToken(name, token)) score += 95;
+    if (fieldHasSearchToken(category, token)) score += 34;
+    if (fieldHasSearchToken(categoryPath, token)) score += 18;
+    if (fieldHasSearchToken(description, token)) score += 8;
+  });
+
+  score += surveyIntentBonus(query, row);
+
+  const landIntent = tokens.includes('land');
+  if (landIntent && /\bland\b/.test(name)) score += 120;
+
+  return score;
+}
+
+function rankRowsForSearchIntent(rows = [], query = '', sort = '') {
+  if (!query || sort === 'price_asc' || sort === 'price_desc') return rows;
+  const landSurveyIntent = isLandSurveyIntent(query);
+  return [...rows].sort((a, b) => {
+    if (landSurveyIntent) {
+      const surveyDiff = surveyIntentRank(query, b) - surveyIntentRank(query, a);
+      if (surveyDiff) return surveyDiff;
+    }
+    const intentDiff = catalogIntentScore(query, b) - catalogIntentScore(query, a);
+    if (intentDiff) return intentDiff;
+    const scoreDiff = Number(b.__sortScore || 0) - Number(a.__sortScore || 0);
+    if (scoreDiff) return scoreDiff;
+    return Number(b.vendor_plan_priority || 0) - Number(a.vendor_plan_priority || 0);
+  });
 }
 
 function planPriorityCaseSql() {
@@ -346,6 +497,7 @@ function buildHybridWhere({
   if (q && !broad) {
     const like = `%${q}%`;
     const slug = slugifySearch(q);
+    const baseTokens = searchTokens(q, 8);
     const expanded = expandSemanticTokens(q).slice(0, 12);
     const ors = [
       'LOWER(COALESCE(p.name, "")) LIKE LOWER(?)',
@@ -360,14 +512,40 @@ function buildHybridWhere({
       ors.push('LOWER(COALESCE(p.category_slug, "")) LIKE LOWER(?)');
       params.push(`%${slug}%`, `%${slug}%`);
     }
-    expanded.forEach((token) => {
-      ors.push('LOWER(COALESCE(p.name, "")) LIKE LOWER(?)');
-      ors.push('LOWER(COALESCE(p.category, "")) LIKE LOWER(?)');
-      ors.push('LOWER(COALESCE(p.description, "")) LIKE LOWER(?)');
-      ors.push('LOWER(COALESCE(p.category_path, "")) LIKE LOWER(?)');
-      ors.push('LOWER(COALESCE(p.category_slug, "")) LIKE LOWER(?)');
-      params.push(`%${token}%`, `%${token}%`, `%${token}%`, `%${token}%`, `%${slugifySearch(token)}%`);
-    });
+    if (baseTokens.length > 1) {
+      const searchableColumns = [
+        'p.name',
+        'p.category',
+        'p.description',
+        'p.category_path',
+        'p.category_slug',
+        'v.company_name',
+      ];
+      const strictTokenClauses = baseTokens.map((token) => {
+        const pattern = wholeTokenRegex(token);
+        params.push(...searchableColumns.map(() => pattern));
+        return `(${searchableColumns
+          .map((column) => `LOWER(COALESCE(${column}, "")) REGEXP ?`)
+          .join(' OR ')})`;
+      });
+      ors.push(`(${strictTokenClauses.join(' AND ')})`);
+    } else {
+      expanded.forEach((token) => {
+        ors.push('LOWER(COALESCE(p.name, "")) LIKE LOWER(?)');
+        ors.push('LOWER(COALESCE(p.category, "")) LIKE LOWER(?)');
+        ors.push('LOWER(COALESCE(p.description, "")) LIKE LOWER(?)');
+        ors.push('LOWER(COALESCE(p.category_path, "")) LIKE LOWER(?)');
+        ors.push('LOWER(COALESCE(p.category_slug, "")) LIKE LOWER(?)');
+        params.push(`%${token}%`, `%${token}%`, `%${token}%`, `%${token}%`, `%${slugifySearch(token)}%`);
+      });
+    }
+    if (isLandSurveyIntent(q, baseTokens)) {
+      const surveyRegex = '(^|[^[:alnum:]])(land[[:space:]]+survey|land[[:space:]]+surveyor|survey|surveyor|surveying|topographic|topographical|dgps|total[[:space:]]+station|route[[:space:]]+survey|contour[[:space:]]+survey|cadastral[[:space:]]+survey)([^[:alnum:]]|$)';
+      ors.push('LOWER(COALESCE(p.name, "")) REGEXP ?');
+      ors.push('LOWER(COALESCE(p.category, "")) REGEXP ?');
+      ors.push('LOWER(COALESCE(p.category_path, "")) REGEXP ?');
+      params.push(surveyRegex, surveyRegex, surveyRegex);
+    }
     const booleanQ = buildBooleanFullTextQuery(q);
     if (useFullText && booleanQ) {
       ors.push('MATCH(p.name, p.description, p.category, p.category_path, p.category_slug) AGAINST (? IN BOOLEAN MODE)');
@@ -392,6 +570,31 @@ function buildHybridScoreSql(q, useFullText = true) {
     CASE WHEN LOWER(COALESCE(p.description, '')) LIKE LOWER(?) THEN 22 ELSE 0 END +
     CASE WHEN LOWER(COALESCE(v.company_name, '')) LIKE LOWER(?) THEN 14 ELSE 0 END
   `;
+
+  searchTokens(q, 8).forEach((token) => {
+    const pattern = wholeTokenRegex(token);
+    if (!pattern) return;
+    sql += `
+      + CASE WHEN LOWER(COALESCE(p.name, '')) REGEXP ? THEN 62 ELSE 0 END
+      + CASE WHEN LOWER(COALESCE(p.category, '')) REGEXP ? THEN 46 ELSE 0 END
+      + CASE WHEN LOWER(COALESCE(p.category_path, '')) REGEXP ? THEN 16 ELSE 0 END
+      + CASE WHEN LOWER(COALESCE(p.description, '')) REGEXP ? THEN 8 ELSE 0 END
+    `;
+    params.push(pattern, pattern, pattern, pattern);
+  });
+
+  if (isLandSurveyIntent(q)) {
+    const primarySurveyRegex = '(^|[^[:alnum:]])(land[[:space:]]+survey|land[[:space:]]+surveyor|survey|surveyor|surveying|topographic|topographical|dgps|total[[:space:]]+station|route[[:space:]]+survey|contour[[:space:]]+survey|cadastral[[:space:]]+survey)([^[:alnum:]]|$)';
+    const nonSurveyRegex = '(^|[^[:alnum:]])(geotechnical|geo[[:space:]]*technical|soil[[:space:]]+testing|soil|investigation|pile|plate[[:space:]]+load|thermal[[:space:]]+resistivity|borehole|cross[[:space:]]+hole|hydro[[:space:]]+geological)([^[:alnum:]]|$)';
+    sql += `
+      + CASE WHEN LOWER(COALESCE(p.name, '')) REGEXP '(^|[^[:alnum:]])land[[:space:]]+(survey|surveyor|surveying)([^[:alnum:]]|$)' THEN 520 ELSE 0 END
+      + CASE WHEN LOWER(COALESCE(p.name, '')) REGEXP ? THEN 360 ELSE 0 END
+      + CASE WHEN LOWER(COALESCE(p.category, '')) REGEXP ? THEN 130 ELSE 0 END
+      + CASE WHEN LOWER(COALESCE(p.category_path, '')) REGEXP ? THEN 70 ELSE 0 END
+      - CASE WHEN LOWER(COALESCE(p.name, '')) REGEXP ? THEN 260 ELSE 0 END
+    `;
+    params.push(primarySurveyRegex, primarySurveyRegex, primarySurveyRegex, nonSurveyRegex);
+  }
 
   expandSemanticTokens(q)
     .filter((token) => token !== normalizeSearchText(q))
@@ -419,7 +622,7 @@ function buildHybridScoreSql(q, useFullText = true) {
 function orderSqlForHybrid(sort = '') {
   if (sort === 'price_asc') return 'p.price ASC, vendor_plan_priority DESC, search_score DESC, p.created_at DESC';
   if (sort === 'price_desc') return 'p.price DESC, vendor_plan_priority DESC, search_score DESC, p.created_at DESC';
-  return 'vendor_plan_priority DESC, search_score DESC, p.created_at DESC, p.id DESC';
+  return 'search_score DESC, vendor_plan_priority DESC, p.created_at DESC, p.id DESC';
 }
 
 async function runHybridMysqlSearch({
@@ -454,9 +657,17 @@ async function runHybridMysqlSearch({
        FROM products p
        JOIN vendors v ON v.id = p.vendor_id
        LEFT JOIN vendor_plan_subscriptions vps
-         ON vps.vendor_id = p.vendor_id
-        AND vps.status = 'ACTIVE'
-        AND (vps.end_date IS NULL OR vps.end_date > UTC_TIMESTAMP())
+         ON vps.id = (
+           SELECT active_vps.id
+             FROM vendor_plan_subscriptions active_vps
+            WHERE active_vps.vendor_id = p.vendor_id
+              AND active_vps.status = 'ACTIVE'
+              AND (active_vps.end_date IS NULL OR active_vps.end_date > UTC_TIMESTAMP())
+            ORDER BY COALESCE(active_vps.end_date, '9999-12-31 23:59:59') DESC,
+                     active_vps.created_at DESC,
+                     active_vps.id DESC
+            LIMIT 1
+         )
        LEFT JOIN vendor_plans vp ON vp.id = vps.plan_id
        LEFT JOIN vendor_preferences vpref ON vpref.vendor_id = p.vendor_id
       WHERE ${where.join(' AND ')}
@@ -464,7 +675,7 @@ async function runHybridMysqlSearch({
       LIMIT ${limit} OFFSET ${offset}`,
     [...scoreParams, ...whereParams]
   );
-  const mappedRows = rows.map(productFromMysqlRow);
+  const mappedRows = rankRowsForSearchIntent(mergeRowsById(rows.map(productFromMysqlRow)), q, sort);
   const relevantRows = q && !broad
     ? mappedRows.filter((row) => {
         const directScore = Number(row.__sortScore || 0);
@@ -475,7 +686,7 @@ async function runHybridMysqlSearch({
     rows: relevantRows,
     totalCount: q && !broad
       ? relevantRows.length
-      : (rows.length ? Number(rows[0]?.total_count || rows.length) : 0),
+      : mappedRows.length,
   };
 }
 
@@ -521,6 +732,8 @@ async function fetchFuzzyCandidates({ q, microId, microIds, subCategoryId, headC
     .map((row) => ({ ...row, __sortScore: Math.max(Number(row.__sortScore || 0), fuzzySearchScore(q, row)) }))
     .filter((row) => Number(row.__sortScore || 0) >= 42)
     .sort((a, b) => {
+      const intentDiff = catalogIntentScore(q, b) - catalogIntentScore(q, a);
+      if (intentDiff) return intentDiff;
       const scoreDiff = Number(b.__sortScore || 0) - Number(a.__sortScore || 0);
       if (scoreDiff) return scoreDiff;
       return Number(b.vendor_plan_priority || 0) - Number(a.vendor_plan_priority || 0);
@@ -537,14 +750,118 @@ function canUseBroadCategoryScope(scope = {}) {
   );
 }
 
-function mergeRowsById(...groups) {
+function normalizeDedupePart(value = '') {
+  return normalizeSearchText(value).replace(/\s+/g, '-');
+}
+
+function canonicalProductNameKey(value = '') {
+  return normalizeDedupePart(value)
+    .replace(/-(service|services|supplier|suppliers|manufacturer|manufacturers|product|products)$/g, '');
+}
+
+function getFirstImageDedupePart(row = {}) {
+  const pick = (value) => {
+    if (typeof value === 'string') return value;
+    if (value && typeof value === 'object') return value.url || value.image_url || value.src || '';
+    return '';
+  };
+  const raw = row?.images;
+
+  if (Array.isArray(raw)) return normalizeDedupePart(pick(raw[0]));
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return normalizeDedupePart(pick(parsed[0]));
+    } catch (_) {
+      return normalizeDedupePart(raw);
+    }
+  }
+
+  return normalizeDedupePart(row?.image || row?.image_url || '');
+}
+
+function uniqueDedupeKeys(keys = []) {
   const seen = new Set();
+  return keys.filter((key) => {
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function productDedupeKeys(row = {}) {
+  const vendorNameKey = normalizeDedupePart(
+    row?.vendorName ||
+      row?.vendor_name ||
+      row?.vendors?.company_name ||
+      row?.vendor__company_name ||
+      row?.company_name
+  );
+  const vendorIdKey = normalizeDedupePart(
+    row?.vendorId ||
+      row?.vendor_id ||
+      row?.vendors?.id ||
+      row?.vendor__id
+  );
+  const vendorKeys = uniqueDedupeKeys([vendorNameKey, vendorIdKey]);
+  const nameKey = canonicalProductNameKey(row?.name || row?.product_name || row?.title || row?.slug);
+  const stableKey = normalizeDedupePart(row?.id || row?.slug);
+  const categoryKey = normalizeDedupePart(row?.category_slug || row?.category || row?.micro_category_name);
+  const priceKey = normalizeDedupePart(row?.price);
+  const unitKey = normalizeDedupePart(row?.price_unit || row?.qty_unit || row?.unit);
+  const imageKey = getFirstImageDedupePart(row);
+  const keys = [];
+
+  vendorKeys.forEach((vendorKey) => {
+    if (nameKey) keys.push(`vendor-name:${vendorKey}:${nameKey}`);
+    if (imageKey) keys.push(`vendor-image:${vendorKey}:${imageKey}`);
+  });
+  if (stableKey) keys.push(`product:${stableKey}`);
+  if (!vendorKeys.length && nameKey) keys.push(`name:${nameKey}:${categoryKey}:${priceKey}:${unitKey}:${imageKey}`);
+  if (!vendorKeys.length && imageKey) keys.push(`image:${nameKey}:${imageKey}`);
+  return uniqueDedupeKeys(keys);
+}
+
+function productDedupeKey(row = {}) {
+  return productDedupeKeys(row)[0] || '';
+}
+
+function isPreferredProductRow(candidate = {}, current = {}) {
+  const candidateScore = Number(candidate?.__sortScore || candidate?.search_score || 0);
+  const currentScore = Number(current?.__sortScore || current?.search_score || 0);
+  if (candidateScore !== currentScore) return candidateScore > currentScore;
+
+  const candidatePlan = Number(candidate?.vendor_plan_priority || candidate?.vendors?.plan_priority || 0);
+  const currentPlan = Number(current?.vendor_plan_priority || current?.vendors?.plan_priority || 0);
+  if (candidatePlan !== currentPlan) return candidatePlan > currentPlan;
+
+  const candidateUpdated = new Date(candidate?.updated_at || candidate?.created_at || 0).getTime() || 0;
+  const currentUpdated = new Date(current?.updated_at || current?.created_at || 0).getTime() || 0;
+  return candidateUpdated > currentUpdated;
+}
+
+function mergeRowsById(...groups) {
+  const keyToIndex = new Map();
   const rows = [];
   groups.flat().forEach((row) => {
-    const key = row?.id || `${row?.vendorId || row?.vendor_id || ''}:${row?.name || ''}`;
-    if (!key || seen.has(key)) return;
-    seen.add(key);
+    const keys = productDedupeKeys(row);
+    if (!keys.length) return;
+
+    const existingIndex = keys
+      .map((key) => keyToIndex.get(key))
+      .find((index) => Number.isInteger(index));
+
+    if (Number.isInteger(existingIndex)) {
+      if (isPreferredProductRow(row, rows[existingIndex])) {
+        rows[existingIndex] = row;
+      }
+      keys.forEach((key) => keyToIndex.set(key, existingIndex));
+      return;
+    }
+
+    const nextIndex = rows.length;
     rows.push(row);
+    keys.forEach((key) => keyToIndex.set(key, nextIndex));
   });
   return rows;
 }
@@ -569,8 +886,10 @@ async function fetchBroadCategoryRows({ fallbackScopes = [], stateId, cityId, so
   return mergeRowsById(rows).slice(0, limit);
 }
 
-async function augmentWithBroadCategoryRows({ rows = [], fallbackScopes = [], stateId, cityId, sort, limit }) {
-  if (!fallbackScopes.some(canUseBroadCategoryScope) || rows.length >= limit) return rows.slice(0, limit);
+async function augmentWithBroadCategoryRows({ rows = [], q = '', fallbackScopes = [], stateId, cityId, sort, limit }) {
+  if (!fallbackScopes.some(canUseBroadCategoryScope) || rows.length >= limit) {
+    return rankRowsForSearchIntent(mergeRowsById(rows), q, sort).slice(0, limit);
+  }
   const broadRows = await fetchBroadCategoryRows({
     fallbackScopes,
     stateId,
@@ -578,7 +897,7 @@ async function augmentWithBroadCategoryRows({ rows = [], fallbackScopes = [], st
     sort,
     limit: Math.max(limit, limit - rows.length),
   });
-  return mergeRowsById(rows, broadRows).slice(0, limit);
+  return rankRowsForSearchIntent(mergeRowsById(rows, broadRows), q, sort).slice(0, limit);
 }
 
 async function fetchPersonalizedSearchTerms(req) {
@@ -1193,6 +1512,7 @@ async function handleRankedProducts(req, res) {
       if (hybrid.rows.length) {
         const responseRows = await augmentWithBroadCategoryRows({
           rows: hybrid.rows,
+          q,
           fallbackScopes,
           stateId,
           cityId,
@@ -1230,6 +1550,7 @@ async function handleRankedProducts(req, res) {
         if (scopedHybrid.rows.length) {
           const responseRows = await augmentWithBroadCategoryRows({
             rows: scopedHybrid.rows,
+            q,
             fallbackScopes,
             stateId,
             cityId,
@@ -1265,10 +1586,11 @@ async function handleRankedProducts(req, res) {
         limit,
       });
       if (broadCategoryRows.length) {
+        const responseRows = rankRowsForSearchIntent(mergeRowsById(broadCategoryRows), q, sort).slice(0, limit);
         return res.json({
           success: true,
-          data: broadCategoryRows,
-          count: broadCategoryRows.length,
+          data: responseRows,
+          count: responseRows.length,
           recommendations: [],
           availability: {
             exactAvailable: true,
@@ -1418,7 +1740,10 @@ async function handleRankedProducts(req, res) {
       };
     });
 
-    return res.json({ success: true, data: finalRows, count: totalCount });
+    const dedupedFinalRows = mergeRowsById(finalRows).slice(0, limit);
+    const responseCount = dedupedFinalRows.length < finalRows.length ? dedupedFinalRows.length : totalCount;
+
+    return res.json({ success: true, data: dedupedFinalRows, count: responseCount });
   } catch (e) {
     return res.status(500).json({
       success: false,
@@ -1551,7 +1876,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
     const offset = (page - 1) * limit;
     const visitorId = safeText(req.query?.visitor_id || req.query?.visitorId || req.headers?.['x-visitor-id'], 191);
     const personalized = Boolean(req.user?.id || req.user?.email || visitorId);
-    const cacheKey = `hybrid:v4:${JSON.stringify({ q, microSlug, sort, page, limit, stateId, cityId })}`;
+    const cacheKey = `hybrid:v11:${JSON.stringify({ q, microSlug, sort, page, limit, stateId, cityId })}`;
 
     if (!personalized && isRedisConfigured()) {
       const cached = await cacheGetJson(cacheKey).catch(() => null);
@@ -1583,20 +1908,61 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
       totalCount = fuzzy.totalCount;
     }
 
-    rows = await augmentWithBroadCategoryRows({
-      rows,
-      fallbackScopes,
-      stateId,
-      cityId,
-      sort,
-      limit,
-    });
-
+    rows = rankRowsForSearchIntent(mergeRowsById(rows), q, sort).slice(0, limit);
+    totalCount = rows.length;
     const exactAvailable = rows.length > 0;
     let scopedRecommendations = [];
     let locationRelaxed = false;
+    let locationRelaxationLevel = '';
+
+    if (!exactAvailable && q && cityId && stateId) {
+      const nearby = await runHybridSearchWithFallback({
+        q,
+        microId,
+        stateId,
+        cityId: null,
+        sort,
+        limit,
+        offset: 0,
+      });
+      let nearbyRows = mergeRowsById(nearby.rows || []);
+
+      if (!nearbyRows.length) {
+        const nearbyFuzzy = await fetchFuzzyCandidates({
+          q,
+          microId,
+          stateId,
+          cityId: null,
+          sort,
+          limit,
+        });
+        nearbyRows = mergeRowsById(nearbyFuzzy.rows || []);
+      }
+
+      if (!nearbyRows.length && microId) {
+        const nearbyCategory = await runHybridMysqlSearch({
+          q: '',
+          microId,
+          stateId,
+          cityId: null,
+          sort,
+          limit,
+          offset: 0,
+          useFullText: false,
+          broad: true,
+        });
+        nearbyRows = mergeRowsById(nearbyCategory.rows || []);
+      }
+
+      if (nearbyRows.length) {
+        scopedRecommendations = rankRowsForSearchIntent(nearbyRows, q, sort).slice(0, limit);
+        locationRelaxed = true;
+        locationRelaxationLevel = 'city';
+      }
+    }
+
     if (!exactAvailable && q) {
-      for (const scope of fallbackScopes) {
+      for (const scope of scopedRecommendations.length ? [] : fallbackScopes) {
         const scoped = await runHybridSearchWithFallback({
           q,
           ...scope,
@@ -1607,14 +1973,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
           offset: 0,
         });
         if (scoped.rows.length) {
-          scopedRecommendations = await augmentWithBroadCategoryRows({
-            rows: scoped.rows,
-            fallbackScopes,
-            stateId,
-            cityId,
-            sort,
-            limit,
-          });
+          scopedRecommendations = rankRowsForSearchIntent(mergeRowsById(scoped.rows || []), q, sort).slice(0, limit);
           break;
         }
       }
@@ -1623,7 +1982,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
         for (const scope of fallbackScopes) {
           const scopedFuzzy = await fetchFuzzyCandidates({ q, ...scope, stateId, cityId, sort, limit });
           if (scopedFuzzy.rows.length) {
-            scopedRecommendations = scopedFuzzy.rows.slice(0, limit);
+            scopedRecommendations = rankRowsForSearchIntent(scopedFuzzy.rows, q, sort).slice(0, limit);
             break;
           }
         }
@@ -1644,13 +2003,9 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
               limit,
               fallbackScopes,
             }));
-    let recommendationStateId = stateId;
-    let recommendationCityId = cityId;
-
     if (!exactAvailable && !recommendations.length && q && (stateId || cityId)) {
       locationRelaxed = true;
-      recommendationStateId = null;
-      recommendationCityId = null;
+      locationRelaxationLevel = 'all';
 
       for (const scope of fallbackScopes) {
         const scoped = await runHybridSearchWithFallback({
@@ -1663,14 +2018,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
           offset: 0,
         });
         if (scoped.rows.length) {
-          recommendations = await augmentWithBroadCategoryRows({
-            rows: scoped.rows,
-            fallbackScopes,
-            stateId: null,
-            cityId: null,
-            sort,
-            limit,
-          });
+          recommendations = rankRowsForSearchIntent(mergeRowsById(scoped.rows || []), q, sort).slice(0, limit);
           break;
         }
       }
@@ -1689,32 +2037,26 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
       }
     }
 
-    const responseRows = exactAvailable
-      ? rows
-      : await augmentWithBroadCategoryRows({
-          rows: recommendations,
-          fallbackScopes,
-          stateId: recommendationStateId,
-          cityId: recommendationCityId,
-          sort,
-          limit,
-        });
+    const responseRows = rankRowsForSearchIntent(mergeRowsById(exactAvailable ? rows : recommendations), q, sort).slice(0, limit);
     const hasResults = responseRows.length > 0;
     const searchEngine = responseRows.some((row) => row?.__searchEngine === 'opensearch') ? 'opensearch' : 'mysql';
     const availabilityMessage = exactAvailable
       ? ''
-      : (locationRelaxed
+      : (locationRelaxationLevel === 'city'
+          ? 'This product is currently not available in the selected city. Showing relevant suppliers from nearby cities in the selected state.'
+          : locationRelaxed
           ? 'This product is currently not available in the selected location. You may like these similar products from other locations.'
           : 'This product is currently not available. You may like these similar products.');
     const response = {
       success: true,
       data: responseRows,
-      count: exactAvailable ? Math.max(totalCount, responseRows.length) : responseRows.length,
+      count: responseRows.length,
       recommendations: exactAvailable ? [] : responseRows,
       availability: {
         exactAvailable,
         hasResults,
         locationRelaxed,
+        locationRelaxationLevel,
         message: availabilityMessage,
       },
       meta: {
@@ -1726,6 +2068,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
         semantic: true,
         personalized: Boolean(personalized),
         locationRelaxed,
+        locationRelaxationLevel,
         page,
         limit,
       },

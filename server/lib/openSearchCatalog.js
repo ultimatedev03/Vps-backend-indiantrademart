@@ -23,6 +23,9 @@ const SEMANTIC_TOKEN_MAP = {
   machine: ['machinery', 'equipment', 'tool'],
   machinery: ['machine', 'equipment', 'tool'],
   equipment: ['machine', 'machinery', 'tool'],
+  survey: ['surveyor', 'surveying', 'topographic', 'dgps', 'land survey'],
+  surveyor: ['survey', 'surveying', 'topographic', 'dgps', 'land survey'],
+  surveying: ['survey', 'surveyor', 'topographic', 'dgps', 'land survey'],
   supplier: ['vendor', 'manufacturer', 'dealer'],
   manufacturer: ['supplier', 'vendor', 'producer'],
   dealer: ['supplier', 'vendor', 'distributor'],
@@ -40,6 +43,7 @@ const OPENSEARCH_SYNONYMS = [
   'saree, sari, fabric, textile',
   'textile, fabric, cloth, garment, apparel, clothing',
   'consultant, consulting, advisor, service',
+  'survey, surveyor, surveying, topographic survey, land survey, dgps survey',
   'machine, machinery, equipment, tool',
   'supplier, vendor, manufacturer, dealer, distributor, producer',
   'lubricant, oil, engine oil, grease',
@@ -93,6 +97,221 @@ function searchTokens(value = '', max = 14) {
       (SEMANTIC_TOKEN_MAP[token] || []).forEach((synonym) => out.add(synonym));
     });
   return Array.from(out).slice(0, max);
+}
+
+function productDedupeKey(row = {}) {
+  return productDedupeKeys(row)[0] || '';
+}
+
+function productDedupeKeys(row = {}) {
+  const normalize = (value = '') => normalizeSearchText(value).replace(/\s+/g, '-');
+  const canonicalName = (value = '') => normalize(value)
+    .replace(/-(service|services|supplier|suppliers|manufacturer|manufacturers|product|products)$/g, '');
+  const imageKey = (() => {
+    const pick = (value) => {
+      if (typeof value === 'string') return value;
+      if (value && typeof value === 'object') return value.url || value.image_url || value.src || '';
+      return '';
+    };
+    const raw = row?.images;
+    if (Array.isArray(raw)) return normalize(pick(raw[0]));
+    if (typeof raw === 'string') {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return normalize(pick(parsed[0]));
+      } catch (_) {
+        return normalize(raw);
+      }
+    }
+    return normalize(row?.image || row?.image_url || '');
+  })();
+  const unique = (keys = []) => {
+    const seen = new Set();
+    return keys.filter((key) => {
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+  const vendorNameKey = normalize(
+    row?.vendorName ||
+      row?.vendor_name ||
+      row?.vendors?.company_name ||
+      row?.company_name
+  );
+  const vendorIdKey = normalize(row?.vendorId || row?.vendor_id || row?.vendors?.id);
+  const vendorKeys = unique([vendorNameKey, vendorIdKey]);
+  const nameKey = canonicalName(row?.name || row?.product_name || row?.title || row?.slug);
+  const stableKey = normalize(row?.id || row?.slug);
+  const categoryKey = normalize(row?.category_slug || row?.category || row?.micro_category_name);
+  const priceKey = normalize(row?.price);
+  const unitKey = normalize(row?.price_unit || row?.qty_unit || row?.unit);
+  const keys = [];
+
+  vendorKeys.forEach((vendorKey) => {
+    if (nameKey) keys.push(`vendor-name:${vendorKey}:${nameKey}`);
+    if (imageKey) keys.push(`vendor-image:${vendorKey}:${imageKey}`);
+  });
+  if (stableKey) keys.push(`product:${stableKey}`);
+  if (!vendorKeys.length && nameKey) keys.push(`name:${nameKey}:${categoryKey}:${priceKey}:${unitKey}:${imageKey}`);
+  if (!vendorKeys.length && imageKey) keys.push(`image:${nameKey}:${imageKey}`);
+  return unique(keys);
+}
+
+function searchTokenVariants(token = '') {
+  const normalized = normalizeSearchText(token);
+  const variants = new Set();
+  if (!normalized) return [];
+  if (normalized.includes(' ')) variants.add(normalized);
+  else addTokenVariants(normalized, variants);
+  (SEMANTIC_TOKEN_MAP[normalized] || []).forEach((synonym) => {
+    const normalizedSynonym = normalizeSearchText(synonym);
+    if (!normalizedSynonym) return;
+    if (normalizedSynonym.includes(' ')) variants.add(normalizedSynonym);
+    else addTokenVariants(normalizedSynonym, variants);
+  });
+  return Array.from(variants);
+}
+
+function fieldHasSearchToken(field = '', token = '') {
+  const normalizedField = normalizeSearchText(field);
+  if (!normalizedField) return false;
+  return searchTokenVariants(token).some((variant) => {
+    if (!variant) return false;
+    if (variant.includes(' ')) return normalizedField.includes(variant);
+    return normalizedField === variant ||
+      normalizedField.startsWith(`${variant} `) ||
+      normalizedField.endsWith(` ${variant}`) ||
+      normalizedField.includes(` ${variant} `);
+  });
+}
+
+const LAND_SURVEY_TOKENS = new Set(['survey', 'surveyor', 'surveyors', 'surveying', 'topographic', 'dgps']);
+const SURVEY_PRIMARY_NAME_RE = /\b(land\s+survey|land\s+surveyor|survey|surveyor|surveying|topographic|topographical|dgps|total\s+station|route\s+survey|contour\s+survey|cadastral\s+survey)\b/;
+const SURVEY_SUPPORTING_NAME_RE = /\b(gps|ts\s+survey|levelling|leveling|mapping|demarcation)\b/;
+const NON_SURVEY_ENGINEERING_RE = /\b(geotechnical|geo\s*technical|soil\s+testing|soil|investigation|pile|plate\s+load|thermal\s+resistivity|borehole|cross\s+hole|hydro\s+geological)\b/;
+
+function isLandSurveyIntent(query = '', tokens = searchTokens(query, 10)) {
+  const normalized = normalizeSearchText(query);
+  const hasSurvey = tokens.some((token) => LAND_SURVEY_TOKENS.has(token)) || /\bsurvey(or|ors|ing)?\b/.test(normalized);
+  const hasLand = tokens.includes('land') || /\bland\b/.test(normalized);
+  return hasSurvey && (hasLand || /\b(topographic|dgps|total\s+station|route\s+survey)\b/.test(normalized));
+}
+
+function surveyIntentBonus(query = '', row = {}) {
+  const tokens = searchTokens(query, 10);
+  const surveyIntent = tokens.some((token) => LAND_SURVEY_TOKENS.has(token)) || /\bsurvey(or|ors|ing)?\b/.test(normalizeSearchText(query));
+  if (!surveyIntent) return 0;
+
+  const landIntent = isLandSurveyIntent(query, tokens);
+  const name = normalizeSearchText(row?.name || row?.product_name || row?.title || '');
+  const category = normalizeSearchText(row?.category || row?.micro_category_name || '');
+  const categoryPath = normalizeSearchText(row?.category_path || row?.category_slug || '');
+  const text = `${name} ${category} ${categoryPath}`;
+  let bonus = 0;
+
+  if (/\bland\s+(survey|surveyor|surveying)\b/.test(name)) bonus += landIntent ? 760 : 520;
+  if (/\b(total\s+station|topographic|topographical|dgps|route\s+survey|contour\s+survey|cadastral\s+survey)\b/.test(name)) bonus += landIntent ? 560 : 380;
+  if (SURVEY_PRIMARY_NAME_RE.test(name)) bonus += landIntent ? 360 : 240;
+  if (SURVEY_SUPPORTING_NAME_RE.test(name)) bonus += 120;
+  if (/\b(land\s+survey|survey|surveyor|surveying)\b/.test(category)) bonus += 140;
+  if (/\b(survey|surveyor|surveying|topographic|dgps|total\s+station)\b/.test(categoryPath)) bonus += 70;
+
+  if (!SURVEY_PRIMARY_NAME_RE.test(text) && !SURVEY_SUPPORTING_NAME_RE.test(text)) bonus -= landIntent ? 240 : 120;
+  if (NON_SURVEY_ENGINEERING_RE.test(name)) bonus -= landIntent ? 420 : 180;
+  if (landIntent && NON_SURVEY_ENGINEERING_RE.test(name) && !SURVEY_PRIMARY_NAME_RE.test(name)) bonus -= 220;
+
+  return bonus;
+}
+
+function surveyIntentRank(query = '', row = {}) {
+  if (!isLandSurveyIntent(query)) return 0;
+
+  const name = normalizeSearchText(row?.name || row?.product_name || row?.title || '');
+  const category = normalizeSearchText(row?.category || row?.micro_category_name || '');
+  const categoryPath = normalizeSearchText(row?.category_path || row?.category_slug || '');
+  const text = `${name} ${category} ${categoryPath}`;
+
+  if (/\bland\s+(survey|surveyor|surveying)\b/.test(name)) return 70;
+  if (/\b(total\s+station|topographic|topographical|dgps|route\s+survey|contour\s+survey|cadastral\s+survey)\b/.test(name)) return 60;
+  if (SURVEY_PRIMARY_NAME_RE.test(name)) return 52;
+  if (/\b(land\s+survey|survey|surveyor|surveying|topographic|dgps|total\s+station)\b/.test(category)) return 42;
+  if (/\b(land\s+survey|survey|surveyor|surveying|topographic|dgps|total\s+station)\b/.test(categoryPath)) return 36;
+  if (SURVEY_SUPPORTING_NAME_RE.test(text)) return 24;
+  if (NON_SURVEY_ENGINEERING_RE.test(name) && !SURVEY_PRIMARY_NAME_RE.test(name)) return 4;
+  return 12;
+}
+
+function catalogIntentScore(query = '', row = {}) {
+  const q = normalizeSearchText(query);
+  if (!q) return 0;
+
+  const tokens = searchTokens(query, 10);
+  const name = normalizeSearchText(row?.name || row?.product_name || row?.title || '');
+  const category = normalizeSearchText(row?.category || row?.micro_category_name || '');
+  const categoryPath = normalizeSearchText(row?.category_path || row?.category_slug || '');
+  const description = normalizeSearchText(row?.description || '');
+  let score = 0;
+
+  if (name === q) score += 500;
+  if (name.includes(q)) score += 260;
+  if (category.includes(q)) score += 120;
+
+  tokens.forEach((token) => {
+    if (fieldHasSearchToken(name, token)) score += 95;
+    if (fieldHasSearchToken(category, token)) score += 34;
+    if (fieldHasSearchToken(categoryPath, token)) score += 18;
+    if (fieldHasSearchToken(description, token)) score += 8;
+  });
+
+  score += surveyIntentBonus(query, row);
+
+  const landIntent = tokens.includes('land') || tokens.includes('land survey');
+  if (landIntent && /\bland\b/.test(name)) score += 120;
+
+  return score;
+}
+
+function rankRowsForSearchIntent(rows = [], query = '', sort = '') {
+  if (!query || sort === 'price_asc' || sort === 'price_desc') return rows;
+  const landSurveyIntent = isLandSurveyIntent(query);
+  return [...rows].sort((a, b) => {
+    if (landSurveyIntent) {
+      const surveyDiff = surveyIntentRank(query, b) - surveyIntentRank(query, a);
+      if (surveyDiff) return surveyDiff;
+    }
+    const intentDiff = catalogIntentScore(query, b) - catalogIntentScore(query, a);
+    if (intentDiff) return intentDiff;
+    const scoreDiff = Number(b.__sortScore || 0) - Number(a.__sortScore || 0);
+    if (scoreDiff) return scoreDiff;
+    return Number(b.vendor_plan_priority || 0) - Number(a.vendor_plan_priority || 0);
+  });
+}
+
+function dedupeProductRows(rows = []) {
+  const keyToIndex = new Map();
+  const unique = [];
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const keys = productDedupeKeys(row);
+    if (!keys.length) return;
+    const existingIndex = keys
+      .map((key) => keyToIndex.get(key))
+      .find((index) => Number.isInteger(index));
+
+    if (Number.isInteger(existingIndex)) {
+      const current = unique[existingIndex];
+      const rowScore = Number(row?.__sortScore || 0);
+      const currentScore = Number(current?.__sortScore || 0);
+      if (rowScore > currentScore) unique[existingIndex] = row;
+      keys.forEach((key) => keyToIndex.set(key, existingIndex));
+      return;
+    }
+
+    const nextIndex = unique.length;
+    unique.push(row);
+    keys.forEach((key) => keyToIndex.set(key, nextIndex));
+  });
+  return unique;
 }
 
 function uniqueSearchStrings(values = [], max = 16) {
@@ -443,9 +662,17 @@ export async function fetchProductRowsForOpenSearch({ limit = 500, offset = 0 } 
        LEFT JOIN sub_categories sc ON sc.id = COALESCE(p.sub_category_id, mc.sub_category_id)
        LEFT JOIN head_categories hc ON hc.id = COALESCE(p.head_category_id, sc.head_category_id)
        LEFT JOIN vendor_plan_subscriptions vps
-         ON vps.vendor_id = p.vendor_id
-        AND vps.status = 'ACTIVE'
-        AND (vps.end_date IS NULL OR vps.end_date > UTC_TIMESTAMP())
+         ON vps.id = (
+           SELECT active_vps.id
+             FROM vendor_plan_subscriptions active_vps
+            WHERE active_vps.vendor_id = p.vendor_id
+              AND active_vps.status = 'ACTIVE'
+              AND (active_vps.end_date IS NULL OR active_vps.end_date > UTC_TIMESTAMP())
+            ORDER BY COALESCE(active_vps.end_date, '9999-12-31 23:59:59') DESC,
+                     active_vps.created_at DESC,
+                     active_vps.id DESC
+            LIMIT 1
+         )
        LEFT JOIN vendor_plans vp ON vp.id = vps.plan_id
       WHERE p.status = 'ACTIVE'
         AND COALESCE(v.is_active, 1) = 1
@@ -555,6 +782,15 @@ function buildProductSearchQuery({ q, microId, microIds, subCategoryId, headCate
         fuzzy_transpositions: true,
         operator: 'or',
         boost: 3,
+      },
+    },
+    {
+      multi_match: {
+        query: queryText,
+        fields: ['name^12', 'category^9', 'micro_name^7', 'sub_category_name^5', 'category_path^3'],
+        type: 'best_fields',
+        operator: 'and',
+        boost: 5,
       },
     },
     {
@@ -672,9 +908,10 @@ export async function searchOpenSearchProducts(options = {}) {
   if (!isOpenSearchCatalogEnabled() || !String(options.q || '').trim()) return { rows: [], totalCount: 0, engine: 'mysql' };
   const limit = Math.min(Math.max(Number(options.limit || 20), 1), 50);
   const offset = Math.min(Math.max(Number(options.offset || 0), 0), 5000);
+  const fetchSize = Math.min(Math.max(limit * 3, limit), 150);
   const body = {
     from: offset,
-    size: limit,
+    size: fetchSize,
     track_total_hits: true,
     query: buildProductSearchQuery(options),
     sort: openSearchSort(options.sort),
@@ -685,12 +922,14 @@ export async function searchOpenSearchProducts(options = {}) {
     timeoutMs: 6500,
   });
   const hits = result?.hits?.hits || [];
-  const total = typeof result?.hits?.total === 'number'
-    ? result.hits.total
-    : Number(result?.hits?.total?.value || hits.length);
+  const rows = rankRowsForSearchIntent(
+    dedupeProductRows(hits.map(productFromOpenSearchHit)),
+    options.q,
+    options.sort
+  ).slice(0, limit);
   return {
-    rows: hits.map(productFromOpenSearchHit),
-    totalCount: total,
+    rows,
+    totalCount: rows.length,
     engine: 'opensearch',
   };
 }
