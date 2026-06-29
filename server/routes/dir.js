@@ -2109,14 +2109,18 @@ router.get('/cities', cacheResponse('dir:cities', 3600), async (req, res) => {
   try {
     const { stateId } = req.query;
     if (!isValidId(stateId)) return res.status(400).json({ success: false, error: 'stateId required' });
-    let query = db.from('cities').select('id, name, slug, suplier_count, state_id').eq('state_id', stateId).order('name');
+    let query = db.from('cities').select('id, name, slug, supplier_count, state_id, is_active').eq('state_id', stateId).order('name');
     const { data, error } = await query;
     if (error && String(error.message).includes('does not exist')) {
-      const fb = await db.from('cities').select('id, name, slug, supplier_count, state_id').eq('state_id', stateId).order('name');
-      return res.json({ success: true, cities: fb.data || [] });
+      const fb = await db.from('cities').select('id, name, slug, supplier_count, state_id, is_active').eq('state_id', stateId).order('name');
+      const fallbackRows = fb.data || [];
+      const fallbackActiveRows = fallbackRows.filter((row) => row?.is_active === true || row?.is_active === 1 || row?.is_active === '1');
+      return res.json({ success: true, cities: fallbackActiveRows.length ? fallbackActiveRows : fallbackRows });
     }
     if (error) throw error;
-    res.json({ success: true, cities: data || [] });
+    const rows = data || [];
+    const activeRows = rows.filter((row) => row?.is_active === true || row?.is_active === 1 || row?.is_active === '1');
+    res.json({ success: true, cities: activeRows.length ? activeRows : rows });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

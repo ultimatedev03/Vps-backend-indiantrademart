@@ -3,6 +3,7 @@ import mysql from 'mysql2/promise';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { mysqlConfig } from '../lib/mysqlPool.js';
+import { syncDelhiCities } from './syncDelhiCities.js';
 
 const here = fileURLToPath(import.meta.url);
 const scriptsDir = dirname(here);
@@ -230,6 +231,7 @@ export async function setupMysqlSchema() {
 
   await dbConnection.query(schemaSql);
   await ensureCompatibilitySchema(dbConnection);
+  await syncDelhiCities(dbConnection);
   await dbConnection.end();
 
   console.log(`MySQL schema ready: ${database}`);
