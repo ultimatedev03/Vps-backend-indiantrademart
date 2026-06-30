@@ -37,14 +37,23 @@ export const redisCommand = async (command = []) => {
     throw new Error('Redis command is required');
   }
 
-  const response = await fetch(url.replace(/\/+$/, ''), {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ command }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.REDIS_REST_TIMEOUT_MS || 2500));
+
+  let response;
+  try {
+    response = await fetch(url.replace(/\/+$/, ''), {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ command }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 
   const payload = await response.json().catch(() => null);
   if (!response.ok || payload?.error) {

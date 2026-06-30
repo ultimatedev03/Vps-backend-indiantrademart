@@ -496,13 +496,16 @@ export async function runBehavioralCommerceIntelligence(options = {}) {
 }
 
 async function loadIntelligenceDashboard(days, limit) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 50, 10), 100);
+  const forecastLimit = Math.min(safeLimit, 30);
+
   const rows = await mysqlQuery(
     `SELECT *
        FROM behavioral_demand_scores
       WHERE window_days = ?
       ORDER BY demand_score DESC, trend_percent DESC, unique_visitors DESC
-      LIMIT ?`,
-    [days, limit]
+      LIMIT ${safeLimit}`,
+    [days]
   );
 
   const forecasts = await mysqlQuery(
@@ -510,8 +513,8 @@ async function loadIntelligenceDashboard(days, limit) {
        FROM behavioral_forecasts
       WHERE window_days = ?
       ORDER BY forecast_30d DESC, trend_percent DESC
-      LIMIT ?`,
-    [days, Math.min(limit, 30)]
+      LIMIT ${forecastLimit}`,
+    [days]
   );
 
   const eventSummary = await mysqlQuery(
