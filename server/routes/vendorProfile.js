@@ -2309,6 +2309,23 @@ const buildDefaultVendorPreferences = (vendorId) => ({
   auto_lead_filter: true,
 });
 
+const MICRO_SLOT_LIMIT_BY_PLAN = {
+  trial: 1,
+  startup: 3,
+  certified: 5,
+  booster: 7,
+  silver: 4,
+  gold: 8,
+  diamond: 15,
+  dimond: 15,
+};
+
+function microSlotLimitForPlanName(planName) {
+  const key = String(planName || '').trim().toLowerCase();
+  const found = Object.entries(MICRO_SLOT_LIMIT_BY_PLAN).find(([name]) => key.includes(name));
+  return found ? found[1] : null;
+}
+
 async function resolveActivePlanLimits(vendorId) {
   const defaults = { states: 2, cities: 20, categories: 5 };
   const { data } = await db
@@ -2330,13 +2347,16 @@ async function resolveActivePlanLimits(vendorId) {
   }
 
   const coverage = features?.coverage && typeof features.coverage === 'object' ? features.coverage : {};
+  const listing = features?.listing && typeof features.listing === 'object' ? features.listing : {};
+  const planName = data?.plan?.name || 'Trial';
+  const fallbackSlots = microSlotLimitForPlanName(planName);
   return {
-    plan_name: data?.plan?.name || 'Trial',
+    plan_name: planName,
     coverage: {
       states_limit: Number(coverage.states_limit ?? features.states_limit ?? defaults.states),
       cities_limit: Number(coverage.cities_limit ?? features.cities_limit ?? defaults.cities),
     },
-    categories_limit: Number(features.categories_limit ?? defaults.categories),
+    categories_limit: Number(listing.top_slots ?? fallbackSlots ?? features.categories_limit ?? defaults.categories),
   };
 }
 

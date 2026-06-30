@@ -847,6 +847,33 @@ async function executeDirRankedProducts(params = {}) {
   const offset = clampSqlInt(params.p_offset, 0, 1000000);
   const where = ['p.status = ?', 'COALESCE(v.is_active, 1) = 1'];
   const sqlParams = ['ACTIVE'];
+  const planPrioritySql = `CASE
+          WHEN LOWER(COALESCE(vp.name, '')) LIKE '%diamond%' OR LOWER(COALESCE(vp.name, '')) LIKE '%dimond%' THEN 700
+          WHEN LOWER(COALESCE(vp.name, '')) LIKE '%gold%' THEN 600
+          WHEN LOWER(COALESCE(vp.name, '')) LIKE '%silver%' THEN 500
+          WHEN LOWER(COALESCE(vp.name, '')) LIKE '%boost%' THEN 400
+          WHEN LOWER(COALESCE(vp.name, '')) LIKE '%certif%' THEN 300
+          WHEN LOWER(COALESCE(vp.name, '')) LIKE '%startup%' THEN 200
+          ELSE 100
+        END`;
+  const salesAssistedSlotPlanSql = `(
+          LOWER(COALESCE(vp.name, '')) LIKE '%diamond%'
+          OR LOWER(COALESCE(vp.name, '')) LIKE '%dimond%'
+          OR LOWER(COALESCE(vp.name, '')) LIKE '%gold%'
+          OR LOWER(COALESCE(vp.name, '')) LIKE '%silver%'
+        )`;
+  const preferredCategorySql = `(
+          p.micro_category_id IS NOT NULL
+          AND JSON_LENGTH(COALESCE(vpref.preferred_micro_categories, JSON_ARRAY())) > 0
+          AND JSON_CONTAINS(COALESCE(vpref.preferred_micro_categories, JSON_ARRAY()), JSON_QUOTE(p.micro_category_id))
+        )`;
+  const premiumSlotSql = `(${salesAssistedSlotPlanSql} AND ${preferredCategorySql})`;
+  let preferredLocationSql = `(
+          JSON_LENGTH(COALESCE(vpref.preferred_states, JSON_ARRAY())) > 0
+          OR JSON_LENGTH(COALESCE(vpref.preferred_districts, JSON_ARRAY())) > 0
+          OR JSON_LENGTH(COALESCE(vpref.preferred_cities, JSON_ARRAY())) > 0
+        )`;
+  const preferredLocationParams = [];
 
   if (params.p_micro_id) {
     where.push('p.micro_category_id = ?');
@@ -867,36 +894,108 @@ async function executeDirRankedProducts(params = {}) {
   if (params.p_state_id) {
     where.push('v.state_id = ?');
     sqlParams.push(params.p_state_id);
+    preferredLocationSql = `(
+          (
+            JSON_LENGTH(COALESCE(vpref.preferred_states, JSON_ARRAY())) > 0
+            AND JSON_CONTAINS(COALESCE(vpref.preferred_states, JSON_ARRAY()), JSON_QUOTE(?))
+          )
+          OR (
+            JSON_LENGTH(COALESCE(vpref.preferred_cities, JSON_ARRAY())) > 0
+            AND EXISTS (
+              SELECT 1
+                FROM JSON_TABLE(COALESCE(vpref.preferred_cities, JSON_ARRAY()), '$[*]' COLUMNS(preferred_city_id VARCHAR(64) PATH '$')) preferred_city
+                JOIN cities preferred_city_row ON preferred_city_row.id = preferred_city.preferred_city_id
+               WHERE preferred_city_row.state_id = ?
+            )
+          )
+          OR (
+            JSON_LENGTH(COALESCE(vpref.preferred_districts, JSON_ARRAY())) > 0
+            AND EXISTS (
+              SELECT 1
+                FROM JSON_TABLE(COALESCE(vpref.preferred_districts, JSON_ARRAY()), '$[*]' COLUMNS(preferred_district_id VARCHAR(64) PATH '$')) preferred_district
+                JOIN districts preferred_district_row ON preferred_district_row.id = preferred_district.preferred_district_id
+               WHERE preferred_district_row.state_id = ?
+            )
+          )
+        )`;
+    preferredLocationParams.push(params.p_state_id, params.p_state_id, params.p_state_id);
   }
   if (params.p_city_id) {
     where.push('v.city_id = ?');
     sqlParams.push(params.p_city_id);
+    preferredLocationSql = `(
+          (
+            JSON_LENGTH(COALESCE(vpref.preferred_cities, JSON_ARRAY())) > 0
+            AND JSON_CONTAINS(COALESCE(vpref.preferred_cities, JSON_ARRAY()), JSON_QUOTE(?))
+          )
+          OR (
+            JSON_LENGTH(COALESCE(vpref.preferred_states, JSON_ARRAY())) > 0
+            AND EXISTS (
+              SELECT 1
+                FROM cities selected_city
+               WHERE selected_city.id = ?
+                 AND JSON_CONTAINS(COALESCE(vpref.preferred_states, JSON_ARRAY()), JSON_QUOTE(selected_city.state_id))
+            )
+          )
+          OR (
+            JSON_LENGTH(COALESCE(vpref.preferred_districts, JSON_ARRAY())) > 0
+            AND EXISTS (
+              SELECT 1
+                FROM cities selected_city
+               WHERE selected_city.id = ?
+                 AND JSON_CONTAINS(COALESCE(vpref.preferred_districts, JSON_ARRAY()), JSON_QUOTE(selected_city.district_id))
+            )
+          )
+        )`;
+    preferredLocationParams.length = 0;
+    preferredLocationParams.push(params.p_city_id, params.p_city_id, params.p_city_id);
   }
+  where.push(`(
+    NOT ${salesAssistedSlotPlanSql}
+    OR (
+      ${preferredCategorySql}
+      AND ${preferredLocationSql}
+    )
+  )`);
+  sqlParams.push(...preferredLocationParams);
 
   const sort = String(params.p_sort || '');
+  const slotAwarePlanOrder = 'CASE WHEN premium_slot_rank > 0 THEN vendor_plan_priority ELSE 0 END DESC';
   const sortSql = sort === 'price_asc'
-    ? 'p.price ASC'
+    ? `p.price ASC, premium_slot_rank DESC, ${slotAwarePlanOrder}`
     : sort === 'price_desc'
-      ? 'p.price DESC'
-      : `CASE
-          WHEN LOWER(COALESCE(vp.name, '')) LIKE '%diamond%' THEN 700
-          WHEN LOWER(COALESCE(vp.name, '')) LIKE '%gold%' THEN 600
-          WHEN LOWER(COALESCE(vp.name, '')) LIKE '%silver%' THEN 500
-          WHEN LOWER(COALESCE(vp.name, '')) LIKE '%boost%' THEN 400
-          WHEN LOWER(COALESCE(vp.name, '')) LIKE '%certif%' THEN 300
-          WHEN LOWER(COALESCE(vp.name, '')) LIKE '%startup%' THEN 200
-          ELSE 100
-        END DESC, p.created_at DESC`;
+      ? `p.price DESC, premium_slot_rank DESC, ${slotAwarePlanOrder}`
+      : `premium_slot_rank DESC, ${slotAwarePlanOrder}, p.created_at DESC`;
 
   const rows = await mysqlQuery(
-    `SELECT p.*, COUNT(*) OVER() AS total_count
+    `SELECT p.*,
+            COALESCE(vp.name, 'TRIAL') AS vendor_plan_name,
+            ${planPrioritySql} AS vendor_plan_priority,
+            CASE WHEN ${premiumSlotSql} THEN 1 ELSE 0 END AS premium_slot_matched,
+            CASE WHEN ${premiumSlotSql} THEN ${planPrioritySql} ELSE 0 END AS premium_slot_rank,
+            CASE
+              WHEN ${premiumSlotSql} AND (LOWER(COALESCE(vp.name, '')) LIKE '%diamond%' OR LOWER(COALESCE(vp.name, '')) LIKE '%dimond%') THEN 'Diamond Supplier'
+              WHEN ${premiumSlotSql} AND LOWER(COALESCE(vp.name, '')) LIKE '%gold%' THEN 'Gold Supplier'
+              WHEN ${premiumSlotSql} AND LOWER(COALESCE(vp.name, '')) LIKE '%silver%' THEN 'Silver Supplier'
+              ELSE ''
+            END AS premium_slot_label,
+            COUNT(*) OVER() AS total_count
        FROM products p
        JOIN vendors v ON v.id = p.vendor_id
        LEFT JOIN vendor_plan_subscriptions vps
-         ON vps.vendor_id = p.vendor_id
-        AND vps.status = 'ACTIVE'
-        AND (vps.end_date IS NULL OR vps.end_date > UTC_TIMESTAMP())
+         ON vps.id = (
+           SELECT active_vps.id
+             FROM vendor_plan_subscriptions active_vps
+            WHERE active_vps.vendor_id = p.vendor_id
+              AND active_vps.status = 'ACTIVE'
+              AND (active_vps.end_date IS NULL OR active_vps.end_date > UTC_TIMESTAMP())
+            ORDER BY COALESCE(active_vps.end_date, '9999-12-31 23:59:59') DESC,
+                     active_vps.created_at DESC,
+                     active_vps.id DESC
+            LIMIT 1
+         )
       LEFT JOIN vendor_plans vp ON vp.id = vps.plan_id
+      LEFT JOIN vendor_preferences vpref ON vpref.vendor_id = p.vendor_id
      WHERE ${where.join(' AND ')}
       ORDER BY ${sortSql}
       LIMIT ${limit} OFFSET ${offset}`,

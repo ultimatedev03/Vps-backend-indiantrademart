@@ -33,7 +33,7 @@ function normPlanName(name) {
 function planToTierKey(planName) {
   const n = normPlanName(planName);
   if (!n) return 'trial';
-  if (n.includes('diamond')) return 'diamond';
+  if (n.includes('diamond') || n.includes('dimond')) return 'diamond';
   if (n.includes('gold')) return 'gold';
   if (n.includes('silver')) return 'silver';
   if (n.includes('booster') || n.includes('boost')) return 'booster';
@@ -348,15 +348,19 @@ function rankRowsForSearchIntent(rows = [], query = '', sort = '') {
     }
     const intentDiff = catalogIntentScore(query, b) - catalogIntentScore(query, a);
     if (intentDiff) return intentDiff;
+    const premiumSlotDiff = Number(b.premium_slot_rank || 0) - Number(a.premium_slot_rank || 0);
+    if (premiumSlotDiff) return premiumSlotDiff;
     const scoreDiff = Number(b.__sortScore || 0) - Number(a.__sortScore || 0);
     if (scoreDiff) return scoreDiff;
-    return Number(b.vendor_plan_priority || 0) - Number(a.vendor_plan_priority || 0);
+    const slotAwarePlanA = Number(a.premium_slot_rank || 0) > 0 ? Number(a.vendor_plan_priority || 0) : 0;
+    const slotAwarePlanB = Number(b.premium_slot_rank || 0) > 0 ? Number(b.vendor_plan_priority || 0) : 0;
+    return slotAwarePlanB - slotAwarePlanA;
   });
 }
 
 function planPriorityCaseSql() {
   return `CASE
-    WHEN LOWER(COALESCE(vp.name, '')) LIKE '%diamond%' THEN 700
+    WHEN LOWER(COALESCE(vp.name, '')) LIKE '%diamond%' OR LOWER(COALESCE(vp.name, '')) LIKE '%dimond%' THEN 700
     WHEN LOWER(COALESCE(vp.name, '')) LIKE '%gold%' THEN 600
     WHEN LOWER(COALESCE(vp.name, '')) LIKE '%silver%' THEN 500
     WHEN LOWER(COALESCE(vp.name, '')) LIKE '%boost%' THEN 400
@@ -366,8 +370,184 @@ function planPriorityCaseSql() {
   END`;
 }
 
-function buildProductRowSelect(scoreSql = '0') {
-  return `
+function salesAssistedSlotPlanSql() {
+  return `(
+    LOWER(COALESCE(vp.name, '')) LIKE '%diamond%'
+    OR LOWER(COALESCE(vp.name, '')) LIKE '%dimond%'
+    OR LOWER(COALESCE(vp.name, '')) LIKE '%gold%'
+    OR LOWER(COALESCE(vp.name, '')) LIKE '%silver%'
+  )`;
+}
+
+function preferredCategoryMatchSql() {
+  return `(
+    p.micro_category_id IS NOT NULL
+    AND JSON_LENGTH(COALESCE(vpref.preferred_micro_categories, JSON_ARRAY())) > 0
+    AND JSON_CONTAINS(COALESCE(vpref.preferred_micro_categories, JSON_ARRAY()), JSON_QUOTE(p.micro_category_id))
+  )`;
+}
+
+function premiumSlotMatchSql(args = {}) {
+  const location = preferredLocationGate(args);
+  return {
+    sql: `(
+      ${salesAssistedSlotPlanSql()}
+      AND ${preferredCategoryMatchSql()}
+      AND ${location.sql}
+    )`,
+    params: location.params,
+  };
+}
+
+function premiumSlotRankSql(slotMatchSql) {
+  return `CASE
+    WHEN ${slotMatchSql} THEN ${planPriorityCaseSql()}
+    ELSE 0
+  END`;
+}
+
+function premiumSlotLabelSql(slotMatchSql) {
+  return `CASE
+    WHEN ${slotMatchSql} AND (LOWER(COALESCE(vp.name, '')) LIKE '%diamond%' OR LOWER(COALESCE(vp.name, '')) LIKE '%dimond%') THEN 'Diamond Supplier'
+    WHEN ${slotMatchSql} AND LOWER(COALESCE(vp.name, '')) LIKE '%gold%' THEN 'Gold Supplier'
+    WHEN ${slotMatchSql} AND LOWER(COALESCE(vp.name, '')) LIKE '%silver%' THEN 'Silver Supplier'
+    ELSE ''
+  END`;
+}
+
+function preferredLocationGate({ stateId, districtId, cityId } = {}) {
+  const params = [];
+
+  if (cityId) {
+    params.push(cityId, cityId, cityId);
+    return {
+      sql: `(
+        (
+          JSON_LENGTH(COALESCE(vpref.preferred_cities, JSON_ARRAY())) > 0
+          AND JSON_CONTAINS(COALESCE(vpref.preferred_cities, JSON_ARRAY()), JSON_QUOTE(?))
+        )
+        OR (
+          JSON_LENGTH(COALESCE(vpref.preferred_districts, JSON_ARRAY())) > 0
+          AND EXISTS (
+            SELECT 1
+              FROM cities selected_city
+             WHERE selected_city.id = ?
+               AND JSON_CONTAINS(COALESCE(vpref.preferred_districts, JSON_ARRAY()), JSON_QUOTE(selected_city.district_id))
+          )
+        )
+        OR (
+          JSON_LENGTH(COALESCE(vpref.preferred_states, JSON_ARRAY())) > 0
+          AND EXISTS (
+            SELECT 1
+              FROM cities selected_city
+             WHERE selected_city.id = ?
+               AND JSON_CONTAINS(COALESCE(vpref.preferred_states, JSON_ARRAY()), JSON_QUOTE(selected_city.state_id))
+          )
+        )
+      )`,
+      params,
+    };
+  }
+
+  if (districtId) {
+    params.push(districtId, districtId, districtId);
+    return {
+      sql: `(
+        (
+          JSON_LENGTH(COALESCE(vpref.preferred_districts, JSON_ARRAY())) > 0
+          AND JSON_CONTAINS(COALESCE(vpref.preferred_districts, JSON_ARRAY()), JSON_QUOTE(?))
+        )
+        OR (
+          JSON_LENGTH(COALESCE(vpref.preferred_cities, JSON_ARRAY())) > 0
+          AND EXISTS (
+            SELECT 1
+              FROM JSON_TABLE(COALESCE(vpref.preferred_cities, JSON_ARRAY()), '$[*]' COLUMNS(preferred_city_id VARCHAR(64) PATH '$')) preferred_city
+              JOIN cities preferred_city_row ON preferred_city_row.id = preferred_city.preferred_city_id
+             WHERE preferred_city_row.district_id = ?
+          )
+        )
+        OR (
+          JSON_LENGTH(COALESCE(vpref.preferred_states, JSON_ARRAY())) > 0
+          AND EXISTS (
+            SELECT 1
+              FROM districts selected_district
+             WHERE selected_district.id = ?
+               AND JSON_CONTAINS(COALESCE(vpref.preferred_states, JSON_ARRAY()), JSON_QUOTE(selected_district.state_id))
+          )
+        )
+      )`,
+      params,
+    };
+  }
+
+  if (stateId) {
+    params.push(stateId, stateId, stateId);
+    return {
+      sql: `(
+        (
+          JSON_LENGTH(COALESCE(vpref.preferred_states, JSON_ARRAY())) > 0
+          AND JSON_CONTAINS(COALESCE(vpref.preferred_states, JSON_ARRAY()), JSON_QUOTE(?))
+        )
+        OR (
+          JSON_LENGTH(COALESCE(vpref.preferred_districts, JSON_ARRAY())) > 0
+          AND EXISTS (
+            SELECT 1
+              FROM JSON_TABLE(COALESCE(vpref.preferred_districts, JSON_ARRAY()), '$[*]' COLUMNS(preferred_district_id VARCHAR(64) PATH '$')) preferred_district
+              JOIN districts preferred_district_row ON preferred_district_row.id = preferred_district.preferred_district_id
+             WHERE preferred_district_row.state_id = ?
+          )
+        )
+        OR (
+          JSON_LENGTH(COALESCE(vpref.preferred_cities, JSON_ARRAY())) > 0
+          AND EXISTS (
+            SELECT 1
+              FROM JSON_TABLE(COALESCE(vpref.preferred_cities, JSON_ARRAY()), '$[*]' COLUMNS(preferred_city_id VARCHAR(64) PATH '$')) preferred_city
+              JOIN cities preferred_city_row ON preferred_city_row.id = preferred_city.preferred_city_id
+             WHERE preferred_city_row.state_id = ?
+          )
+        )
+      )`,
+      params,
+    };
+  }
+
+  return {
+    sql: `(
+      JSON_LENGTH(COALESCE(vpref.preferred_states, JSON_ARRAY())) > 0
+      OR JSON_LENGTH(COALESCE(vpref.preferred_districts, JSON_ARRAY())) > 0
+      OR JSON_LENGTH(COALESCE(vpref.preferred_cities, JSON_ARRAY())) > 0
+    )`,
+    params,
+  };
+}
+
+function buildPremiumPreferenceGate(args = {}) {
+  const location = preferredLocationGate(args);
+  return {
+    sql: `(
+      NOT ${salesAssistedSlotPlanSql()}
+      OR (
+        ${preferredCategoryMatchSql()}
+        AND ${location.sql}
+      )
+    )`,
+    params: location.params,
+  };
+}
+
+function buildProductRowSelect(scoreSql = '0', slotArgs = {}) {
+  const slot = premiumSlotMatchSql(slotArgs);
+  const slotSql = slot.sql;
+  const slotParams = [
+    ...slot.params,
+    ...slot.params,
+    ...slot.params,
+    ...slot.params,
+    ...slot.params,
+  ];
+
+  return {
+    sql: `
     SELECT
       p.*,
       v.id AS vendor__id,
@@ -388,9 +568,14 @@ function buildProductRowSelect(scoreSql = '0') {
       v.response_rate AS vendor__response_rate,
       COALESCE(vp.name, 'TRIAL') AS vendor_plan_name,
       ${planPriorityCaseSql()} AS vendor_plan_priority,
+      CASE WHEN ${slotSql} THEN 1 ELSE 0 END AS premium_slot_matched,
+      ${premiumSlotRankSql(slotSql)} AS premium_slot_rank,
+      ${premiumSlotLabelSql(slotSql)} AS premium_slot_label,
       ${scoreSql} AS search_score,
       COUNT(*) OVER() AS total_count
-  `;
+  `,
+    params: slotParams,
+  };
 }
 
 function productFromMysqlRow(row = {}) {
@@ -413,6 +598,9 @@ function productFromMysqlRow(row = {}) {
     response_rate: row.vendor__response_rate || null,
     plan_name: row.vendor_plan_name || 'TRIAL',
     plan_priority: Number(row.vendor_plan_priority || 100),
+    premium_slot_matched: Number(row.premium_slot_matched || 0) === 1,
+    premium_slot_rank: Number(row.premium_slot_rank || 0),
+    premium_slot_label: row.premium_slot_label || '',
   };
 
   const product = { ...row };
@@ -437,6 +625,9 @@ function productFromMysqlRow(row = {}) {
     vendorPlanName: row.vendor_plan_name || 'TRIAL',
     vendor_plan_name: row.vendor_plan_name || 'TRIAL',
     vendor_plan_priority: Number(row.vendor_plan_priority || 100),
+    premium_slot_matched: Number(row.premium_slot_matched || 0) === 1,
+    premium_slot_rank: Number(row.premium_slot_rank || 0),
+    premium_slot_label: row.premium_slot_label || '',
     __sortScore: Number(row.search_score || 0),
   };
 }
@@ -558,6 +749,10 @@ function buildHybridWhere({
     )`);
     params.push(cityId, cityId, cityId);
   }
+
+  const premiumPreferenceGate = buildPremiumPreferenceGate({ stateId, districtId, cityId });
+  where.push(premiumPreferenceGate.sql);
+  params.push(...premiumPreferenceGate.params);
 
   if (q && !broad) {
     const like = `%${q}%`;
@@ -685,9 +880,10 @@ function buildHybridScoreSql(q, useFullText = true) {
 }
 
 function orderSqlForHybrid(sort = '') {
-  if (sort === 'price_asc') return 'p.price ASC, vendor_plan_priority DESC, search_score DESC, p.created_at DESC';
-  if (sort === 'price_desc') return 'p.price DESC, vendor_plan_priority DESC, search_score DESC, p.created_at DESC';
-  return 'search_score DESC, vendor_plan_priority DESC, p.created_at DESC, p.id DESC';
+  const slotAwarePlanOrder = 'CASE WHEN premium_slot_rank > 0 THEN vendor_plan_priority ELSE 0 END DESC';
+  if (sort === 'price_asc') return `p.price ASC, premium_slot_rank DESC, ${slotAwarePlanOrder}, search_score DESC, p.created_at DESC`;
+  if (sort === 'price_desc') return `p.price DESC, premium_slot_rank DESC, ${slotAwarePlanOrder}, search_score DESC, p.created_at DESC`;
+  return `premium_slot_rank DESC, search_score DESC, ${slotAwarePlanOrder}, p.created_at DESC, p.id DESC`;
 }
 
 async function runHybridMysqlSearch({
@@ -719,8 +915,9 @@ async function runHybridMysqlSearch({
     useFullText,
     broad,
   });
+  const productSelect = buildProductRowSelect(scoreSql, { stateId, districtId, cityId });
   const rows = await mysqlQuery(
-    `${buildProductRowSelect(scoreSql)}
+    `${productSelect.sql}
        FROM products p
        JOIN vendors v ON v.id = p.vendor_id
        LEFT JOIN vendor_plan_subscriptions vps
@@ -736,11 +933,11 @@ async function runHybridMysqlSearch({
             LIMIT 1
          )
        LEFT JOIN vendor_plans vp ON vp.id = vps.plan_id
-       LEFT JOIN vendor_preferences vpref ON vpref.vendor_id = p.vendor_id
-      WHERE ${where.join(' AND ')}
+      LEFT JOIN vendor_preferences vpref ON vpref.vendor_id = p.vendor_id
+     WHERE ${where.join(' AND ')}
       ORDER BY ${orderSqlForHybrid(sort)}
       LIMIT ${limit} OFFSET ${offset}`,
-    [...scoreParams, ...whereParams]
+    [...productSelect.params, ...scoreParams, ...whereParams]
   );
   const mappedRows = rankRowsForSearchIntent(mergeRowsById(rows.map(productFromMysqlRow)), q, sort);
   const relevantRows = q && !broad
@@ -899,8 +1096,12 @@ function isPreferredProductRow(candidate = {}, current = {}) {
   const currentScore = Number(current?.__sortScore || current?.search_score || 0);
   if (candidateScore !== currentScore) return candidateScore > currentScore;
 
-  const candidatePlan = Number(candidate?.vendor_plan_priority || candidate?.vendors?.plan_priority || 0);
-  const currentPlan = Number(current?.vendor_plan_priority || current?.vendors?.plan_priority || 0);
+  const candidateSlot = Number(candidate?.premium_slot_rank || candidate?.vendors?.premium_slot_rank || 0);
+  const currentSlot = Number(current?.premium_slot_rank || current?.vendors?.premium_slot_rank || 0);
+  if (candidateSlot !== currentSlot) return candidateSlot > currentSlot;
+
+  const candidatePlan = candidateSlot > 0 ? Number(candidate?.vendor_plan_priority || candidate?.vendors?.plan_priority || 0) : 0;
+  const currentPlan = currentSlot > 0 ? Number(current?.vendor_plan_priority || current?.vendors?.plan_priority || 0) : 0;
   if (candidatePlan !== currentPlan) return candidatePlan > currentPlan;
 
   const candidateUpdated = new Date(candidate?.updated_at || candidate?.created_at || 0).getTime() || 0;

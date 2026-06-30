@@ -282,9 +282,13 @@ function rankRowsForSearchIntent(rows = [], query = '', sort = '') {
     }
     const intentDiff = catalogIntentScore(query, b) - catalogIntentScore(query, a);
     if (intentDiff) return intentDiff;
+    const premiumSlotDiff = Number(b.premium_slot_rank || 0) - Number(a.premium_slot_rank || 0);
+    if (premiumSlotDiff) return premiumSlotDiff;
     const scoreDiff = Number(b.__sortScore || 0) - Number(a.__sortScore || 0);
     if (scoreDiff) return scoreDiff;
-    return Number(b.vendor_plan_priority || 0) - Number(a.vendor_plan_priority || 0);
+    const slotAwarePlanA = Number(a.premium_slot_rank || 0) > 0 ? Number(a.vendor_plan_priority || 0) : 0;
+    const slotAwarePlanB = Number(b.premium_slot_rank || 0) > 0 ? Number(b.vendor_plan_priority || 0) : 0;
+    return slotAwarePlanB - slotAwarePlanA;
   });
 }
 
@@ -300,9 +304,11 @@ function dedupeProductRows(rows = []) {
 
     if (Number.isInteger(existingIndex)) {
       const current = unique[existingIndex];
+      const rowSlot = Number(row?.premium_slot_rank || 0);
+      const currentSlot = Number(current?.premium_slot_rank || 0);
       const rowScore = Number(row?.__sortScore || 0);
       const currentScore = Number(current?.__sortScore || 0);
-      if (rowScore > currentScore) unique[existingIndex] = row;
+      if (rowSlot > currentSlot || (rowSlot === currentSlot && rowScore > currentScore)) unique[existingIndex] = row;
       keys.forEach((key) => keyToIndex.set(key, existingIndex));
       return;
     }
@@ -495,6 +501,9 @@ function productIndexBody() {
         vendor_verified: { type: 'boolean' },
         vendor_plan_name: { type: 'keyword' },
         vendor_plan_priority: { type: 'integer' },
+        premium_slot_matched: { type: 'boolean' },
+        premium_slot_rank: { type: 'integer' },
+        premium_slot_label: { type: 'keyword' },
         price: { type: 'double' },
         price_unit: { type: 'keyword' },
         status: { type: 'keyword' },
@@ -533,7 +542,7 @@ export async function ensureOpenSearchProductIndex({ recreate = false } = {}) {
 
 function planPriorityCaseSql() {
   return `CASE
-    WHEN LOWER(COALESCE(vp.name, '')) LIKE '%diamond%' THEN 700
+    WHEN LOWER(COALESCE(vp.name, '')) LIKE '%diamond%' OR LOWER(COALESCE(vp.name, '')) LIKE '%dimond%' THEN 700
     WHEN LOWER(COALESCE(vp.name, '')) LIKE '%gold%' THEN 600
     WHEN LOWER(COALESCE(vp.name, '')) LIKE '%silver%' THEN 500
     WHEN LOWER(COALESCE(vp.name, '')) LIKE '%boost%' THEN 400
@@ -541,6 +550,60 @@ function planPriorityCaseSql() {
     WHEN LOWER(COALESCE(vp.name, '')) LIKE '%startup%' THEN 200
     ELSE 100
   END`;
+}
+
+function salesAssistedSlotPlanSql() {
+  return `(
+    LOWER(COALESCE(vp.name, '')) LIKE '%diamond%'
+    OR LOWER(COALESCE(vp.name, '')) LIKE '%dimond%'
+    OR LOWER(COALESCE(vp.name, '')) LIKE '%gold%'
+    OR LOWER(COALESCE(vp.name, '')) LIKE '%silver%'
+  )`;
+}
+
+function preferredCategoryMatchSql() {
+  return `(
+    p.micro_category_id IS NOT NULL
+    AND JSON_LENGTH(COALESCE(vpref.preferred_micro_categories, JSON_ARRAY())) > 0
+    AND JSON_CONTAINS(COALESCE(vpref.preferred_micro_categories, JSON_ARRAY()), JSON_QUOTE(p.micro_category_id))
+  )`;
+}
+
+function premiumSlotMatchSql() {
+  return `(
+    ${salesAssistedSlotPlanSql()}
+    AND ${preferredCategoryMatchSql()}
+  )`;
+}
+
+function premiumSlotRankSql() {
+  return `CASE
+    WHEN ${premiumSlotMatchSql()} THEN ${planPriorityCaseSql()}
+    ELSE 0
+  END`;
+}
+
+function premiumSlotLabelSql() {
+  return `CASE
+    WHEN ${premiumSlotMatchSql()} AND (LOWER(COALESCE(vp.name, '')) LIKE '%diamond%' OR LOWER(COALESCE(vp.name, '')) LIKE '%dimond%') THEN 'Diamond Supplier'
+    WHEN ${premiumSlotMatchSql()} AND LOWER(COALESCE(vp.name, '')) LIKE '%gold%' THEN 'Gold Supplier'
+    WHEN ${premiumSlotMatchSql()} AND LOWER(COALESCE(vp.name, '')) LIKE '%silver%' THEN 'Silver Supplier'
+    ELSE ''
+  END`;
+}
+
+function premiumPreferenceReadySql() {
+  return `(
+    NOT ${salesAssistedSlotPlanSql()}
+    OR (
+      ${preferredCategoryMatchSql()}
+      AND (
+        JSON_LENGTH(COALESCE(vpref.preferred_states, JSON_ARRAY())) > 0
+        OR JSON_LENGTH(COALESCE(vpref.preferred_districts, JSON_ARRAY())) > 0
+        OR JSON_LENGTH(COALESCE(vpref.preferred_cities, JSON_ARRAY())) > 0
+      )
+    )
+  )`;
 }
 
 function toIsoDate(value) {
@@ -630,6 +693,9 @@ function documentFromProductRow(row = {}) {
     vendor_verified: String(row.vendor_kyc_status || '').toUpperCase() === 'VERIFIED' || Boolean(row.vendor_verification_badge),
     vendor_plan_name: row.vendor_plan_name || 'TRIAL',
     vendor_plan_priority: planPriority,
+    premium_slot_matched: Number(row.premium_slot_matched || 0) === 1,
+    premium_slot_rank: Number(row.premium_slot_rank || 0),
+    premium_slot_label: row.premium_slot_label || '',
     price: numberOrNull(row.price),
     price_unit: row.price_unit || null,
     status: row.status || 'ACTIVE',
@@ -655,7 +721,10 @@ export async function fetchProductRowsForOpenSearch({ limit = 500, offset = 0 } 
             v.is_active AS vendor_active, v.kyc_status AS vendor_kyc_status,
             v.verification_badge AS vendor_verification_badge,
             COALESCE(vp.name, 'TRIAL') AS vendor_plan_name,
-            ${planPriorityCaseSql()} AS vendor_plan_priority
+            ${planPriorityCaseSql()} AS vendor_plan_priority,
+            CASE WHEN ${premiumSlotMatchSql()} THEN 1 ELSE 0 END AS premium_slot_matched,
+            ${premiumSlotRankSql()} AS premium_slot_rank,
+            ${premiumSlotLabelSql()} AS premium_slot_label
        FROM products p
        JOIN vendors v ON v.id = p.vendor_id
        LEFT JOIN micro_categories mc ON mc.id = p.micro_category_id
@@ -672,10 +741,12 @@ export async function fetchProductRowsForOpenSearch({ limit = 500, offset = 0 } 
                      active_vps.created_at DESC,
                      active_vps.id DESC
             LIMIT 1
-         )
+       )
        LEFT JOIN vendor_plans vp ON vp.id = vps.plan_id
+       LEFT JOIN vendor_preferences vpref ON vpref.vendor_id = p.vendor_id
       WHERE p.status = 'ACTIVE'
         AND COALESCE(v.is_active, 1) = 1
+        AND ${premiumPreferenceReadySql()}
       ORDER BY p.updated_at DESC, p.created_at DESC, p.id DESC
       LIMIT ${safeLimit} OFFSET ${safeOffset}`
   );
@@ -749,12 +820,12 @@ function buildOpenSearchFilters({ microId, microIds, subCategoryId, headCategory
 
 function openSearchSort(sort = '') {
   if (sort === 'price_asc') {
-    return [{ price: { order: 'asc', missing: '_last' } }, { vendor_plan_priority: 'desc' }, { _score: 'desc' }];
+    return [{ price: { order: 'asc', missing: '_last' } }, { premium_slot_rank: 'desc' }, { _score: 'desc' }];
   }
   if (sort === 'price_desc') {
-    return [{ price: { order: 'desc', missing: '_last' } }, { vendor_plan_priority: 'desc' }, { _score: 'desc' }];
+    return [{ price: { order: 'desc', missing: '_last' } }, { premium_slot_rank: 'desc' }, { _score: 'desc' }];
   }
-  return [{ _score: 'desc' }, { vendor_plan_priority: 'desc' }, { created_at: 'desc' }];
+  return [{ _score: 'desc' }, { premium_slot_rank: 'desc' }, { created_at: 'desc' }];
 }
 
 function buildProductSearchQuery({ q, microId, microIds, subCategoryId, headCategoryId, stateId, cityId }) {
@@ -812,7 +883,7 @@ function buildProductSearchQuery({ q, microId, microIds, subCategoryId, headCate
       boost_mode: 'sum',
       score_mode: 'sum',
       functions: [
-        { field_value_factor: { field: 'vendor_plan_priority', factor: 0.015, missing: 100 } },
+        { field_value_factor: { field: 'premium_slot_rank', factor: 0.025, missing: 0 } },
         { filter: { term: { vendor_verified: true } }, weight: 1.5 },
       ],
       query: {
@@ -840,6 +911,9 @@ function productFromOpenSearchHit(hit = {}) {
     kyc_status: src.vendor_verified ? 'VERIFIED' : null,
     plan_name: src.vendor_plan_name || 'TRIAL',
     plan_priority: Number(src.vendor_plan_priority || 100),
+    premium_slot_matched: Boolean(src.premium_slot_matched),
+    premium_slot_rank: Number(src.premium_slot_rank || 0),
+    premium_slot_label: src.premium_slot_label || '',
   };
   return {
     id: src.id || hit._id,
@@ -868,6 +942,9 @@ function productFromOpenSearchHit(hit = {}) {
     vendorPlanName: src.vendor_plan_name || 'TRIAL',
     vendor_plan_name: src.vendor_plan_name || 'TRIAL',
     vendor_plan_priority: Number(src.vendor_plan_priority || 100),
+    premium_slot_matched: Boolean(src.premium_slot_matched),
+    premium_slot_rank: Number(src.premium_slot_rank || 0),
+    premium_slot_label: src.premium_slot_label || '',
     __sortScore: Number(hit._score || 0),
     __searchEngine: 'opensearch',
   };
@@ -996,7 +1073,6 @@ export async function autocompleteOpenSearchProducts(q, { limit = 8 } = {}) {
       function_score: {
         boost_mode: 'sum',
         functions: [
-          { field_value_factor: { field: 'vendor_plan_priority', factor: 0.01, missing: 100 } },
           { filter: { term: { vendor_verified: true } }, weight: 1.25 },
         ],
         query: {
@@ -1011,7 +1087,7 @@ export async function autocompleteOpenSearchProducts(q, { limit = 8 } = {}) {
         },
       },
     },
-    sort: [{ _score: 'desc' }, { vendor_plan_priority: 'desc' }],
+    sort: [{ _score: 'desc' }],
   };
 
   const result = await openSearchRequest(`/${encodeURIComponent(getOpenSearchIndex())}/_search`, {
