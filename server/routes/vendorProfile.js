@@ -2295,13 +2295,14 @@ router.put('/me/portfolio-settings', requireAuth({ roles: ['VENDOR'] }), async (
 
 const normalizePreferenceIds = (value) =>
   Array.isArray(value)
-    ? value.map((item) => String(item ?? '').trim()).filter(Boolean)
+    ? Array.from(new Set(value.map((item) => String(item ?? '').trim()).filter(Boolean)))
     : [];
 
 const buildDefaultVendorPreferences = (vendorId) => ({
   vendor_id: vendorId,
   preferred_micro_categories: [],
   preferred_states: [],
+  preferred_districts: [],
   preferred_cities: [],
   min_budget: 0,
   max_budget: 999999,
@@ -2357,6 +2358,7 @@ router.get('/me/preferences', requireAuth({ roles: ['VENDOR'] }), async (req, re
       preferences,
       coverage: {
         states: preferences.preferred_states || [],
+        districts: preferences.preferred_districts || [],
         cities: preferences.preferred_cities || [],
         categories: preferences.preferred_micro_categories || [],
         ...limits.coverage,
@@ -2382,6 +2384,9 @@ router.put('/me/preferences', requireAuth({ roles: ['VENDOR'] }), async (req, re
     if (body.preferred_states !== undefined || body.coverage_states !== undefined) {
       updates.preferred_states = normalizePreferenceIds(body.preferred_states ?? body.coverage_states);
     }
+    if (body.preferred_districts !== undefined || body.coverage_districts !== undefined) {
+      updates.preferred_districts = normalizePreferenceIds(body.preferred_districts ?? body.coverage_districts);
+    }
     if (body.preferred_cities !== undefined || body.coverage_cities !== undefined) {
       updates.preferred_cities = normalizePreferenceIds(body.preferred_cities ?? body.coverage_cities);
     }
@@ -2392,7 +2397,11 @@ router.put('/me/preferences', requireAuth({ roles: ['VENDOR'] }), async (req, re
     if (body.min_budget !== undefined) updates.min_budget = parseBudget(body.min_budget);
     if (body.max_budget !== undefined) updates.max_budget = parseBudget(body.max_budget);
 
-    const limits = await resolveActivePlanLimits(vendor.id);
+    const [{ data: existing, error: existingError }, limits] = await Promise.all([
+      db.from('vendor_preferences').select('*').eq('vendor_id', vendor.id).maybeSingle(),
+      resolveActivePlanLimits(vendor.id),
+    ]);
+    if (existingError) return res.status(500).json({ success: false, error: existingError.message });
     if (Array.isArray(updates.preferred_states)) {
       updates.preferred_states = updates.preferred_states.slice(0, Math.max(0, Number(limits.coverage.states_limit || 0)));
     }
@@ -2403,13 +2412,45 @@ router.put('/me/preferences', requireAuth({ roles: ['VENDOR'] }), async (req, re
       updates.preferred_micro_categories = updates.preferred_micro_categories.slice(0, Math.max(0, Number(limits.categories_limit || 0)));
     }
 
-    const { data: existing, error: existingError } = await db
-      .from('vendor_preferences')
-      .select('id')
-      .eq('vendor_id', vendor.id)
-      .maybeSingle();
-
-    if (existingError) return res.status(500).json({ success: false, error: existingError.message });
+    const requestedStates = updates.preferred_states || normalizePreferenceIds(existing?.preferred_states);
+    let requestedDistricts = updates.preferred_districts || normalizePreferenceIds(existing?.preferred_districts);
+    let requestedCities = updates.preferred_cities || normalizePreferenceIds(existing?.preferred_cities);
+    if (requestedDistricts.length) {
+      const { data: districtRows, error: districtError } = await db
+        .from('districts')
+        .select('id, state_id')
+        .in('id', requestedDistricts);
+      if (districtError) return res.status(500).json({ success: false, error: districtError.message });
+      const allowedStates = new Set(requestedStates.map(String));
+      const validDistrictIds = new Set(
+        (districtRows || [])
+          .filter((row) => allowedStates.has(String(row.state_id || '')))
+          .map((row) => String(row.id))
+      );
+      requestedDistricts = requestedDistricts.filter((id) => validDistrictIds.has(String(id)));
+      updates.preferred_districts = requestedDistricts;
+    }
+    if (requestedCities.length) {
+      const { data: cityRows, error: cityError } = await db
+        .from('cities')
+        .select('id, state_id, district_id')
+        .in('id', requestedCities);
+      if (cityError) return res.status(500).json({ success: false, error: cityError.message });
+      const allowedStates = new Set(requestedStates.map(String));
+      const allowedDistricts = new Set(requestedDistricts.map(String));
+      const validCityRows = (cityRows || []).filter((row) =>
+        allowedStates.has(String(row.state_id || '')) &&
+        (!allowedDistricts.size || allowedDistricts.has(String(row.district_id || '')))
+      );
+      const validCityIds = new Set(validCityRows.map((row) => String(row.id)));
+      requestedCities = requestedCities.filter((id) => validCityIds.has(String(id)));
+      updates.preferred_cities = requestedCities;
+      if (!requestedDistricts.length) {
+        updates.preferred_districts = Array.from(
+          new Set(validCityRows.map((row) => String(row.district_id || '')).filter(Boolean))
+        );
+      }
+    }
 
     const basePayload = {
       ...buildDefaultVendorPreferences(vendor.id),
@@ -2425,6 +2466,7 @@ router.put('/me/preferences', requireAuth({ roles: ['VENDOR'] }), async (req, re
     clearVendorCacheEntries(vendor.id);
     return res.json({ success: true, preferences: result.data, coverage: {
       states: result.data?.preferred_states || [],
+      districts: result.data?.preferred_districts || [],
       cities: result.data?.preferred_cities || [],
       categories: result.data?.preferred_micro_categories || [],
       ...limits.coverage,

@@ -4,6 +4,7 @@ import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { mysqlConfig } from '../lib/mysqlPool.js';
 import { syncDelhiCities } from './syncDelhiCities.js';
+import { syncIndiaLocations } from './syncIndiaLocations.js';
 
 const here = fileURLToPath(import.meta.url);
 const scriptsDir = dirname(here);
@@ -19,6 +20,7 @@ const mysqlCompatColumns = [
 ];
 
 const mysqlMissingColumns = [
+  { table: 'cities', column: 'district_id', definition: 'CHAR(36) NULL' },
   { table: 'employees', column: 'sales_code', definition: 'VARCHAR(191) NULL' },
   { table: 'leads', column: 'assigned_to', definition: 'CHAR(36) NULL' },
   { table: 'leads', column: 'assigned_sales_user_id', definition: 'CHAR(36) NULL' },
@@ -46,6 +48,8 @@ const mysqlMissingColumns = [
   { table: 'vendor_plan_subscriptions', column: 'sales_code', definition: 'VARCHAR(191) NULL' },
   { table: 'vendor_plan_subscriptions', column: 'sales_user_id', definition: 'CHAR(36) NULL' },
   { table: 'vendor_plan_subscriptions', column: 'billing_cycle', definition: "VARCHAR(32) NOT NULL DEFAULT 'YEARLY'" },
+  { table: 'vendor_preferences', column: 'preferred_districts', definition: 'JSON NULL' },
+  { table: 'vendors', column: 'district_id', definition: 'CHAR(36) NULL' },
   { table: 'vendors', column: 'profile_template_override', definition: "VARCHAR(32) NOT NULL DEFAULT 'AUTO'" },
   { table: 'vendors', column: 'portfolio_settings', definition: 'JSON NULL' },
   { table: 'website_visitor_events', column: 'visitor_name', definition: 'TEXT NULL' },
@@ -73,6 +77,12 @@ const uniqueIndexes = [
 ];
 
 const missingIndexes = [
+  { table: 'cities', name: 'idx_cities_district_id', columns: ['district_id'] },
+  { table: 'cities', name: 'idx_cities_state_district_slug', columns: ['state_id', 'district_id', 'slug'] },
+  { table: 'districts', name: 'idx_districts_state_id', columns: ['state_id'] },
+  { table: 'districts', name: 'idx_districts_state_slug', columns: ['state_id', 'slug'] },
+  { table: 'districts', name: 'idx_districts_slug', columns: ['slug'] },
+  { table: 'districts', name: 'idx_districts_created_at', columns: ['created_at'] },
   { table: 'employees', name: 'uq_employees_sales_code', columns: ['sales_code'], unique: true },
   { table: 'leads', name: 'idx_leads_assigned_to', columns: ['assigned_to'] },
   { table: 'leads', name: 'idx_leads_assigned_sales_user_id', columns: ['assigned_sales_user_id'] },
@@ -103,6 +113,7 @@ const missingIndexes = [
   { table: 'vendor_plan_subscriptions', name: 'idx_vendor_plan_subscriptions_active_vendor', columns: ['vendor_id', 'status', 'end_date'] },
   { table: 'vendors', name: 'idx_vendors_active_created', columns: ['is_active', 'created_at'] },
   { table: 'vendors', name: 'idx_vendors_active_location', columns: ['is_active', 'state_id', 'city_id'] },
+  { table: 'vendors', name: 'idx_vendors_active_district', columns: ['is_active', 'district_id'] },
   { table: 'vendors', name: 'idx_vendors_active_slug', columns: ['is_active', 'slug'] },
   { table: 'vendors', name: 'ft_vendors_search', columns: ['company_name', 'owner_name', 'city', 'state', 'business_description', 'primary_business_type'], fulltext: true },
   { table: 'website_visitor_events', name: 'idx_website_visitor_events_search_created', columns: ['event_type', 'created_at'] },
@@ -115,6 +126,23 @@ const obsoleteIndexes = [
 ];
 
 async function ensureCompatibilitySchema(connection) {
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS ${quoteIdent('districts')} (
+      ${quoteIdent('id')} CHAR(36) NOT NULL,
+      ${quoteIdent('state_id')} CHAR(36) NULL,
+      ${quoteIdent('name')} TEXT NULL,
+      ${quoteIdent('slug')} VARCHAR(191) NULL,
+      ${quoteIdent('is_active')} TINYINT(1) DEFAULT 0,
+      ${quoteIdent('created_at')} DATETIME DEFAULT CURRENT_TIMESTAMP,
+      ${quoteIdent('updated_at')} DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      ${quoteIdent('supplier_count')} INT NULL,
+      PRIMARY KEY (${quoteIdent('id')}),
+      KEY ${quoteIdent('idx_districts_state_id')} (${quoteIdent('state_id')}),
+      KEY ${quoteIdent('idx_districts_slug')} (${quoteIdent('slug')}),
+      KEY ${quoteIdent('idx_districts_created_at')} (${quoteIdent('created_at')})
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
   await connection.query(`
     CREATE TABLE IF NOT EXISTS ${quoteIdent('dashboard_metric_snapshots')} (
       ${quoteIdent('id')} CHAR(36) NOT NULL,
@@ -232,6 +260,15 @@ export async function setupMysqlSchema() {
   await dbConnection.query(schemaSql);
   await ensureCompatibilitySchema(dbConnection);
   await syncDelhiCities(dbConnection);
+
+  const [rawLocationRows] = await dbConnection.query('SELECT COUNT(*) AS count FROM geo_postal_raw');
+  const rawLocationCount = Number(rawLocationRows?.[0]?.count || 0);
+  if (rawLocationCount > 0) {
+    await syncIndiaLocations(dbConnection);
+  } else {
+    console.log('India location sync skipped: geo_postal_raw is empty.');
+  }
+
   await dbConnection.end();
 
   console.log(`MySQL schema ready: ${database}`);

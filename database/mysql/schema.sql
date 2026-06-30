@@ -158,6 +158,7 @@ CREATE TABLE IF NOT EXISTS `chatbot_history` (
 CREATE TABLE IF NOT EXISTS `cities` (
   `id` CHAR(36) NOT NULL,
   `state_id` CHAR(36) NULL,
+  `district_id` CHAR(36) NULL,
   `name` TEXT NULL,
   `slug` VARCHAR(191) NULL,
   `is_active` TINYINT(1) DEFAULT 0,
@@ -166,8 +167,26 @@ CREATE TABLE IF NOT EXISTS `cities` (
   `supplier_count` INT NULL,
   PRIMARY KEY (`id`),
   KEY `idx_cities_state_id` (`state_id`),
+  KEY `idx_cities_district_id` (`district_id`),
+  KEY `idx_cities_state_district_slug` (`state_id`, `district_id`, `slug`),
   KEY `idx_cities_slug` (`slug`),
   KEY `idx_cities_created_at` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `districts` (
+  `id` CHAR(36) NOT NULL,
+  `state_id` CHAR(36) NULL,
+  `name` TEXT NULL,
+  `slug` VARCHAR(191) NULL,
+  `is_active` TINYINT(1) DEFAULT 0,
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `supplier_count` INT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_districts_state_id` (`state_id`),
+  KEY `idx_districts_state_slug` (`state_id`, `slug`),
+  KEY `idx_districts_slug` (`slug`),
+  KEY `idx_districts_created_at` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `contact_submissions` (
@@ -1383,6 +1402,7 @@ CREATE TABLE IF NOT EXISTS `vendor_preferences` (
   `vendor_id` CHAR(36) NULL,
   `preferred_micro_categories` JSON NULL,
   `preferred_states` JSON NULL,
+  `preferred_districts` JSON NULL,
   `preferred_cities` JSON NULL,
   `min_budget` DECIMAL(16,2) NULL,
   `max_budget` DECIMAL(16,2) NULL,
@@ -1542,6 +1562,7 @@ CREATE TABLE IF NOT EXISTS `vendors` (
   `gst_number` TEXT NULL,
   `pan_number` TEXT NULL,
   `state_id` CHAR(36) NULL,
+  `district_id` CHAR(36) NULL,
   `city_id` CHAR(36) NULL,
   `profile_image` TEXT NULL,
   `vendor_id` VARCHAR(191) NULL,

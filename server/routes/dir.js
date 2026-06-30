@@ -376,6 +376,7 @@ function buildProductRowSelect(scoreSql = '0') {
       v.city AS vendor__city,
       v.state AS vendor__state,
       v.state_id AS vendor__state_id,
+      v.district_id AS vendor__district_id,
       v.city_id AS vendor__city_id,
       v.seller_rating AS vendor__seller_rating,
       v.kyc_status AS vendor__kyc_status,
@@ -400,6 +401,7 @@ function productFromMysqlRow(row = {}) {
     city: row.vendor__city || null,
     state: row.vendor__state || null,
     state_id: row.vendor__state_id || null,
+    district_id: row.vendor__district_id || null,
     city_id: row.vendor__city_id || null,
     seller_rating: row.vendor__seller_rating || null,
     kyc_status: row.vendor__kyc_status || null,
@@ -446,6 +448,7 @@ function buildHybridWhere({
   subCategoryId,
   headCategoryId,
   stateId,
+  districtId,
   cityId,
   useFullText = true,
   broad = false,
@@ -470,28 +473,90 @@ function buildHybridWhere({
   if (stateId) {
     where.push(`(
       (
+        JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.states'), JSON_ARRAY())) > 0
+        AND JSON_CONTAINS(COALESCE(JSON_EXTRACT(p.target_locations, '$.states'), JSON_ARRAY()), JSON_QUOTE(?))
+      )
+      OR (
+        JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.states'), JSON_ARRAY())) = 0
+        AND JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.cities'), JSON_ARRAY())) > 0
+        AND EXISTS (
+          SELECT 1
+            FROM JSON_TABLE(COALESCE(JSON_EXTRACT(p.target_locations, '$.cities'), JSON_ARRAY()), '$[*]' COLUMNS(city_id VARCHAR(64) PATH '$')) product_city
+            JOIN cities product_city_row ON product_city_row.id = product_city.city_id
+           WHERE product_city_row.state_id = ?
+        )
+      )
+      OR (
+        JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.states'), JSON_ARRAY())) = 0
+        AND JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.cities'), JSON_ARRAY())) = 0
+        AND
         JSON_LENGTH(COALESCE(vpref.preferred_states, JSON_ARRAY())) > 0
         AND JSON_CONTAINS(COALESCE(vpref.preferred_states, JSON_ARRAY()), JSON_QUOTE(?))
       )
       OR (
+        JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.states'), JSON_ARRAY())) = 0
+        AND JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.cities'), JSON_ARRAY())) = 0
+        AND
         JSON_LENGTH(COALESCE(vpref.preferred_states, JSON_ARRAY())) = 0
         AND v.state_id = ?
       )
     )`);
-    params.push(stateId, stateId);
+    params.push(stateId, stateId, stateId, stateId);
+  }
+  if (districtId) {
+    where.push(`(
+      (
+        JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.districts'), JSON_ARRAY())) > 0
+        AND JSON_CONTAINS(COALESCE(JSON_EXTRACT(p.target_locations, '$.districts'), JSON_ARRAY()), JSON_QUOTE(?))
+      )
+      OR (
+        JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.districts'), JSON_ARRAY())) = 0
+        AND JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.cities'), JSON_ARRAY())) > 0
+        AND EXISTS (
+          SELECT 1
+            FROM JSON_TABLE(COALESCE(JSON_EXTRACT(p.target_locations, '$.cities'), JSON_ARRAY()), '$[*]' COLUMNS(city_id VARCHAR(64) PATH '$')) product_city
+            JOIN cities product_city_row ON product_city_row.id = product_city.city_id
+           WHERE product_city_row.district_id = ?
+        )
+      )
+      OR (
+        JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.districts'), JSON_ARRAY())) = 0
+        AND JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.cities'), JSON_ARRAY())) = 0
+        AND JSON_LENGTH(COALESCE(vpref.preferred_districts, JSON_ARRAY())) > 0
+        AND JSON_CONTAINS(COALESCE(vpref.preferred_districts, JSON_ARRAY()), JSON_QUOTE(?))
+      )
+      OR (
+        JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.districts'), JSON_ARRAY())) = 0
+        AND JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.cities'), JSON_ARRAY())) = 0
+        AND JSON_LENGTH(COALESCE(vpref.preferred_districts, JSON_ARRAY())) = 0
+        AND (
+          v.district_id = ?
+          OR EXISTS (SELECT 1 FROM cities vendor_city_row WHERE vendor_city_row.id = v.city_id AND vendor_city_row.district_id = ?)
+        )
+      )
+    )`);
+    params.push(districtId, districtId, districtId, districtId, districtId);
   }
   if (cityId) {
     where.push(`(
       (
+        JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.cities'), JSON_ARRAY())) > 0
+        AND JSON_CONTAINS(COALESCE(JSON_EXTRACT(p.target_locations, '$.cities'), JSON_ARRAY()), JSON_QUOTE(?))
+      )
+      OR (
+        JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.cities'), JSON_ARRAY())) = 0
+        AND
         JSON_LENGTH(COALESCE(vpref.preferred_cities, JSON_ARRAY())) > 0
         AND JSON_CONTAINS(COALESCE(vpref.preferred_cities, JSON_ARRAY()), JSON_QUOTE(?))
       )
       OR (
+        JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.cities'), JSON_ARRAY())) = 0
+        AND
         JSON_LENGTH(COALESCE(vpref.preferred_cities, JSON_ARRAY())) = 0
         AND v.city_id = ?
       )
     )`);
-    params.push(cityId, cityId);
+    params.push(cityId, cityId, cityId);
   }
 
   if (q && !broad) {
@@ -632,6 +697,7 @@ async function runHybridMysqlSearch({
   subCategoryId,
   headCategoryId,
   stateId,
+  districtId,
   cityId,
   sort,
   limit,
@@ -648,6 +714,7 @@ async function runHybridMysqlSearch({
     subCategoryId,
     headCategoryId,
     stateId,
+    districtId,
     cityId,
     useFullText,
     broad,
@@ -691,7 +758,7 @@ async function runHybridMysqlSearch({
 }
 
 async function runHybridSearchWithFallback(args) {
-  const hasCoverageFilter = Boolean(args?.stateId || args?.cityId);
+  const hasCoverageFilter = Boolean(args?.stateId || args?.districtId || args?.cityId);
   if (args?.q && !hasCoverageFilter && isOpenSearchCatalogEnabled()) {
     try {
       const result = await searchOpenSearchProducts(args);
@@ -713,7 +780,7 @@ async function runHybridSearchWithFallback(args) {
   }
 }
 
-async function fetchFuzzyCandidates({ q, microId, microIds, subCategoryId, headCategoryId, stateId, cityId, sort, limit }) {
+async function fetchFuzzyCandidates({ q, microId, microIds, subCategoryId, headCategoryId, stateId, districtId, cityId, sort, limit }) {
   const broad = await runHybridMysqlSearch({
     q: '',
     microId,
@@ -721,6 +788,7 @@ async function fetchFuzzyCandidates({ q, microId, microIds, subCategoryId, headC
     subCategoryId,
     headCategoryId,
     stateId,
+    districtId,
     cityId,
     sort,
     limit: Math.min(Math.max(limit * 8, 80), 240),
@@ -866,13 +934,14 @@ function mergeRowsById(...groups) {
   return rows;
 }
 
-async function fetchBroadCategoryRows({ fallbackScopes = [], stateId, cityId, sort, limit }) {
+async function fetchBroadCategoryRows({ fallbackScopes = [], stateId, districtId, cityId, sort, limit }) {
   const rows = [];
   for (const scope of fallbackScopes.filter(canUseBroadCategoryScope)) {
     const scoped = await runHybridMysqlSearch({
       q: '',
       ...scope,
       stateId,
+      districtId,
       cityId,
       sort,
       limit,
@@ -886,13 +955,14 @@ async function fetchBroadCategoryRows({ fallbackScopes = [], stateId, cityId, so
   return mergeRowsById(rows).slice(0, limit);
 }
 
-async function augmentWithBroadCategoryRows({ rows = [], q = '', fallbackScopes = [], stateId, cityId, sort, limit }) {
+async function augmentWithBroadCategoryRows({ rows = [], q = '', fallbackScopes = [], stateId, districtId, cityId, sort, limit }) {
   if (!fallbackScopes.some(canUseBroadCategoryScope) || rows.length >= limit) {
     return rankRowsForSearchIntent(mergeRowsById(rows), q, sort).slice(0, limit);
   }
   const broadRows = await fetchBroadCategoryRows({
     fallbackScopes,
     stateId,
+    districtId,
     cityId,
     sort,
     limit: Math.max(limit, limit - rows.length),
@@ -967,6 +1037,7 @@ async function fetchRecommendedProducts({
   subCategoryId,
   headCategoryId,
   stateId,
+  districtId,
   cityId,
   sort,
   limit,
@@ -982,6 +1053,7 @@ async function fetchRecommendedProducts({
         subCategoryId,
         headCategoryId,
         stateId,
+        districtId,
         cityId,
         sort,
         limit,
@@ -996,6 +1068,7 @@ async function fetchRecommendedProducts({
           q: semanticText,
           ...scope,
           stateId,
+          districtId,
           cityId,
           sort,
           limit,
@@ -1013,13 +1086,14 @@ async function fetchRecommendedProducts({
     headCategoryId,
     stateId,
     cityId,
+    districtId,
     sort,
     limit,
   }) : { rows: [] };
   if (fuzzy.rows.length) return fuzzy.rows.slice(0, limit);
 
   for (const scope of fallbackScopes) {
-    const scopedFuzzy = q ? await fetchFuzzyCandidates({ q, ...scope, stateId, cityId, sort, limit }) : { rows: [] };
+    const scopedFuzzy = q ? await fetchFuzzyCandidates({ q, ...scope, stateId, districtId, cityId, sort, limit }) : { rows: [] };
     if (scopedFuzzy.rows.length) return scopedFuzzy.rows.slice(0, limit);
   }
 
@@ -1030,6 +1104,7 @@ async function fetchRecommendedProducts({
     subCategoryId,
     headCategoryId,
     stateId,
+    districtId,
     cityId,
     sort,
     limit,
@@ -1487,6 +1562,7 @@ async function handleRankedProducts(req, res) {
     const page = clampInt(req.query.page, 1, 1, 5000);
     const limit = clampInt(req.query.limit, 20, 1, 50);
     const stateId = isValidId(req.query.stateId) ? req.query.stateId : (isValidId(req.query.state_id) ? req.query.state_id : null);
+    const districtId = isValidId(req.query.districtId) ? req.query.districtId : (isValidId(req.query.district_id) ? req.query.district_id : null);
     const cityId = isValidId(req.query.cityId) ? req.query.cityId : (isValidId(req.query.city_id) ? req.query.city_id : null);
 
     const from = (page - 1) * limit;
@@ -1503,6 +1579,7 @@ async function handleRankedProducts(req, res) {
         q,
         microId,
         stateId,
+        districtId,
         cityId,
         sort,
         limit,
@@ -1515,6 +1592,7 @@ async function handleRankedProducts(req, res) {
           q,
           fallbackScopes,
           stateId,
+          districtId,
           cityId,
           sort,
           limit,
@@ -1541,6 +1619,7 @@ async function handleRankedProducts(req, res) {
           q,
           ...scope,
           stateId,
+          districtId,
           cityId,
           sort,
           limit,
@@ -1553,6 +1632,7 @@ async function handleRankedProducts(req, res) {
             q,
             fallbackScopes,
             stateId,
+            districtId,
             cityId,
             sort,
             limit,
@@ -1581,6 +1661,7 @@ async function handleRankedProducts(req, res) {
       const broadCategoryRows = await fetchBroadCategoryRows({
         fallbackScopes,
         stateId,
+        districtId,
         cityId,
         sort,
         limit,
@@ -1605,6 +1686,27 @@ async function handleRankedProducts(req, res) {
           },
         });
       }
+    }
+
+    if (districtId) {
+      const districtScoped = await runHybridMysqlSearch({
+        q: '',
+        microId,
+        stateId,
+        districtId,
+        cityId,
+        sort,
+        limit,
+        offset: from,
+        useFullText: false,
+        broad: true,
+      });
+      return res.json({
+        success: true,
+        data: mergeRowsById(districtScoped.rows || []).slice(0, limit),
+        count: Number(districtScoped.totalCount || 0),
+        meta: { searchMode: 'district_category', searchEngine: 'mysql' },
+      });
     }
 
     // ✅ Preferred path: slot-aware ranking via DB RPC (capacity-based seats).
@@ -1872,11 +1974,12 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
     const page = clampInt(req.query.page, 1, 1, 5000);
     const limit = clampInt(req.query.limit, 20, 1, 50);
     const stateId = isValidId(req.query.stateId) ? req.query.stateId : (isValidId(req.query.state_id) ? req.query.state_id : null);
+    const districtId = isValidId(req.query.districtId) ? req.query.districtId : (isValidId(req.query.district_id) ? req.query.district_id : null);
     const cityId = isValidId(req.query.cityId) ? req.query.cityId : (isValidId(req.query.city_id) ? req.query.city_id : null);
     const offset = (page - 1) * limit;
     const visitorId = safeText(req.query?.visitor_id || req.query?.visitorId || req.headers?.['x-visitor-id'], 191);
     const personalized = Boolean(req.user?.id || req.user?.email || visitorId);
-    const cacheKey = `hybrid:v11:${JSON.stringify({ q, microSlug, sort, page, limit, stateId, cityId })}`;
+    const cacheKey = `hybrid:v12:${JSON.stringify({ q, microSlug, sort, page, limit, stateId, districtId, cityId })}`;
 
     if (!personalized && isRedisConfigured()) {
       const cached = await cacheGetJson(cacheKey).catch(() => null);
@@ -1896,6 +1999,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
       q,
       microId,
       stateId,
+      districtId,
       cityId,
       sort,
       limit,
@@ -1903,7 +2007,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
     });
 
     if (!rows.length && q) {
-      const fuzzy = await fetchFuzzyCandidates({ q, microId, stateId, cityId, sort, limit });
+      const fuzzy = await fetchFuzzyCandidates({ q, microId, stateId, districtId, cityId, sort, limit });
       rows = fuzzy.rows;
       totalCount = fuzzy.totalCount;
     }
@@ -1920,6 +2024,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
         q,
         microId,
         stateId,
+        districtId,
         cityId: null,
         sort,
         limit,
@@ -1932,6 +2037,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
           q,
           microId,
           stateId,
+          districtId,
           cityId: null,
           sort,
           limit,
@@ -1944,6 +2050,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
           q: '',
           microId,
           stateId,
+          districtId,
           cityId: null,
           sort,
           limit,
@@ -1967,6 +2074,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
           q,
           ...scope,
           stateId,
+          districtId,
           cityId,
           sort,
           limit,
@@ -1980,7 +2088,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
 
       if (!scopedRecommendations.length) {
         for (const scope of fallbackScopes) {
-          const scopedFuzzy = await fetchFuzzyCandidates({ q, ...scope, stateId, cityId, sort, limit });
+          const scopedFuzzy = await fetchFuzzyCandidates({ q, ...scope, stateId, districtId, cityId, sort, limit });
           if (scopedFuzzy.rows.length) {
             scopedRecommendations = rankRowsForSearchIntent(scopedFuzzy.rows, q, sort).slice(0, limit);
             break;
@@ -1998,12 +2106,13 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
               q,
               microId,
               stateId,
+              districtId,
               cityId,
               sort,
               limit,
               fallbackScopes,
             }));
-    if (!exactAvailable && !recommendations.length && q && (stateId || cityId)) {
+    if (!exactAvailable && !recommendations.length && q && (stateId || districtId || cityId)) {
       locationRelaxed = true;
       locationRelaxationLevel = 'all';
 
@@ -2012,6 +2121,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
           q,
           ...scope,
           stateId: null,
+          districtId: null,
           cityId: null,
           sort,
           limit,
@@ -2029,6 +2139,7 @@ router.get('/hybrid-search', optionalAuth(), async (req, res) => {
           q,
           microId,
           stateId: null,
+          districtId: null,
           cityId: null,
           sort,
           limit,
@@ -2105,11 +2216,32 @@ router.get('/states', cacheResponse('dir:states', 3600), async (req, res) => {
   }
 });
 
-router.get('/cities', cacheResponse('dir:cities', 3600), async (req, res) => {
+router.get('/districts', cacheResponse('dir:districts', 3600), async (req, res) => {
   try {
     const { stateId } = req.query;
     if (!isValidId(stateId)) return res.status(400).json({ success: false, error: 'stateId required' });
-    let query = db.from('cities').select('id, name, slug, supplier_count, state_id, is_active').eq('state_id', stateId).order('name');
+    const { data, error } = await db
+      .from('districts')
+      .select('id, state_id, name, slug, supplier_count, is_active')
+      .eq('state_id', stateId)
+      .order('name');
+    if (error) throw error;
+    const rows = data || [];
+    const activeRows = rows.filter((row) => row?.is_active === true || row?.is_active === 1 || row?.is_active === '1');
+    return res.json({ success: true, districts: activeRows.length ? activeRows : rows });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/cities', cacheResponse('dir:cities', 3600), async (req, res) => {
+  try {
+    const { stateId, districtId } = req.query;
+    if (!isValidId(stateId)) return res.status(400).json({ success: false, error: 'stateId required' });
+    if (districtId && !isValidId(districtId)) return res.status(400).json({ success: false, error: 'invalid districtId' });
+    let query = db.from('cities').select('id, name, slug, supplier_count, state_id, district_id, is_active').eq('state_id', stateId);
+    if (districtId) query = query.eq('district_id', districtId);
+    query = query.order('name');
     const { data, error } = await query;
     if (error && String(error.message).includes('does not exist')) {
       const fb = await db.from('cities').select('id, name, slug, supplier_count, state_id, is_active').eq('state_id', stateId).order('name');

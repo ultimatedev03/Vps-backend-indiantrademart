@@ -167,6 +167,39 @@ async function resolveDelhiStateId(connection) {
   return stateId;
 }
 
+async function resolveDelhiDistrictId(connection, stateId) {
+  const [rows] = await connection.execute(
+    `SELECT id
+       FROM districts
+      WHERE state_id = ?
+        AND (slug = 'delhi' OR LOWER(name) = 'delhi')
+      ORDER BY is_active DESC, created_at ASC
+      LIMIT 1`,
+    [stateId]
+  );
+
+  if (rows.length) {
+    await connection.execute(
+      `UPDATE districts
+          SET name = 'Delhi',
+              slug = 'delhi',
+              is_active = 1,
+              updated_at = NOW()
+        WHERE id = ?`,
+      [rows[0].id]
+    );
+    return rows[0].id;
+  }
+
+  const districtId = randomUUID();
+  await connection.execute(
+    `INSERT INTO districts (id, state_id, name, slug, is_active, created_at, updated_at)
+     VALUES (?, ?, 'Delhi', 'delhi', 1, NOW(), NOW())`,
+    [districtId, stateId]
+  );
+  return districtId;
+}
+
 export async function syncDelhiCities(existingConnection = null) {
   const ownsConnection = !existingConnection;
   const connection =
@@ -182,6 +215,7 @@ export async function syncDelhiCities(existingConnection = null) {
     transactionStarted = true;
 
     const stateId = await resolveDelhiStateId(connection);
+    const districtId = await resolveDelhiDistrictId(connection, stateId);
     const canonicalCityIds = [];
 
     for (const city of uniqueDelhiCities()) {
@@ -200,16 +234,17 @@ export async function syncDelhiCities(existingConnection = null) {
           `UPDATE cities
               SET name = ?,
                   slug = ?,
+                  district_id = ?,
                   is_active = 1,
                   updated_at = NOW()
             WHERE id = ?`,
-          [city.name, city.slug, cityId]
+          [city.name, city.slug, districtId, cityId]
         );
       } else {
         await connection.execute(
-          `INSERT INTO cities (id, state_id, name, slug, is_active, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 1, NOW(), NOW())`,
-          [cityId, stateId, city.name, city.slug]
+          `INSERT INTO cities (id, state_id, district_id, name, slug, is_active, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 1, NOW(), NOW())`,
+          [cityId, stateId, districtId, city.name, city.slug]
         );
       }
 
@@ -252,7 +287,7 @@ export async function syncDelhiCities(existingConnection = null) {
       `Delhi city catalog synced: ${activeCount} active cities, ${Number(inactiveResult.affectedRows || 0)} old rows inactive`
     );
 
-    return { stateId, activeCount, inactiveRows: Number(inactiveResult.affectedRows || 0) };
+    return { stateId, districtId, activeCount, inactiveRows: Number(inactiveResult.affectedRows || 0) };
   } catch (error) {
     if (transactionStarted) await connection.rollback();
     throw error;

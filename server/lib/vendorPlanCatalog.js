@@ -253,10 +253,14 @@ export const normalizeBillingCycle = (value = '') => {
   return YEARLY_BILLING_CYCLE;
 };
 
+export const isMonthlyTrialPlan = (plan = null) => {
+  const name = String(plan?.name || '').trim().toLowerCase();
+  return MONTHLY_SELF_SERVE_PLAN_NAMES.has(name);
+};
+
 export const isMonthlyBillingEnabled = (plan = null) => {
   if (!plan || !isDirectPurchasePlan(plan)) return false;
-  const name = String(plan?.name || '').trim().toLowerCase();
-  if (!MONTHLY_SELF_SERVE_PLAN_NAMES.has(name)) return false;
+  if (!isMonthlyTrialPlan(plan)) return false;
   const pricing = asPlanObject(asPlanObject(plan?.features).pricing);
   return pricing.monthly_enabled !== false;
 };
@@ -432,7 +436,13 @@ export const VENDOR_PLAN_CATALOG = [
         monthly_duration_days: 30,
       },
       portfolio: { enabled: true, template: 'STANDARD', custom_url: false },
-      certificate: { enabled: false },
+      certificate: {
+        enabled: true,
+        tier: 'CERTIFIED',
+        title: 'Certified Vendor on IndianTradeMart',
+        printable: true,
+        shop_display: true,
+      },
       seo: { enabled: true, sitemap: true, city_category_pages: 25 },
     }),
   },

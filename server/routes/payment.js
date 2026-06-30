@@ -183,6 +183,74 @@ const resolvePlanBillingQuote = (plan, requestedBillingCycle = 'YEARLY') => {
   return getPlanBillingQuote(plan, billingCycle);
 };
 
+const MONTHLY_TRIAL_ALREADY_USED_CODE = 'MONTHLY_TRIAL_ALREADY_USED';
+const MONTHLY_TRIAL_ALREADY_USED_MESSAGE =
+  'The one-time monthly trial has already been used. Startup, Certified and Booster can now be purchased only with yearly billing.';
+
+async function findMonthlyTrialUsage(vendorId) {
+  const { data: subscriptionRows, error: subscriptionError } = await db
+    .from('vendor_plan_subscriptions')
+    .select('id, plan_id, billing_cycle, status, start_date, end_date, created_at')
+    .eq('vendor_id', vendorId)
+    .eq('billing_cycle', 'MONTHLY')
+    .order('created_at', { ascending: true })
+    .limit(1);
+
+  if (subscriptionError) {
+    throw new Error(subscriptionError.message || 'Failed to validate monthly trial history');
+  }
+
+  if (subscriptionRows?.[0]) {
+    return { source: 'SUBSCRIPTION', ...subscriptionRows[0] };
+  }
+
+  const { data: paymentRows, error: paymentError } = await db
+    .from('vendor_payments')
+    .select('id, plan_id, subscription_id, billing_cycle, status, payment_date, created_at')
+    .eq('vendor_id', vendorId)
+    .eq('billing_cycle', 'MONTHLY')
+    .in('status', ['COMPLETED', 'SUCCESS', 'PAID'])
+    .order('created_at', { ascending: true })
+    .limit(1);
+
+  if (paymentError) {
+    throw new Error(paymentError.message || 'Failed to validate monthly payment history');
+  }
+
+  return paymentRows?.[0] ? { source: 'PAYMENT', ...paymentRows[0] } : null;
+}
+
+async function validateMonthlyTrialEligibility(vendorId, billingQuote) {
+  if (String(billingQuote?.billing_cycle || '').toUpperCase() !== 'MONTHLY') {
+    return { eligible: true, usage: null };
+  }
+
+  const usage = await findMonthlyTrialUsage(vendorId);
+  return { eligible: !usage, usage };
+}
+
+router.get('/monthly-trial-eligibility/:vendor_id', async (req, res) => {
+  try {
+    const vendorId = normalizeText(req.params?.vendor_id);
+    if (!vendorId) {
+      return res.status(400).json({ error: 'Missing vendor_id' });
+    }
+
+    const usage = await findMonthlyTrialUsage(vendorId);
+    return res.json({
+      success: true,
+      data: {
+        eligible: !usage,
+        monthly_trial_used: Boolean(usage),
+        used_at: usage?.start_date || usage?.payment_date || usage?.created_at || null,
+      },
+    });
+  } catch (error) {
+    logger.error('Monthly trial eligibility lookup error:', error);
+    return res.status(500).json({ error: error.message || 'Failed to load monthly trial eligibility' });
+  }
+});
+
 const toPlanLimit = (value) => Math.max(0, Number(value || 0));
 
 async function upsertVendorLeadQuota({ vendor_id, plan_id, plan, resetDate = new Date() }) {
@@ -726,6 +794,15 @@ router.post('/initiate', async (req, res) => {
       return res.status(400).json({ error: quoteError.message || 'Invalid billing cycle' });
     }
 
+    const monthlyTrialEligibility = await validateMonthlyTrialEligibility(vendor_id, billingQuote);
+    if (!monthlyTrialEligibility.eligible) {
+      return res.status(409).json({
+        error: MONTHLY_TRIAL_ALREADY_USED_MESSAGE,
+        code: MONTHLY_TRIAL_ALREADY_USED_CODE,
+        monthly_trial_used: true,
+      });
+    }
+
     const baseAmount = Number(billingQuote.amount || 0);
     if (!Number.isFinite(baseAmount) || baseAmount <= 0) {
       return res.status(400).json({ error: 'Invalid plan price' });
@@ -958,6 +1035,15 @@ router.post('/verify', async (req, res) => {
       billingQuote = resolvePlanBillingQuote(plan, orderBillingCycle);
     } catch (quoteError) {
       return res.status(400).json({ error: quoteError.message || 'Invalid billing cycle' });
+    }
+
+    const monthlyTrialEligibility = await validateMonthlyTrialEligibility(vendor_id, billingQuote);
+    if (!monthlyTrialEligibility.eligible) {
+      return res.status(409).json({
+        error: MONTHLY_TRIAL_ALREADY_USED_MESSAGE,
+        code: MONTHLY_TRIAL_ALREADY_USED_CODE,
+        monthly_trial_used: true,
+      });
     }
 
     // Coupon re-validation
