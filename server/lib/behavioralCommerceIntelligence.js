@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { cacheGetJson, cacheSetJson, isRedisConfigured } from './redisCache.js';
 import { mysqlQuery, withMysqlConnection } from './mysqlPool.js';
 
@@ -91,8 +91,20 @@ const parseJson = (value, fallback = null) => {
 const getDemandLabel = (row = {}) =>
   safeText(row.search_query || row.product_interest || row.product_name || row.category || row.entity_name || row.page_title, 500);
 
-const getDemandKey = (label, state = '', city = '') =>
-  [normalizeKey(label), normalizeKey(state || 'all-india'), normalizeKey(city || 'all-cities')].join('|');
+const getDemandKey = (label, state = '', city = '') => {
+  const fullKey = [normalizeKey(label), normalizeKey(state || 'all-india'), normalizeKey(city || 'all-cities')].join('|');
+  if (fullKey.length <= 191) return fullKey;
+
+  const hash = createHash('sha1').update(fullKey).digest('hex').slice(0, 12);
+  const shortKey = [
+    normalizeKey(label).slice(0, 108),
+    normalizeKey(state || 'all-india').slice(0, 28),
+    normalizeKey(city || 'all-cities').slice(0, 28),
+    hash,
+  ].join('|');
+
+  return shortKey.slice(0, 191);
+};
 
 const makeBucketKey = (row, label) =>
   [
