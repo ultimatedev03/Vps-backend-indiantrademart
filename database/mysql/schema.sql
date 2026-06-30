@@ -522,6 +522,96 @@ CREATE TABLE IF NOT EXISTS `website_visitor_events` (
   KEY `idx_website_visitor_events_entity` (`entity_type`, `entity_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS `behavioral_event_queue` (
+  `id` CHAR(36) NOT NULL,
+  `event_id` CHAR(36) NULL,
+  `visitor_id` VARCHAR(191) NULL,
+  `event_type` VARCHAR(64) NULL,
+  `payload` JSON NULL,
+  `status` VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+  `attempts` INT NOT NULL DEFAULT 0,
+  `error_message` TEXT NULL,
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  `processed_at` DATETIME NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_behavioral_event_queue_event_id` (`event_id`),
+  KEY `idx_behavioral_event_queue_status_created` (`status`, `created_at`),
+  KEY `idx_behavioral_event_queue_visitor_created` (`visitor_id`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `behavioral_hourly_aggregates` (
+  `id` CHAR(36) NOT NULL,
+  `bucket_start` DATETIME NOT NULL,
+  `event_type` VARCHAR(64) NOT NULL,
+  `demand_key` VARCHAR(191) NOT NULL,
+  `display_label` TEXT NULL,
+  `category` TEXT NULL,
+  `state` VARCHAR(191) NOT NULL DEFAULT '',
+  `city` VARCHAR(191) NOT NULL DEFAULT '',
+  `entity_type` VARCHAR(64) NULL,
+  `entity_id` VARCHAR(191) NULL,
+  `event_count` INT NOT NULL DEFAULT 0,
+  `unique_visitors` INT NOT NULL DEFAULT 0,
+  `lead_count` INT NOT NULL DEFAULT 0,
+  `computed_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_behavioral_hourly_bucket_key` (`bucket_start`, `event_type`, `demand_key`, `state`, `city`),
+  KEY `idx_behavioral_hourly_demand` (`demand_key`, `bucket_start`),
+  KEY `idx_behavioral_hourly_location` (`state`, `city`, `bucket_start`),
+  KEY `idx_behavioral_hourly_event` (`event_type`, `bucket_start`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `behavioral_demand_scores` (
+  `id` CHAR(36) NOT NULL,
+  `demand_key` VARCHAR(191) NOT NULL,
+  `display_label` TEXT NULL,
+  `category` TEXT NULL,
+  `state` VARCHAR(191) NOT NULL DEFAULT '',
+  `city` VARCHAR(191) NOT NULL DEFAULT '',
+  `window_days` INT NOT NULL DEFAULT 30,
+  `demand_score` DECIMAL(16,2) NOT NULL DEFAULT 0,
+  `intent_score` DECIMAL(16,2) NOT NULL DEFAULT 0,
+  `event_count` INT NOT NULL DEFAULT 0,
+  `search_count` INT NOT NULL DEFAULT 0,
+  `product_views` INT NOT NULL DEFAULT 0,
+  `vendor_views` INT NOT NULL DEFAULT 0,
+  `requirement_opens` INT NOT NULL DEFAULT 0,
+  `requirement_submits` INT NOT NULL DEFAULT 0,
+  `lead_count` INT NOT NULL DEFAULT 0,
+  `unique_visitors` INT NOT NULL DEFAULT 0,
+  `trend_percent` DECIMAL(10,2) NOT NULL DEFAULT 0,
+  `confidence` DECIMAL(10,2) NOT NULL DEFAULT 0,
+  `demand_stage` VARCHAR(32) NOT NULL DEFAULT 'LOW',
+  `recommended_action` TEXT NULL,
+  `top_entities` JSON NULL,
+  `computed_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_behavioral_demand_window` (`demand_key`, `state`, `city`, `window_days`),
+  KEY `idx_behavioral_demand_score` (`window_days`, `demand_score`),
+  KEY `idx_behavioral_demand_stage` (`demand_stage`, `computed_at`),
+  KEY `idx_behavioral_demand_location` (`state`, `city`, `window_days`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `behavioral_forecasts` (
+  `id` CHAR(36) NOT NULL,
+  `demand_key` VARCHAR(191) NOT NULL,
+  `display_label` TEXT NULL,
+  `state` VARCHAR(191) NOT NULL DEFAULT '',
+  `city` VARCHAR(191) NOT NULL DEFAULT '',
+  `window_days` INT NOT NULL DEFAULT 30,
+  `forecast_7d` DECIMAL(16,2) NOT NULL DEFAULT 0,
+  `forecast_30d` DECIMAL(16,2) NOT NULL DEFAULT 0,
+  `trend_percent` DECIMAL(10,2) NOT NULL DEFAULT 0,
+  `confidence` DECIMAL(10,2) NOT NULL DEFAULT 0,
+  `model_name` VARCHAR(191) NOT NULL DEFAULT 'weighted_behavioral_v1',
+  `features` JSON NULL,
+  `computed_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_behavioral_forecast_window` (`demand_key`, `state`, `city`, `window_days`),
+  KEY `idx_behavioral_forecast_30d` (`window_days`, `forecast_30d`),
+  KEY `idx_behavioral_forecast_location` (`state`, `city`, `window_days`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `manager_sales_division_allocations` (
   `id` CHAR(36) NOT NULL,
   `manager_user_id` CHAR(36) NULL,

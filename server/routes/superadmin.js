@@ -23,6 +23,7 @@ import {
   changeSuperAdminPassword,
 } from '../lib/superadminAuth.js';
 import { getWebsiteVisitorActivity } from '../lib/visitorActivity.js';
+import { getBehavioralCommerceIntelligence } from '../lib/behavioralCommerceIntelligence.js';
 import {
   buildSearch360ActorFromSuperadmin,
   createSearch360Escalation,
@@ -2736,6 +2737,23 @@ router.get('/visitor-activity', async (req, res) => {
     return res.json({ success: true, ...data });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message || 'Failed to load visitor activity' });
+  }
+});
+
+router.get('/behavioral-intelligence', requireSuperAdmin, async (req, res) => {
+  try {
+    const data = await getBehavioralCommerceIntelligence({
+      days: req.query?.days,
+      limit: req.query?.limit,
+      refresh: req.query?.refresh,
+    });
+
+    return res.json({ success: true, data });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to load behavioral commerce intelligence',
+    });
   }
 });
 

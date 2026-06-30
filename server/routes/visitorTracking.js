@@ -1,6 +1,7 @@
 import express from 'express';
 import { randomUUID } from 'crypto';
 import { db } from '../lib/dbClient.js';
+import { logger } from '../utils/logger.js';
 
 const router = express.Router();
 
@@ -145,6 +146,23 @@ router.post('/events', async (req, res) => {
     const { error } = await db.from('website_visitor_events').insert([event]);
     if (error) {
       return res.status(500).json({ success: false, error: error.message || 'Failed to save visitor event' });
+    }
+
+    try {
+      await db.from('behavioral_event_queue').insert([
+        {
+          id: randomUUID(),
+          event_id: event.id,
+          visitor_id: event.visitor_id || event.visitor_session_id || null,
+          event_type: event.event_type,
+          payload: event,
+          status: 'PENDING',
+          attempts: 0,
+          created_at: event.created_at,
+        },
+      ]);
+    } catch (queueError) {
+      logger.warn('[VisitorTracking] Behavioral queue insert skipped:', queueError?.message || queueError);
     }
 
     return res.status(201).json({ success: true, event_id: event.id });

@@ -16,6 +16,7 @@
     "storage:migrate:supabase": "node server/scripts/migrateSupabaseStorageToLocal.js",
     "search:setup": "node server/scripts/setupOpenSearchCatalog.js",
     "search:reindex": "node server/scripts/reindexOpenSearchProducts.js",
+    "analytics:behavioral": "node server/scripts/runBehavioralCommerceIntelligence.js",
     "plans:seed": "node server/scripts/seedVendorPlanCatalog.js",
     "plans:guide": "node server/scripts/generatePlanSalesGuide.js",
     "admin:create": "node server/scripts/createAdmin.js",
