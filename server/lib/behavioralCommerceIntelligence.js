@@ -1,6 +1,12 @@
 import { createHash, randomUUID } from 'crypto';
 import { cacheGetJson, cacheSetJson, isRedisConfigured } from './redisCache.js';
 import { mysqlQuery, withMysqlConnection } from './mysqlPool.js';
+import {
+  isClickHouseConfigured,
+  readClickHouseBehavioralDashboard,
+  writeClickHouseBehavioralData,
+} from './clickHouseAnalytics.js';
+import { isKafkaConfigured } from './kafkaAnalytics.js';
 
 const CACHE_KEY_PREFIX = 'bcia:dashboard';
 const CACHE_TTL_SECONDS = 10 * 60;
@@ -217,7 +223,7 @@ async function upsertHourlyAggregates(connection, events = []) {
     );
   }
 
-  return buckets.size;
+  return buckets;
 }
 
 function scoreSignals(events = [], leads = [], days = 30) {
@@ -470,11 +476,11 @@ export async function runBehavioralCommerceIntelligence(options = {}) {
   const { events, leads } = await loadRawSignals(days);
   const scored = scoreSignals(events, leads, days);
 
-  let aggregateCount = 0;
+  let aggregateBuckets = new Map();
   await withMysqlConnection(async (connection) => {
     await connection.beginTransaction();
     try {
-      aggregateCount = await upsertHourlyAggregates(connection, events);
+      aggregateBuckets = await upsertHourlyAggregates(connection, events);
       await upsertScores(connection, scored);
       await connection.commit();
     } catch (error) {
@@ -483,14 +489,25 @@ export async function runBehavioralCommerceIntelligence(options = {}) {
     }
   });
 
+  const warehouse = await writeClickHouseBehavioralData({
+    events,
+    buckets: aggregateBuckets,
+    scored,
+    days,
+  }).catch((error) => ({
+    enabled: isClickHouseConfigured(),
+    error: error?.message || String(error),
+  }));
+
   await markQueueProcessed(days).catch(() => {});
 
   return {
     days,
     events_processed: events.length,
     leads_processed: leads.length,
-    hourly_buckets: aggregateCount,
+    hourly_buckets: aggregateBuckets.size,
     scores_computed: scored.length,
+    warehouse,
     computed_at: new Date().toISOString(),
   };
 }
@@ -499,31 +516,62 @@ async function loadIntelligenceDashboard(days, limit) {
   const safeLimit = Math.min(Math.max(Number(limit) || 50, 10), 100);
   const forecastLimit = Math.min(safeLimit, 30);
 
-  const rows = await mysqlQuery(
-    `SELECT *
-       FROM behavioral_demand_scores
-      WHERE window_days = ?
-      ORDER BY demand_score DESC, trend_percent DESC, unique_visitors DESC
-      LIMIT ${safeLimit}`,
-    [days]
-  );
+  let source = 'mysql';
+  let warehouse = {
+    clickhouse_enabled: isClickHouseConfigured(),
+    kafka_enabled: isKafkaConfigured(),
+  };
+  let rows;
+  let forecasts;
+  let eventSummary;
 
-  const forecasts = await mysqlQuery(
-    `SELECT *
-       FROM behavioral_forecasts
-      WHERE window_days = ?
-      ORDER BY forecast_30d DESC, trend_percent DESC
-      LIMIT ${forecastLimit}`,
-    [days]
-  );
+  if (isClickHouseConfigured()) {
+    const clickHouseDashboard = await readClickHouseBehavioralDashboard({ days, limit: safeLimit }).catch((error) => ({
+      source: 'mysql',
+      error: error?.message || String(error),
+    }));
 
-  const eventSummary = await mysqlQuery(
-    `SELECT event_type, COUNT(*) AS total
-       FROM website_visitor_events
-      WHERE created_at >= ?
-      GROUP BY event_type`,
-    [mysqlDateTime(daysAgo(days))]
-  ).catch(() => []);
+    if (clickHouseDashboard?.rows) {
+      source = clickHouseDashboard.source || 'clickhouse';
+      rows = clickHouseDashboard.rows;
+      forecasts = clickHouseDashboard.forecasts || [];
+      eventSummary = clickHouseDashboard.eventSummary || [];
+      warehouse = {
+        ...warehouse,
+        ...(clickHouseDashboard.warehouse || {}),
+      };
+    } else if (clickHouseDashboard?.error) {
+      warehouse.error = clickHouseDashboard.error;
+    }
+  }
+
+  if (!rows) {
+    rows = await mysqlQuery(
+      `SELECT *
+         FROM behavioral_demand_scores
+        WHERE window_days = ?
+        ORDER BY demand_score DESC, trend_percent DESC, unique_visitors DESC
+        LIMIT ${safeLimit}`,
+      [days]
+    );
+
+    forecasts = await mysqlQuery(
+      `SELECT *
+         FROM behavioral_forecasts
+        WHERE window_days = ?
+        ORDER BY forecast_30d DESC, trend_percent DESC
+        LIMIT ${forecastLimit}`,
+      [days]
+    );
+
+    eventSummary = await mysqlQuery(
+      `SELECT event_type, COUNT(*) AS total
+         FROM website_visitor_events
+        WHERE created_at >= ?
+        GROUP BY event_type`,
+      [mysqlDateTime(daysAgo(days))]
+    ).catch(() => []);
+  }
 
   const latest = rows[0]?.computed_at || forecasts[0]?.computed_at || null;
   const queue = await getQueueStats();
@@ -578,14 +626,16 @@ async function loadIntelligenceDashboard(days, limit) {
       stack: {
         frontend: 'JavaScript SDK',
         backend: 'Node.js',
-        database: 'MySQL operational DB',
-        queue: 'MySQL queue table, Redis-ready',
+        database: isClickHouseConfigured() ? 'ClickHouse analytics warehouse + MySQL operational DB' : 'MySQL operational DB',
+        queue: isKafkaConfigured() ? 'Kafka event stream + MySQL fallback queue' : 'MySQL fallback queue',
         dashboard: 'React superadmin dashboard',
         ml: 'Weighted model v1, LightGBM/XGBoost-ready features',
       },
     },
     summary: {
       days,
+      source,
+      warehouse,
       total_events: Object.values(summaryByType).reduce((sum, value) => sum + value, 0),
       searches: summaryByType.search || 0,
       product_views: summaryByType.product_view || 0,

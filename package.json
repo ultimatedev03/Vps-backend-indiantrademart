@@ -17,12 +17,14 @@
     "search:setup": "node server/scripts/setupOpenSearchCatalog.js",
     "search:reindex": "node server/scripts/reindexOpenSearchProducts.js",
     "analytics:behavioral": "node server/scripts/runBehavioralCommerceIntelligence.js",
+    "analytics:kafka:consume": "node server/scripts/consumeBehavioralKafkaEvents.js",
     "plans:seed": "node server/scripts/seedVendorPlanCatalog.js",
     "plans:guide": "node server/scripts/generatePlanSalesGuide.js",
     "admin:create": "node server/scripts/createAdmin.js",
     "admin:password": "node server/scripts/changeAdminPassword.js"
   },
   "dependencies": {
+    "@clickhouse/client": "^1.23.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
@@ -32,6 +34,7 @@
     "groq-sdk": "^0.6.0",
     "jsonwebtoken": "^9.0.3",
     "jspdf": "^4.0.0",
+    "kafkajs": "^2.2.4",
     "mysql2": "^3.22.4",
     "node-cron": "^4.2.1",
     "nodemailer": "^9.0.1",

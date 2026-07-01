@@ -2,6 +2,7 @@ import express from 'express';
 import { randomUUID } from 'crypto';
 import { db } from '../lib/dbClient.js';
 import { logger } from '../utils/logger.js';
+import { publishBehavioralEvent } from '../lib/kafkaAnalytics.js';
 
 const router = express.Router();
 
@@ -164,6 +165,10 @@ router.post('/events', async (req, res) => {
     } catch (queueError) {
       logger.warn('[VisitorTracking] Behavioral queue insert skipped:', queueError?.message || queueError);
     }
+
+    publishBehavioralEvent(event).catch((kafkaError) => {
+      logger.warn('[VisitorTracking] Kafka publish skipped:', kafkaError?.message || kafkaError);
+    });
 
     return res.status(201).json({ success: true, event_id: event.id });
   } catch (error) {
