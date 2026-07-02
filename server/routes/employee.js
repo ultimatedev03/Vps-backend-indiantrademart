@@ -1342,8 +1342,8 @@ router.post('/category-update', requireAuth(), async (req, res) => {
     }
 
     const allowedKeysByLevel = {
-      head: ['name', 'slug', 'description', 'image_url', 'image', 'is_active'],
-      sub: ['name', 'slug', 'description', 'image_url', 'image', 'is_active'],
+      head: ['name', 'slug', 'description', 'meta_tags', 'keywords', 'image_url', 'image', 'is_active'],
+      sub: ['name', 'slug', 'description', 'meta_tags', 'keywords', 'image_url', 'image', 'is_active'],
       micro: ['name', 'slug', 'image_url', 'image', 'images', 'image_urls', 'is_active'],
     };
     const allowed = new Set(allowedKeysByLevel[level] || []);
