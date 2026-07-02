@@ -1369,7 +1369,7 @@ router.get('/vendors', async (req, res) => {
     const { data, error, count } = await db
       .from('vendors')
       .select(
-        'id, vendor_id, company_name, owner_name, email, phone, kyc_status, created_at, is_active, is_verified, city, state',
+        'id, vendor_id, company_name, owner_name, email, phone, kyc_status, created_at, is_active, is_verified, all_india_visibility, city, state',
         { count: 'exact' }
       )
       .order('created_at', { ascending: false })
@@ -1411,6 +1411,52 @@ router.get('/vendors', async (req, res) => {
       limit,
       offset,
     });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.put('/vendors/:vendorId/all-india-visibility', async (req, res) => {
+  try {
+    const vendorId = req.params.vendorId;
+    if (!vendorId) {
+      return res.status(400).json({ success: false, error: 'vendorId is required' });
+    }
+
+    const enabled = normalizeBooleanInput(
+      hasOwn(req.body || {}, 'enabled') ? req.body.enabled : req.body?.all_india_visibility,
+      false
+    );
+
+    const { data, error } = await db
+      .from('vendors')
+      .update({ all_india_visibility: enabled ? 1 : 0, updated_at: new Date().toISOString() })
+      .eq('id', vendorId)
+      .select('id, vendor_id, company_name, email, all_india_visibility, city, state')
+      .maybeSingle();
+
+    if (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
+    if (!data) {
+      return res.status(404).json({ success: false, error: 'Vendor not found' });
+    }
+
+    await writeAuditLog({
+      req,
+      actor: req.actor,
+      action: 'VENDOR_ALL_INDIA_VISIBILITY_UPDATED',
+      entityType: 'vendors',
+      entityId: vendorId,
+      details: {
+        enabled,
+        vendor_id: data.vendor_id,
+        company_name: data.company_name,
+        email: data.email,
+      },
+    });
+
+    return res.json({ success: true, vendor: data });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }

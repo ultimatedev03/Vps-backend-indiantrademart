@@ -892,7 +892,7 @@ async function executeDirRankedProducts(params = {}) {
     sqlParams.push(like, like, like, like, like, like);
   }
   if (params.p_state_id) {
-    where.push('v.state_id = ?');
+    where.push('(v.state_id = ? OR COALESCE(v.all_india_visibility, 0) = 1)');
     sqlParams.push(params.p_state_id);
     preferredLocationSql = `(
           (
@@ -921,7 +921,7 @@ async function executeDirRankedProducts(params = {}) {
     preferredLocationParams.push(params.p_state_id, params.p_state_id, params.p_state_id);
   }
   if (params.p_city_id) {
-    where.push('v.city_id = ?');
+    where.push('(v.city_id = ? OR COALESCE(v.all_india_visibility, 0) = 1)');
     sqlParams.push(params.p_city_id);
     preferredLocationSql = `(
           (
@@ -952,6 +952,7 @@ async function executeDirRankedProducts(params = {}) {
   }
   where.push(`(
     NOT ${salesAssistedSlotPlanSql}
+    OR COALESCE(v.all_india_visibility, 0) = 1
     OR (
       ${preferredCategorySql}
       AND ${preferredLocationSql}

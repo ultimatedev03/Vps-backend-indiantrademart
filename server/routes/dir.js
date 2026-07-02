@@ -526,6 +526,7 @@ function buildPremiumPreferenceGate(args = {}) {
   return {
     sql: `(
       NOT ${salesAssistedSlotPlanSql()}
+      OR COALESCE(v.all_india_visibility, 0) = 1
       OR (
         ${preferredCategoryMatchSql()}
         AND ${location.sql}
@@ -558,6 +559,7 @@ function buildProductRowSelect(scoreSql = '0', slotArgs = {}) {
       v.state_id AS vendor__state_id,
       v.district_id AS vendor__district_id,
       v.city_id AS vendor__city_id,
+      v.all_india_visibility AS vendor__all_india_visibility,
       v.seller_rating AS vendor__seller_rating,
       v.kyc_status AS vendor__kyc_status,
       v.verification_badge AS vendor__verification_badge,
@@ -588,6 +590,7 @@ function productFromMysqlRow(row = {}) {
     state_id: row.vendor__state_id || null,
     district_id: row.vendor__district_id || null,
     city_id: row.vendor__city_id || null,
+    all_india_visibility: Number(row.vendor__all_india_visibility || 0) === 1,
     seller_rating: row.vendor__seller_rating || null,
     kyc_status: row.vendor__kyc_status || null,
     verification_badge: Boolean(row.vendor__verification_badge),
@@ -663,6 +666,8 @@ function buildHybridWhere({
   }
   if (stateId) {
     where.push(`(
+      COALESCE(v.all_india_visibility, 0) = 1
+      OR
       (
         JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.states'), JSON_ARRAY())) > 0
         AND JSON_CONTAINS(COALESCE(JSON_EXTRACT(p.target_locations, '$.states'), JSON_ARRAY()), JSON_QUOTE(?))
@@ -696,6 +701,8 @@ function buildHybridWhere({
   }
   if (districtId) {
     where.push(`(
+      COALESCE(v.all_india_visibility, 0) = 1
+      OR
       (
         JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.districts'), JSON_ARRAY())) > 0
         AND JSON_CONTAINS(COALESCE(JSON_EXTRACT(p.target_locations, '$.districts'), JSON_ARRAY()), JSON_QUOTE(?))
@@ -730,6 +737,8 @@ function buildHybridWhere({
   }
   if (cityId) {
     where.push(`(
+      COALESCE(v.all_india_visibility, 0) = 1
+      OR
       (
         JSON_LENGTH(COALESCE(JSON_EXTRACT(p.target_locations, '$.cities'), JSON_ARRAY())) > 0
         AND JSON_CONTAINS(COALESCE(JSON_EXTRACT(p.target_locations, '$.cities'), JSON_ARRAY()), JSON_QUOTE(?))

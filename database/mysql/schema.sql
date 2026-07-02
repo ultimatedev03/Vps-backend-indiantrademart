@@ -1667,6 +1667,7 @@ CREATE TABLE IF NOT EXISTS `vendors` (
   `verification_badge` TINYINT(1) DEFAULT 0,
   `assigned_to` CHAR(36) NULL,
   `is_active` TINYINT(1) DEFAULT 0,
+  `all_india_visibility` TINYINT(1) NOT NULL DEFAULT 0,
   `is_verified` TINYINT(1) DEFAULT 0,
   `verified_at` DATETIME NULL,
   `website_url` TEXT NULL,
@@ -1720,6 +1721,7 @@ CREATE TABLE IF NOT EXISTS `vendors` (
   KEY `idx_vendors_vendor_id` (`vendor_id`),
   KEY `idx_vendors_created_by_user_id` (`created_by_user_id`),
   KEY `idx_vendors_slug` (`slug`),
+  KEY `idx_vendors_active_all_india` (`is_active`, `all_india_visibility`),
   KEY `idx_vendors_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

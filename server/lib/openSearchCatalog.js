@@ -497,6 +497,7 @@ function productIndexBody() {
         vendor_state: { type: 'keyword' },
         vendor_state_id: { type: 'keyword' },
         vendor_city_id: { type: 'keyword' },
+        vendor_all_india_visibility: { type: 'boolean' },
         vendor_active: { type: 'boolean' },
         vendor_verified: { type: 'boolean' },
         vendor_plan_name: { type: 'keyword' },
@@ -595,6 +596,7 @@ function premiumSlotLabelSql() {
 function premiumPreferenceReadySql() {
   return `(
     NOT ${salesAssistedSlotPlanSql()}
+    OR COALESCE(v.all_india_visibility, 0) = 1
     OR (
       ${preferredCategoryMatchSql()}
       AND (
@@ -689,13 +691,14 @@ function documentFromProductRow(row = {}) {
     vendor_state: row.vendor_state || '',
     vendor_state_id: row.vendor_state_id || null,
     vendor_city_id: row.vendor_city_id || null,
+    vendor_all_india_visibility: Number(row.vendor_all_india_visibility || 0) === 1,
     vendor_active: activeBool(row.vendor_active),
     vendor_verified: String(row.vendor_kyc_status || '').toUpperCase() === 'VERIFIED' || Boolean(row.vendor_verification_badge),
     vendor_plan_name: row.vendor_plan_name || 'TRIAL',
     vendor_plan_priority: planPriority,
-    premium_slot_matched: Number(row.premium_slot_matched || 0) === 1,
-    premium_slot_rank: Number(row.premium_slot_rank || 0),
-    premium_slot_label: row.premium_slot_label || '',
+    premium_slot_matched: false,
+    premium_slot_rank: 0,
+    premium_slot_label: '',
     price: numberOrNull(row.price),
     price_unit: row.price_unit || null,
     status: row.status || 'ACTIVE',
@@ -718,6 +721,7 @@ export async function fetchProductRowsForOpenSearch({ limit = 500, offset = 0 } 
             hc.name AS head_category_name, hc.slug AS head_category_slug,
             v.company_name AS vendor_name, v.slug AS vendor_slug, v.city AS vendor_city,
             v.state AS vendor_state, v.state_id AS vendor_state_id, v.city_id AS vendor_city_id,
+            v.all_india_visibility AS vendor_all_india_visibility,
             v.is_active AS vendor_active, v.kyc_status AS vendor_kyc_status,
             v.verification_badge AS vendor_verification_badge,
             COALESCE(vp.name, 'TRIAL') AS vendor_plan_name,
@@ -803,6 +807,19 @@ function addIdFilter(filter, field, value) {
   if (value) filter.push({ term: { [field]: value } });
 }
 
+function addLocationOrAllIndiaFilter(filter, field, value) {
+  if (!value) return;
+  filter.push({
+    bool: {
+      should: [
+        { term: { [field]: value } },
+        { term: { vendor_all_india_visibility: true } },
+      ],
+      minimum_should_match: 1,
+    },
+  });
+}
+
 function buildOpenSearchFilters({ microId, microIds, subCategoryId, headCategoryId, stateId, cityId } = {}) {
   const filter = [
     { term: { status: 'ACTIVE' } },
@@ -813,8 +830,8 @@ function buildOpenSearchFilters({ microId, microIds, subCategoryId, headCategory
   else if (microId) addIdFilter(filter, 'micro_category_id', microId);
   else if (subCategoryId) addIdFilter(filter, 'sub_category_id', subCategoryId);
   else if (headCategoryId) addIdFilter(filter, 'head_category_id', headCategoryId);
-  addIdFilter(filter, 'vendor_state_id', stateId);
-  addIdFilter(filter, 'vendor_city_id', cityId);
+  addLocationOrAllIndiaFilter(filter, 'vendor_state_id', stateId);
+  addLocationOrAllIndiaFilter(filter, 'vendor_city_id', cityId);
   return filter;
 }
 
@@ -907,6 +924,7 @@ function productFromOpenSearchHit(hit = {}) {
     state: src.vendor_state || null,
     state_id: src.vendor_state_id || null,
     city_id: src.vendor_city_id || null,
+    all_india_visibility: Boolean(src.vendor_all_india_visibility),
     verification_badge: Boolean(src.vendor_verified),
     kyc_status: src.vendor_verified ? 'VERIFIED' : null,
     plan_name: src.vendor_plan_name || 'TRIAL',
