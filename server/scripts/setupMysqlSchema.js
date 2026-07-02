@@ -17,6 +17,9 @@ const mysqlCompatColumns = [
   { table: 'geo_divisions', column: 'division_key', definition: 'VARCHAR(191) NULL' },
   { table: 'geo_division_pincodes', column: 'pincode', definition: 'VARCHAR(32) NULL' },
   { table: 'vendor_referral_wallet_ledger', column: 'reference_key', definition: 'VARCHAR(191) NULL' },
+  { table: 'behavioral_hourly_aggregates', column: 'demand_key', definition: 'VARCHAR(191) NOT NULL' },
+  { table: 'behavioral_demand_scores', column: 'demand_key', definition: 'VARCHAR(191) NOT NULL' },
+  { table: 'behavioral_forecasts', column: 'demand_key', definition: 'VARCHAR(191) NOT NULL' },
 ];
 
 const mysqlMissingColumns = [
