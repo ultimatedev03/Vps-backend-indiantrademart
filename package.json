@@ -18,6 +18,7 @@
     "search:reindex": "node server/scripts/reindexOpenSearchProducts.js",
     "analytics:behavioral": "node server/scripts/runBehavioralCommerceIntelligence.js",
     "analytics:kafka:consume": "node server/scripts/consumeBehavioralKafkaEvents.js",
+    "seo:export:all-urls": "python3 server/scripts/exportAllSeoUrlsCsvZip.py",
     "plans:seed": "node server/scripts/seedVendorPlanCatalog.js",
     "plans:guide": "node server/scripts/generatePlanSalesGuide.js",
     "admin:create": "node server/scripts/createAdmin.js",
