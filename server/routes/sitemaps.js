@@ -26,6 +26,7 @@ const SEO_EXPORT_CACHE_MS = 10 * 60 * 1000;
 let seoExportCache = {
   expiresAt: 0,
   files: [],
+  summaryPath: '',
   totalRows: 0,
 };
 
@@ -429,10 +430,13 @@ async function getLatestSeoExportCsvFiles() {
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
   const latestDir = candidates[0]?.path;
   let files = [];
+  let summaryPath = '';
 
   if (latestDir) {
     try {
       const entries = await fs.readdir(latestDir, { withFileTypes: true });
+      const summaryEntry = entries.find((entry) => entry.isFile() && /^00-summary.*\.csv$/i.test(entry.name));
+      summaryPath = summaryEntry ? path.join(latestDir, summaryEntry.name) : '';
       files = await Promise.all(
         entries
           .filter((entry) => entry.isFile() && /\.csv$/i.test(entry.name) && !/^00-summary/i.test(entry.name))
@@ -450,11 +454,18 @@ async function getLatestSeoExportCsvFiles() {
   if (!files.length) files = topLevelCsv;
   files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
 
-  const previousSignature = seoExportCache.files.map((file) => `${file.path}:${file.mtimeMs}`).join('|');
-  const nextSignature = files.map((file) => `${file.path}:${file.mtimeMs}`).join('|');
+  const previousSignature = [
+    ...seoExportCache.files.map((file) => `${file.path}:${file.mtimeMs}`),
+    seoExportCache.summaryPath,
+  ].join('|');
+  const nextSignature = [
+    ...files.map((file) => `${file.path}:${file.mtimeMs}`),
+    summaryPath,
+  ].join('|');
   seoExportCache = {
     expiresAt: now + SEO_EXPORT_CACHE_MS,
     files,
+    summaryPath,
     totalRows: previousSignature === nextSignature ? seoExportCache.totalRows : 0,
   };
   return files;
@@ -470,10 +481,37 @@ async function countCsvRows(filePath) {
   return Math.max(0, count - 1);
 }
 
+async function countRowsFromSummary(summaryPath) {
+  if (!summaryPath) return 0;
+
+  try {
+    const text = await fs.readFile(summaryPath, 'utf8');
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    if (lines.length <= 1) return 0;
+
+    const header = parseCsvLine(lines[0]).map(normalizeHeader);
+    const rowsIndex = header.findIndex((key) => key === 'rows' || key === 'row_count' || key === 'total_rows');
+    if (rowsIndex < 0) return 0;
+
+    return lines.slice(1).reduce((total, line) => {
+      const cells = parseCsvLine(line);
+      const count = Number(String(cells[rowsIndex] || '0').replace(/,/g, ''));
+      return total + (Number.isFinite(count) ? count : 0);
+    }, 0);
+  } catch {
+    return 0;
+  }
+}
+
 async function getSeoExportRowCount() {
   const files = await getLatestSeoExportCsvFiles();
   if (!files.length) return 0;
   if (seoExportCache.totalRows && seoExportCache.expiresAt > Date.now()) return seoExportCache.totalRows;
+  const summaryRows = await countRowsFromSummary(seoExportCache.summaryPath);
+  if (summaryRows > 0) {
+    seoExportCache = { ...seoExportCache, totalRows: summaryRows };
+    return summaryRows;
+  }
   const counts = await Promise.all(files.map((file) => countCsvRows(file.path).catch(() => 0)));
   const totalRows = counts.reduce((sum, count) => sum + count, 0);
   seoExportCache = { ...seoExportCache, totalRows };
