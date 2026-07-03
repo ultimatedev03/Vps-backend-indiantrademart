@@ -1,6 +1,8 @@
 import express from 'express';
+import fsSync from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
+import readline from 'readline';
 import { mysqlQuery } from '../lib/mysqlPool.js';
 
 const router = express.Router();
@@ -19,6 +21,13 @@ const EXPORT_DIRS = String(
 const XML_TYPE = 'application/xml; charset=utf-8';
 const PRODUCT_ACTIVE_WHERE = "LOWER(COALESCE(p.status,'active')) NOT IN ('deleted','inactive','rejected')";
 const VENDOR_ACTIVE_WHERE = "COALESCE(v.is_active,1)=1 AND LOWER(COALESCE(v.status,'active')) NOT IN ('deleted','inactive','rejected','terminated')";
+const SEO_EXPORT_CACHE_MS = 10 * 60 * 1000;
+
+let seoExportCache = {
+  expiresAt: 0,
+  files: [],
+  totalRows: 0,
+};
 
 const staticPages = [
   { loc: '/', priority: '1.0', changefreq: 'daily' },
@@ -68,7 +77,8 @@ const sendXml = (res, xml, maxAge = 900) => {
   res.send(xml);
 };
 
-const renderUrlset = (entries = []) => {
+const renderUrlset = (entries = [], options = {}) => {
+  const includeSeo = Boolean(options.includeSeo);
   const rows = entries
     .filter((entry) => entry?.loc)
     .map((entry) => {
@@ -76,10 +86,14 @@ const renderUrlset = (entries = []) => {
       const lastmod = escapeXml(dateOnly(entry.lastmod));
       const changefreq = entry.changefreq ? `\n    <changefreq>${escapeXml(entry.changefreq)}</changefreq>` : '';
       const priority = entry.priority ? `\n    <priority>${escapeXml(entry.priority)}</priority>` : '';
-      return `  <url>\n    <loc>${loc}</loc>\n    <lastmod>${lastmod}</lastmod>${changefreq}${priority}\n  </url>`;
+      const seoTitle = includeSeo && entry.title ? `\n    <seo:title>${escapeXml(entry.title)}</seo:title>` : '';
+      const seoDescription = includeSeo && entry.description ? `\n    <seo:description>${escapeXml(entry.description)}</seo:description>` : '';
+      const seoKeywords = includeSeo && entry.keywords ? `\n    <seo:keywords>${escapeXml(entry.keywords)}</seo:keywords>` : '';
+      return `  <url>\n    <loc>${loc}</loc>\n    <lastmod>${lastmod}</lastmod>${changefreq}${priority}${seoTitle}${seoDescription}${seoKeywords}\n  </url>`;
     })
     .join('\n');
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${rows}\n</urlset>`;
+  const seoNs = includeSeo ? ' xmlns:seo="https://indiantrademart.com/schemas/seo/1.0"' : '';
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"${seoNs}>\n${rows}\n</urlset>`;
 };
 
 const renderIndex = (entries = []) => {
@@ -104,7 +118,7 @@ async function tableExists(tableName) {
 }
 
 async function getCounts() {
-  const [locations, products, vendors, allMicros, usedMicros, vendorServices] = await Promise.all([
+  const [locations, products, vendors, allMicros, usedMicros, vendorServices, seoExportRows] = await Promise.all([
     mysqlQuery(`
       SELECT COUNT(*) AS total
       FROM cities c
@@ -133,6 +147,7 @@ async function getCounts() {
           AND COALESCE(mc.is_active,1)=1
       ) x
     `),
+    getSeoExportRowCount(),
   ]);
 
   const locationCount = firstNumber(locations);
@@ -148,6 +163,7 @@ async function getCounts() {
     vendorLocations: firstNumber(vendors) * locationCount,
     categoryLocations: categoryCount * locationCount,
     vendorServiceLocations: firstNumber(vendorServices) * locationCount,
+    seoExportUrls: Number(seoExportRows || 0),
   };
 }
 
@@ -334,10 +350,202 @@ async function listSeoExportFiles() {
     .slice(0, 200);
 }
 
+const normalizeHeader = (value = '') => String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+
+const parseCsvLine = (line = '') => {
+  const cells = [];
+  let current = '';
+  let quoted = false;
+
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    const next = line[index + 1];
+    if (char === '"') {
+      if (quoted && next === '"') {
+        current += '"';
+        index += 1;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (char === ',' && !quoted) {
+      cells.push(current);
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+
+  cells.push(current);
+  return cells;
+};
+
+const valueByHeader = (row = {}, names = []) => {
+  for (const name of names) {
+    const key = normalizeHeader(name);
+    if (row[key]) return row[key];
+  }
+  return '';
+};
+
+const rowToSeoEntry = (row = {}, stat) => {
+  const url = valueByHeader(row, ['url', 'profile url', 'search url']);
+  if (!url || !/^https?:\/\//i.test(url)) return null;
+  return {
+    loc: url,
+    lastmod: stat?.mtime || new Date(),
+    changefreq: 'weekly',
+    priority: '0.64',
+    title: valueByHeader(row, ['title', 'seo title', 'page title']),
+    description: valueByHeader(row, ['description', 'seo description', 'meta description']),
+    keywords: valueByHeader(row, ['keywords', 'seo keywords', 'meta keywords']),
+  };
+};
+
+async function getLatestSeoExportCsvFiles() {
+  const now = Date.now();
+  if (seoExportCache.expiresAt > now) return seoExportCache.files;
+
+  const candidates = [];
+  const topLevelCsv = [];
+
+  for (const dir of EXPORT_DIRS) {
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory() && /^indiantrademart-all-seo-live-urls-\d{8}-\d{6}$/i.test(entry.name)) {
+          const stat = await fs.stat(fullPath);
+          candidates.push({ path: fullPath, mtimeMs: stat.mtimeMs });
+        } else if (entry.isFile() && /\.csv$/i.test(entry.name) && !/^00-summary/i.test(entry.name)) {
+          const stat = await fs.stat(fullPath);
+          topLevelCsv.push({ path: fullPath, mtimeMs: stat.mtimeMs, stat });
+        }
+      }
+    } catch {
+      // Optional export folder. Ignore missing folders.
+    }
+  }
+
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const latestDir = candidates[0]?.path;
+  let files = [];
+
+  if (latestDir) {
+    try {
+      const entries = await fs.readdir(latestDir, { withFileTypes: true });
+      files = await Promise.all(
+        entries
+          .filter((entry) => entry.isFile() && /\.csv$/i.test(entry.name) && !/^00-summary/i.test(entry.name))
+          .map(async (entry) => {
+            const filePath = path.join(latestDir, entry.name);
+            const stat = await fs.stat(filePath);
+            return { path: filePath, name: entry.name, stat, mtimeMs: stat.mtimeMs };
+          })
+      );
+    } catch {
+      files = [];
+    }
+  }
+
+  if (!files.length) files = topLevelCsv;
+  files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+
+  const previousSignature = seoExportCache.files.map((file) => `${file.path}:${file.mtimeMs}`).join('|');
+  const nextSignature = files.map((file) => `${file.path}:${file.mtimeMs}`).join('|');
+  seoExportCache = {
+    expiresAt: now + SEO_EXPORT_CACHE_MS,
+    files,
+    totalRows: previousSignature === nextSignature ? seoExportCache.totalRows : 0,
+  };
+  return files;
+}
+
+async function countCsvRows(filePath) {
+  let count = 0;
+  const rl = readline.createInterface({
+    input: fsSync.createReadStream(filePath, { encoding: 'utf8' }),
+    crlfDelay: Infinity,
+  });
+  for await (const _line of rl) count += 1;
+  return Math.max(0, count - 1);
+}
+
+async function getSeoExportRowCount() {
+  const files = await getLatestSeoExportCsvFiles();
+  if (!files.length) return 0;
+  if (seoExportCache.totalRows && seoExportCache.expiresAt > Date.now()) return seoExportCache.totalRows;
+  const counts = await Promise.all(files.map((file) => countCsvRows(file.path).catch(() => 0)));
+  const totalRows = counts.reduce((sum, count) => sum + count, 0);
+  seoExportCache = { ...seoExportCache, totalRows };
+  return totalRows;
+}
+
+async function readSeoExportEntries(page = 1, limit = SITEMAP_LIMIT) {
+  const files = await getLatestSeoExportCsvFiles();
+  const skipTarget = (Math.max(1, page) - 1) * limit;
+  const entries = [];
+  let seenRows = 0;
+  const seenUrls = new Set();
+
+  for (const file of files) {
+    if (entries.length >= limit) break;
+
+    const rl = readline.createInterface({
+      input: fsSync.createReadStream(file.path, { encoding: 'utf8' }),
+      crlfDelay: Infinity,
+    });
+
+    let header = null;
+    for await (const line of rl) {
+      if (!header) {
+        header = parseCsvLine(line).map(normalizeHeader);
+        continue;
+      }
+
+      if (seenRows < skipTarget) {
+        seenRows += 1;
+        continue;
+      }
+
+      const cells = parseCsvLine(line);
+      const row = {};
+      header.forEach((key, index) => {
+        row[key] = cells[index] || '';
+      });
+
+      const entry = rowToSeoEntry(row, file.stat);
+      if (!entry || seenUrls.has(entry.loc)) {
+        seenRows += 1;
+        continue;
+      }
+      seenUrls.add(entry.loc);
+      entries.push(entry);
+      seenRows += 1;
+      if (entries.length >= limit) break;
+    }
+  }
+
+  return entries;
+}
+
+const robotsText = () => `User-agent: *
+Allow: /
+Disallow: /admin/
+Disallow: /superadmin/
+Disallow: /vendor/
+Disallow: /buyer/
+Disallow: /employee/
+Disallow: /finance-portal/
+Disallow: /migration-tools
+
+Sitemap: ${SITE_URL}/sitemap.xml
+Sitemap: ${SITE_URL}/sitemap-seo-exports.xml
+`;
+
 router.get('/robots.txt', (_req, res) => {
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.setHeader('Cache-Control', 'public, max-age=900, stale-while-revalidate=3600');
-  res.send(`User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /vendor\nDisallow: /buyer\nDisallow: /employee\n\nSitemap: ${SITE_URL}/sitemap.xml\n`);
+  res.send(robotsText());
 });
 
 router.get('/sitemap.xml', async (_req, res, next) => {
@@ -352,7 +560,8 @@ router.get('/sitemap.xml', async (_req, res, next) => {
       ...pagesFor('sitemap-vendor-services', counts.vendorServiceLocations),
       ...pagesFor('sitemap-categories', counts.categoryLocations),
       ...pagesFor('sitemap-locations', counts.locations),
-      { loc: '/sitemap-seo-exports.xml' },
+      ...pagesFor('sitemap-seo-exports', counts.seoExportUrls),
+      { loc: '/sitemap-seo-files.xml' },
     ];
     sendXml(res, renderIndex(entries), 900);
   } catch (error) {
@@ -483,9 +692,22 @@ router.get('/sitemap-vendor-services.xml', async (req, res, next) => {
   }
 });
 
-router.get('/sitemap-seo-exports.xml', async (_req, res, next) => {
+router.get('/sitemap-seo-files.xml', async (_req, res, next) => {
   try {
     sendXml(res, renderUrlset(await listSeoExportFiles()), 900);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/sitemap-seo-exports.xml', async (req, res, next) => {
+  try {
+    const entries = await readSeoExportEntries(parsePage(req), SITEMAP_LIMIT);
+    if (!entries.length) {
+      sendXml(res, renderUrlset(await listSeoExportFiles()), 900);
+      return;
+    }
+    sendXml(res, renderUrlset(entries, { includeSeo: true }), 900);
   } catch (error) {
     next(error);
   }

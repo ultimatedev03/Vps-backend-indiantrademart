@@ -3,6 +3,7 @@ import csv
 import io
 import os
 import re
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -22,6 +23,7 @@ CATEGORY_SCOPE = (os.environ.get("CATEGORY_SCOPE") or "all").strip().lower()
 DEFAULT_EXPORT_DIR = Path(os.environ.get("EXPORT_DIR") or "/var/www/indiantrademart/seo-url-exports")
 STAMP = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
 OUT = Path(os.environ.get("OUT_FILE") or DEFAULT_EXPORT_DIR / f"indiantrademart-all-seo-live-urls-{STAMP}.zip")
+MIRROR_DIR = Path(os.environ.get("MIRROR_DIR") or OUT.with_suffix(""))
 
 
 def slugify(value):
@@ -95,6 +97,84 @@ def loc_url(base_slug, loc):
     return f"{SITE}/directory/search/{base_slug}/{state_slug}/{city_slug}"
 
 
+def seo_text(value, fallback=""):
+    text = str(value or fallback or "").strip()
+    return re.sub(r"\s+", " ", text)
+
+
+def location_label(loc):
+    parts = [loc.get("city"), loc.get("district"), loc.get("state")]
+    clean = []
+    for item in parts:
+        item = seo_text(item)
+        if item and item.lower() not in {x.lower() for x in clean}:
+            clean.append(item)
+    return ", ".join(clean) or "India"
+
+
+def category_keywords(micro):
+    items = [
+        micro.get("keywords"),
+        micro.get("meta_tags"),
+        micro.get("name"),
+        micro.get("sub_name"),
+        micro.get("head_name"),
+        "suppliers",
+        "manufacturers",
+        "IndianTradeMart",
+    ]
+    seen = set()
+    out = []
+    for item in items:
+        for part in str(item or "").replace("|", ",").split(","):
+            val = seo_text(part)
+            key = val.lower()
+            if val and key not in seen:
+                seen.add(key)
+                out.append(val)
+    return ", ".join(out[:30])
+
+
+def search_meta(service_name, loc, micro=None):
+    place = location_label(loc)
+    title = f"{seo_text(service_name)} Suppliers & Manufacturers in {place} | IndianTradeMart"
+    description = (
+        f"Find verified {seo_text(service_name).lower()} suppliers, manufacturers, dealers and service providers "
+        f"in {place}. Compare prices, send enquiry and connect with trusted vendors on IndianTradeMart."
+    )
+    keywords = category_keywords(micro or {"name": service_name})
+    if place and place != "India":
+        keywords = f"{keywords}, {seo_text(service_name)} in {place}, {seo_text(service_name)} suppliers in {place}"
+    return title, description, keywords
+
+
+def product_meta(product, loc=None):
+    product_name = seo_text(product.get("name"), "Product")
+    if loc:
+        return search_meta(product_name, loc)
+    return (
+        f"{product_name} - Suppliers, Manufacturers & Price | IndianTradeMart",
+        f"View {product_name} details, price, suppliers and manufacturers on IndianTradeMart. Send enquiry to verified vendors.",
+        f"{product_name}, {product_name} suppliers, {product_name} manufacturers, IndianTradeMart",
+    )
+
+
+def vendor_meta(vendor, loc=None):
+    company = seo_text(vendor.get("company"), "Vendor")
+    if loc:
+        place = location_label(loc)
+        return (
+            f"{company} Products & Services in {place} | IndianTradeMart",
+            f"Explore {company} products and services available in {place}. Contact supplier and send business enquiry on IndianTradeMart.",
+            f"{company}, {company} {place}, suppliers in {place}, IndianTradeMart",
+        )
+    return (
+        f"{company} - Company Profile, Products & Contact | IndianTradeMart",
+        f"View {company} company profile, products, services, contact details and business information on IndianTradeMart.",
+        f"{company}, {company} products, {company} contact, IndianTradeMart",
+    )
+
+
 def write_chunks(zip_file, base_name, header, iterable):
     part = 1
     current = []
@@ -108,7 +188,11 @@ def write_chunks(zip_file, base_name, header, iterable):
         writer = csv.writer(buffer)
         writer.writerow(header)
         writer.writerows(current)
-        zip_file.writestr(f"{base_name}-part-{part:03d}.csv", buffer.getvalue())
+        file_name = f"{base_name}-part-{part:03d}.csv"
+        csv_text = buffer.getvalue()
+        zip_file.writestr(file_name, csv_text)
+        MIRROR_DIR.mkdir(parents=True, exist_ok=True)
+        (MIRROR_DIR / file_name).write_text(csv_text, encoding="utf-8", newline="")
         part += 1
         current = []
 
@@ -134,6 +218,9 @@ def normalize_rows(rows, keys):
 
 def main():
     OUT.parent.mkdir(parents=True, exist_ok=True)
+    if MIRROR_DIR.exists():
+        shutil.rmtree(MIRROR_DIR)
+    MIRROR_DIR.mkdir(parents=True, exist_ok=True)
 
     locations = normalize_rows(
         mysql_query(
@@ -210,7 +297,10 @@ SELECT
   COALESCE(NULLIF(sc.slug,''), LOWER(REPLACE(sc.name,' ','-'))),
   COALESCE(hc.id,''),
   COALESCE(hc.name,''),
-  COALESCE(NULLIF(hc.slug,''), LOWER(REPLACE(hc.name,' ','-')))
+  COALESCE(NULLIF(hc.slug,''), LOWER(REPLACE(hc.name,' ','-'))),
+  COALESCE((SELECT m.meta_tags FROM micro_category_meta m WHERE m.micro_categories=mc.id ORDER BY m.updated_at DESC LIMIT 1),''),
+  COALESCE((SELECT m.description FROM micro_category_meta m WHERE m.micro_categories=mc.id ORDER BY m.updated_at DESC LIMIT 1),''),
+  COALESCE((SELECT m.keywords FROM micro_category_meta m WHERE m.micro_categories=mc.id ORDER BY m.updated_at DESC LIMIT 1),'')
 FROM micro_categories mc
 LEFT JOIN sub_categories sc ON sc.id=mc.sub_category_id
 LEFT JOIN head_categories hc ON hc.id=sc.head_category_id
@@ -228,7 +318,10 @@ SELECT
   COALESCE(NULLIF(sc.slug,''), LOWER(REPLACE(sc.name,' ','-'))),
   '',
   '',
-  ''
+  '',
+  COALESCE((SELECT m.meta_tags FROM micro_category_meta m WHERE m.micro_categories=mc.id ORDER BY m.updated_at DESC LIMIT 1),''),
+  COALESCE((SELECT m.description FROM micro_category_meta m WHERE m.micro_categories=mc.id ORDER BY m.updated_at DESC LIMIT 1),''),
+  COALESCE((SELECT m.keywords FROM micro_category_meta m WHERE m.micro_categories=mc.id ORDER BY m.updated_at DESC LIMIT 1),'')
 FROM micro_categories mc
 LEFT JOIN sub_categories sc ON sc.id=mc.sub_category_id
 WHERE COALESCE(mc.is_active,1)=1
@@ -237,7 +330,7 @@ ORDER BY sc.name, mc.name
 
     micros = normalize_rows(
         mysql_query(micro_sql),
-        ["id", "name", "slug", "sub_id", "sub_name", "sub_slug", "head_id", "head_name", "head_slug"],
+        ["id", "name", "slug", "sub_id", "sub_name", "sub_slug", "head_id", "head_name", "head_slug", "meta_tags", "description", "keywords"],
     )
 
     vendor_by_id = {row["id"]: row for row in vendors}
@@ -262,7 +355,7 @@ ORDER BY sc.name, mc.name
         total = write_chunks(
             zip_file,
             "01-location-catalog",
-            ["State ID", "State", "State Slug", "District ID", "District", "District Slug", "City ID", "City", "City Slug", "URL"],
+            ["State ID", "State", "State Slug", "District ID", "District", "District Slug", "City ID", "City", "City Slug", "URL", "Title", "Description", "Keywords"],
             (
                 [
                     loc["state_id"],
@@ -275,6 +368,9 @@ ORDER BY sc.name, mc.name
                     loc["city"],
                     loc["city_slug"],
                     loc_url("all", loc),
+                    f"Suppliers & Manufacturers in {location_label(loc)} | IndianTradeMart",
+                    f"Find verified suppliers, manufacturers, exporters and service providers in {location_label(loc)} on IndianTradeMart.",
+                    f"suppliers in {location_label(loc)}, manufacturers in {location_label(loc)}, IndianTradeMart",
                 ]
                 for loc in locations
             ),
@@ -296,25 +392,46 @@ ORDER BY sc.name, mc.name
         ]
         buffer = io.StringIO()
         writer = csv.writer(buffer)
-        writer.writerow(["Page", "URL"])
-        writer.writerows(static_pages)
-        zip_file.writestr("02-static-important-pages.csv", buffer.getvalue())
+        writer.writerow(["Page", "URL", "Title", "Description", "Keywords"])
+        writer.writerows([
+            [
+                page,
+                url,
+                f"{page} | IndianTradeMart",
+                f"{page} page on IndianTradeMart.",
+                "IndianTradeMart, B2B marketplace, suppliers, manufacturers",
+            ]
+            for page, url in static_pages
+        ])
+        static_csv = buffer.getvalue()
+        zip_file.writestr("02-static-important-pages.csv", static_csv)
+        (MIRROR_DIR / "02-static-important-pages.csv").write_text(static_csv, encoding="utf-8", newline="")
         summary.append(["Static pages", len(static_pages)])
 
         total = write_chunks(
             zip_file,
             "03-product-detail-urls",
-            ["Product ID", "Vendor ID", "Product", "Product Slug", "URL"],
-            ([p["id"], p["vendor_id"], p["name"], slugify(p["slug"]), f"{SITE}/product/{slugify(p['slug'])}"] for p in products),
+            ["Product ID", "Vendor ID", "Product", "Product Slug", "URL", "Title", "Description", "Keywords"],
+            (
+                [
+                    p["id"],
+                    p["vendor_id"],
+                    p["name"],
+                    slugify(p["slug"]),
+                    f"{SITE}/product/{slugify(p['slug'])}",
+                    *product_meta(p),
+                ]
+                for p in products
+            ),
         )
         summary.append(["Product detail URLs", total])
 
         total = write_chunks(
             zip_file,
             "04-product-location-urls",
-            ["Product ID", "Product", "Product Slug", "State", "District", "City", "URL"],
+            ["Product ID", "Product", "Product Slug", "State", "District", "City", "URL", "Title", "Description", "Keywords"],
             (
-                [p["id"], p["name"], slugify(p["slug"]), loc["state"], loc["district"], loc["city"], loc_url(slugify(p["slug"]), loc)]
+                [p["id"], p["name"], slugify(p["slug"]), loc["state"], loc["district"], loc["city"], loc_url(slugify(p["slug"]), loc), *product_meta(p, loc)]
                 for p in products
                 for loc in locations
             ),
@@ -324,7 +441,7 @@ ORDER BY sc.name, mc.name
         total = write_chunks(
             zip_file,
             "05-vendor-location-urls",
-            ["Vendor ID", "Vendor Internal ID", "Company", "Email", "State", "District", "City", "Profile URL", "Search URL"],
+            ["Vendor ID", "Vendor Internal ID", "Company", "Email", "State", "District", "City", "Profile URL", "Search URL", "Title", "Description", "Keywords"],
             (
                 [
                     v["vendor_code"],
@@ -336,6 +453,7 @@ ORDER BY sc.name, mc.name
                     loc["city"],
                     f"{SITE}/directory/vendor/{slugify(v['slug'])}",
                     loc_url(slugify(v["slug"]), loc),
+                    *vendor_meta(v, loc),
                 ]
                 for v in vendors
                 for loc in locations
@@ -346,7 +464,7 @@ ORDER BY sc.name, mc.name
         total = write_chunks(
             zip_file,
             "06-vendor-service-location-urls",
-            ["Vendor ID", "Company", "Service/Micro Category", "Service Slug", "State", "District", "City", "URL"],
+            ["Vendor ID", "Company", "Service/Micro Category", "Service Slug", "State", "District", "City", "URL", "Title", "Description", "Keywords"],
             (
                 [
                     vendor_id,
@@ -357,6 +475,7 @@ ORDER BY sc.name, mc.name
                     loc["district"],
                     loc["city"],
                     loc_url(slugify(micro["slug"]), loc),
+                    *search_meta(micro["name"], loc, micro),
                 ]
                 for vendor_id, micro in service_pairs
                 for loc in locations
@@ -374,7 +493,7 @@ ORDER BY sc.name, mc.name
         total = write_chunks(
             zip_file,
             "07-category-group-location-urls",
-            ["Micro Category ID", "Micro Category", "Micro Slug", "Sub Category", "Head Category", "State", "District", "City", "URL"],
+            ["Micro Category ID", "Micro Category", "Micro Slug", "Sub Category", "Head Category", "State", "District", "City", "URL", "Title", "Description", "Keywords"],
             (
                 [
                     micro["id"],
@@ -386,6 +505,7 @@ ORDER BY sc.name, mc.name
                     loc["district"],
                     loc["city"],
                     loc_url(slugify(micro["slug"]), loc),
+                    *search_meta(micro["name"], loc, micro),
                 ]
                 for micro in export_micros
                 for loc in locations
@@ -397,9 +517,12 @@ ORDER BY sc.name, mc.name
         writer = csv.writer(buffer)
         writer.writerow(["Sheet", "Rows"])
         writer.writerows(summary)
-        zip_file.writestr("00-summary.csv", buffer.getvalue())
+        summary_csv = buffer.getvalue()
+        zip_file.writestr("00-summary.csv", summary_csv)
+        (MIRROR_DIR / "00-summary.csv").write_text(summary_csv, encoding="utf-8", newline="")
 
     print(f"SEO URL export ready: {OUT}")
+    print(f"SEO URL sitemap CSV mirror ready: {MIRROR_DIR}")
     print(f"Download URL: {SITE}/seo-url-exports/{OUT.name}")
 
 
