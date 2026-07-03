@@ -1191,7 +1191,8 @@ CREATE TABLE IF NOT EXISTS `system_config` (
   `public_notice_enabled` TINYINT(1) DEFAULT 0,
   `public_notice_message` TEXT NULL,
   `public_notice_variant` TEXT NULL,
-  PRIMARY KEY (`id`)
+  PRIMARY KEY (`id`),
+  KEY `idx_system_config_key_updated` (`config_key`, `updated_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `ticket_messages` (

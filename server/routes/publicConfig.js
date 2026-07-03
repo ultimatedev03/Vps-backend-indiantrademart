@@ -1,5 +1,6 @@
 import express from 'express';
 import { db } from '../lib/dbClient.js';
+import { mysqlQuery } from '../lib/mysqlPool.js';
 
 const router = express.Router();
 
@@ -57,13 +58,20 @@ const pageControlMatches = (requestedRoute, controlRoute) => {
 
 router.get('/system-config', async (_req, res) => {
   try {
-    const { data, error } = await db
-      .from('system_config')
-      .select('maintenance_mode, maintenance_message, allow_vendor_registration, public_notice_enabled, public_notice_message, public_notice_variant')
-      .eq('config_key', MAINTENANCE_KEY)
-      .maybeSingle();
-
-    if (error) throw error;
+    const rows = await mysqlQuery(
+      `SELECT maintenance_mode,
+              maintenance_message,
+              allow_vendor_registration,
+              public_notice_enabled,
+              public_notice_message,
+              public_notice_variant
+         FROM system_config
+        WHERE config_key = ?
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1`,
+      [MAINTENANCE_KEY]
+    );
+    const data = rows[0] || null;
 
     res.json({
       success: true,

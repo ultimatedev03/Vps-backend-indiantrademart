@@ -525,19 +525,37 @@ async function syncActivePlanQuota(planId, limits) {
 
 async function ensureSystemConfigRow(superadminId) {
   const key = 'maintenance_mode';
-  const { data, error } = await db
-    .from('system_config')
-    .select('*')
-    .eq('config_key', key)
-    .maybeSingle();
+  const rows = await mysqlQuery(
+    `SELECT *
+       FROM system_config
+      WHERE config_key = ?
+      ORDER BY updated_at DESC, id DESC
+      LIMIT 1`,
+    [key]
+  );
 
-  if (error) {
-    throw new Error(error.message);
-  }
+  if (rows[0]) return rows[0];
 
-  if (data) return data;
+  await mysqlQuery(
+    `INSERT INTO system_config
+      (id, config_key, maintenance_mode, maintenance_message, allow_vendor_registration,
+       commission_rate, max_upload_size_mb, public_notice_enabled, public_notice_message,
+       public_notice_variant, updated_at, updated_by)
+     VALUES
+      (UUID(), ?, 0, '', 1, 5, 10, 0, '', 'info', NOW(), ?)`,
+    [key, superadminId || null]
+  );
 
-  const payload = {
+  const insertedRows = await mysqlQuery(
+    `SELECT *
+       FROM system_config
+      WHERE config_key = ?
+      ORDER BY updated_at DESC, id DESC
+      LIMIT 1`,
+    [key]
+  );
+
+  return insertedRows[0] || {
     config_key: key,
     maintenance_mode: false,
     maintenance_message: '',
@@ -550,18 +568,6 @@ async function ensureSystemConfigRow(superadminId) {
     updated_at: nowIso(),
     updated_by: superadminId || null,
   };
-
-  const { data: inserted, error: insertError } = await db
-    .from('system_config')
-    .upsert(payload, { onConflict: 'config_key' })
-    .select('*')
-    .maybeSingle();
-
-  if (insertError) {
-    throw new Error(insertError.message);
-  }
-
-  return inserted || payload;
 }
 
 async function deleteVendorCascade(vendorId) {
@@ -1937,44 +1943,80 @@ router.get('/system-config', async (req, res) => {
 router.put('/system-config', async (req, res) => {
   try {
     const existing = await ensureSystemConfigRow(req.superadmin?.id);
+    const body = req.body || {};
 
     const payload = {
       config_key: 'maintenance_mode',
-      maintenance_mode: normalizeBooleanInput(req.body?.maintenance_mode, false),
-      maintenance_message: String(req.body?.maintenance_message || ''),
+      maintenance_mode: hasOwn(body, 'maintenance_mode')
+        ? normalizeBooleanInput(body.maintenance_mode, false)
+        : normalizeBooleanInput(existing.maintenance_mode, false),
+      maintenance_message: hasOwn(body, 'maintenance_message')
+        ? String(body.maintenance_message ?? '')
+        : String(existing.maintenance_message ?? ''),
       allow_vendor_registration:
-        hasOwn(req.body || {}, 'allow_vendor_registration')
-          ? normalizeBooleanInput(req.body?.allow_vendor_registration, true)
+        hasOwn(body, 'allow_vendor_registration')
+          ? normalizeBooleanInput(body.allow_vendor_registration, true)
           : normalizeBooleanInput(existing.allow_vendor_registration, true),
       commission_rate:
-        req.body?.commission_rate != null ? Number(req.body.commission_rate) || 0 : existing.commission_rate,
+        body.commission_rate != null ? Number(body.commission_rate) || 0 : existing.commission_rate,
       max_upload_size_mb:
-        req.body?.max_upload_size_mb != null
-          ? Number(req.body.max_upload_size_mb) || 0
+        body.max_upload_size_mb != null
+          ? Number(body.max_upload_size_mb) || 0
           : existing.max_upload_size_mb,
-      public_notice_enabled: normalizeBooleanInput(req.body?.public_notice_enabled, false),
-      public_notice_message: String(req.body?.public_notice_message || ''),
-      public_notice_variant: String(req.body?.public_notice_variant || existing.public_notice_variant || 'info'),
+      public_notice_enabled: hasOwn(body, 'public_notice_enabled')
+        ? normalizeBooleanInput(body.public_notice_enabled, false)
+        : normalizeBooleanInput(existing.public_notice_enabled, false),
+      public_notice_message: hasOwn(body, 'public_notice_message')
+        ? String(body.public_notice_message ?? '')
+        : String(existing.public_notice_message ?? ''),
+      public_notice_variant: String(body.public_notice_variant || existing.public_notice_variant || 'info'),
       updated_at: nowIso(),
       updated_by: req.superadmin?.id || null,
     };
 
-    const { data, error } = await db
-      .from('system_config')
-      .upsert(payload, { onConflict: 'config_key' })
-      .select('*')
-      .maybeSingle();
+    await mysqlQuery(
+      `UPDATE system_config
+          SET maintenance_mode = ?,
+              maintenance_message = ?,
+              allow_vendor_registration = ?,
+              commission_rate = ?,
+              max_upload_size_mb = ?,
+              public_notice_enabled = ?,
+              public_notice_message = ?,
+              public_notice_variant = ?,
+              updated_at = NOW(),
+              updated_by = ?
+        WHERE config_key = ?`,
+      [
+        payload.maintenance_mode ? 1 : 0,
+        payload.maintenance_message,
+        payload.allow_vendor_registration ? 1 : 0,
+        payload.commission_rate,
+        payload.max_upload_size_mb,
+        payload.public_notice_enabled ? 1 : 0,
+        payload.public_notice_message,
+        payload.public_notice_variant,
+        payload.updated_by,
+        payload.config_key,
+      ]
+    );
 
-    if (error) {
-      return res.status(500).json({ success: false, error: error.message });
-    }
+    const rows = await mysqlQuery(
+      `SELECT *
+         FROM system_config
+        WHERE config_key = ?
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1`,
+      [payload.config_key]
+    );
+    const saved = rows[0] || payload;
 
     await writeAuditLog({
       req,
       actor: req.actor,
       action: 'SYSTEM_CONFIG_UPDATED',
       entityType: 'system_config',
-      entityId: existing?.id || null,
+      entityId: saved?.id || existing?.id || null,
       details: {
         maintenance_mode: payload.maintenance_mode,
         maintenance_message: payload.maintenance_message,
@@ -1983,7 +2025,6 @@ router.put('/system-config', async (req, res) => {
       },
     });
 
-    const saved = data || payload;
     return res.json({
       success: true,
       config: {

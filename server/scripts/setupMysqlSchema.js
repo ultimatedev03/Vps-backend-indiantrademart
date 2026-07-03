@@ -112,6 +112,7 @@ const missingIndexes = [
   { table: 'sales_vendor_engagements', name: 'idx_sales_vendor_engagements_sales_code', columns: ['sales_code'] },
   { table: 'sales_vendor_engagements', name: 'idx_sales_vendor_engagements_next_follow_up_at', columns: ['next_follow_up_at'] },
   { table: 'sales_vendor_engagements', name: 'idx_sales_vendor_engagements_sales_due', columns: ['sales_user_id', 'next_follow_up_at', 'status'] },
+  { table: 'system_config', name: 'idx_system_config_key_updated', columns: ['config_key', 'updated_at'] },
   { table: 'vendor_payments', name: 'idx_vendor_payments_sales_code', columns: ['sales_code'] },
   { table: 'vendor_payments', name: 'idx_vendor_payments_sales_user_id', columns: ['sales_user_id'] },
   { table: 'vendor_payments', name: 'idx_vendor_payments_payment_date', columns: ['payment_date'] },
