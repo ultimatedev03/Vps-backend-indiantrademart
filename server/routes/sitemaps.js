@@ -201,7 +201,8 @@ const sitemapIndexEntries = (counts) => [
   ...pagesFor('sitemap-vendors', counts.vendors),
   ...pagesFor('sitemap-vendor-locations', counts.vendorLocations),
   ...pagesFor('sitemap-vendor-services', counts.vendorServiceLocations),
-  ...pagesFor('sitemap-categories', counts.categoryLocations),
+  ...pagesFor('sitemap-categories', counts.categories),
+  ...pagesFor('sitemap-category-locations', counts.categoryLocations),
   ...pagesFor('sitemap-locations', counts.locations),
 ];
 
@@ -681,15 +682,17 @@ router.get('/sitemap-vendor-locations.xml', async (req, res, next) => {
 
 router.get('/sitemap-categories.xml', async (req, res, next) => {
   try {
-    const counts = await getCounts();
-    const entries = await crossLocationEntries({
-      req,
-      fetchEntities: fetchCategories,
-      entityCount: counts.categories,
-      makeBaseSlug: (row) => slugify(row.slug || row.name || row.id),
-      priority: '0.75',
-    });
-    sendXml(res, renderUrlset(entries));
+    const page = parsePage(req);
+    const rows = await fetchCategories(SITEMAP_LIMIT, (page - 1) * SITEMAP_LIMIT);
+    sendXml(
+      res,
+      renderUrlset(rows.map((row) => ({
+        loc: `/directory/search/${encodeURIComponent(slugify(row.slug || row.name || row.id))}`,
+        lastmod: row.updated_at,
+        changefreq: 'weekly',
+        priority: '0.82',
+      })))
+    );
   } catch (error) {
     next(error);
   }
