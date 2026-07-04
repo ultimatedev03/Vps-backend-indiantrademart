@@ -10,25 +10,9 @@ const router = express.Router();
 const SITE_URL = String(process.env.SITE_URL || process.env.VITE_SITE_URL || 'https://indiantrademart.com').replace(/\/+$/, '');
 const SITEMAP_LIMIT = Math.min(50000, Math.max(1000, Number(process.env.SITEMAP_URL_LIMIT || 45000)));
 const CATEGORY_SCOPE = String(process.env.SITEMAP_CATEGORY_SCOPE || 'all').trim().toLowerCase();
-const EXPORT_DIRS = String(
-  process.env.SEO_EXPORT_DIRS ||
-    '/var/www/indiantrademart/seo-url-exports,/var/www/indiantrademart/frontend/seo-url-exports,/opt/indiantrademart-backend/seo-url-exports'
-)
-  .split(',')
-  .map((item) => item.trim())
-  .filter(Boolean);
-
 const XML_TYPE = 'application/xml; charset=utf-8';
 const PRODUCT_ACTIVE_WHERE = "LOWER(COALESCE(p.status,'active')) NOT IN ('deleted','inactive','rejected')";
 const VENDOR_ACTIVE_WHERE = "COALESCE(v.is_active,1)=1 AND LOWER(COALESCE(v.status,'active')) NOT IN ('deleted','inactive','rejected','terminated')";
-const SEO_EXPORT_CACHE_MS = 10 * 60 * 1000;
-
-let seoExportCache = {
-  expiresAt: 0,
-  files: [],
-  summaryPath: '',
-  totalRows: 0,
-};
 
 const staticPages = [
   { loc: '/', priority: '1.0', changefreq: 'daily' },
@@ -119,7 +103,7 @@ async function tableExists(tableName) {
 }
 
 async function getCounts() {
-  const [locations, products, vendors, allMicros, usedMicros, vendorServices, seoExportRows] = await Promise.all([
+  const [locations, products, vendors, allMicros, usedMicros, vendorServices] = await Promise.all([
     mysqlQuery(`
       SELECT COUNT(*) AS total
       FROM cities c
@@ -148,7 +132,6 @@ async function getCounts() {
           AND COALESCE(mc.is_active,1)=1
       ) x
     `),
-    getSeoExportRowCount(),
   ]);
 
   const locationCount = firstNumber(locations);
@@ -164,7 +147,6 @@ async function getCounts() {
     vendorLocations: firstNumber(vendors) * locationCount,
     categoryLocations: categoryCount * locationCount,
     vendorServiceLocations: firstNumber(vendorServices) * locationCount,
-    seoExportUrls: Number(seoExportRows || 0),
   };
 }
 
@@ -206,6 +188,17 @@ const pagesFor = (baseName, total) => {
     loc: `/${baseName}.xml?page=${index + 1}`,
   }));
 };
+
+const sitemapIndexEntries = (counts) => [
+  { loc: '/sitemap-static.xml' },
+  ...pagesFor('sitemap-products', counts.products),
+  ...pagesFor('sitemap-product-locations', counts.productLocations),
+  ...pagesFor('sitemap-vendors', counts.vendors),
+  ...pagesFor('sitemap-vendor-locations', counts.vendorLocations),
+  ...pagesFor('sitemap-vendor-services', counts.vendorServiceLocations),
+  ...pagesFor('sitemap-categories', counts.categoryLocations),
+  ...pagesFor('sitemap-locations', counts.locations),
+];
 
 const parsePage = (req) => Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
 
@@ -577,7 +570,6 @@ Disallow: /finance-portal/
 Disallow: /migration-tools
 
 Sitemap: ${SITE_URL}/sitemap.xml
-Sitemap: ${SITE_URL}/sitemap-seo-exports.xml
 `;
 
 router.get('/robots.txt', (_req, res) => {
@@ -589,19 +581,7 @@ router.get('/robots.txt', (_req, res) => {
 router.get('/sitemap.xml', async (_req, res, next) => {
   try {
     const counts = await getCounts();
-    const entries = [
-      { loc: '/sitemap-static.xml' },
-      ...pagesFor('sitemap-products', counts.products),
-      ...pagesFor('sitemap-product-locations', counts.productLocations),
-      ...pagesFor('sitemap-vendors', counts.vendors),
-      ...pagesFor('sitemap-vendor-locations', counts.vendorLocations),
-      ...pagesFor('sitemap-vendor-services', counts.vendorServiceLocations),
-      ...pagesFor('sitemap-categories', counts.categoryLocations),
-      ...pagesFor('sitemap-locations', counts.locations),
-      ...pagesFor('sitemap-seo-exports', counts.seoExportUrls),
-      { loc: '/sitemap-seo-files.xml' },
-    ];
-    sendXml(res, renderIndex(entries), 900);
+    sendXml(res, renderIndex(sitemapIndexEntries(counts)), 900);
   } catch (error) {
     next(error);
   }
@@ -714,6 +694,22 @@ router.get('/sitemap-categories.xml', async (req, res, next) => {
   }
 });
 
+router.get('/sitemap-category-locations.xml', async (req, res, next) => {
+  try {
+    const counts = await getCounts();
+    const entries = await crossLocationEntries({
+      req,
+      fetchEntities: fetchCategories,
+      entityCount: counts.categories,
+      makeBaseSlug: (row) => slugify(row.slug || row.name || row.id),
+      priority: '0.75',
+    });
+    sendXml(res, renderUrlset(entries));
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/sitemap-vendor-services.xml', async (req, res, next) => {
   try {
     const counts = await getCounts();
@@ -730,22 +726,14 @@ router.get('/sitemap-vendor-services.xml', async (req, res, next) => {
   }
 });
 
-router.get('/sitemap-seo-files.xml', async (_req, res, next) => {
-  try {
-    sendXml(res, renderUrlset(await listSeoExportFiles()), 900);
-  } catch (error) {
-    next(error);
-  }
+router.get('/sitemap-seo-files.xml', async (_req, res) => {
+  sendXml(res, renderUrlset([]), 900);
 });
 
-router.get('/sitemap-seo-exports.xml', async (req, res, next) => {
+router.get('/sitemap-seo-exports.xml', async (_req, res, next) => {
   try {
-    const entries = await readSeoExportEntries(parsePage(req), SITEMAP_LIMIT);
-    if (!entries.length) {
-      sendXml(res, renderUrlset(await listSeoExportFiles()), 900);
-      return;
-    }
-    sendXml(res, renderUrlset(entries, { includeSeo: true }), 900);
+    const counts = await getCounts();
+    sendXml(res, renderIndex(sitemapIndexEntries(counts)), 900);
   } catch (error) {
     next(error);
   }
