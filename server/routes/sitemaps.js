@@ -13,6 +13,11 @@ const CATEGORY_SCOPE = String(process.env.SITEMAP_CATEGORY_SCOPE || 'all').trim(
 const XML_TYPE = 'application/xml; charset=utf-8';
 const PRODUCT_ACTIVE_WHERE = "LOWER(COALESCE(p.status,'active')) NOT IN ('deleted','inactive','rejected')";
 const VENDOR_ACTIVE_WHERE = "COALESCE(v.is_active,1)=1 AND LOWER(COALESCE(v.status,'active')) NOT IN ('deleted','inactive','rejected','terminated')";
+const safeSqlInt = (value, fallback = 0, max = Number.MAX_SAFE_INTEGER) => {
+  const parsed = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return Math.min(parsed, max);
+};
 
 const staticPages = [
   { loc: '/', priority: '1.0', changefreq: 'daily' },
@@ -203,8 +208,9 @@ const sitemapIndexEntries = (counts) => [
 const parsePage = (req) => Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
 
 async function fetchProducts(limit, offset) {
-  return mysqlQuery(
-    `
+  const safeLimit = safeSqlInt(limit, SITEMAP_LIMIT, SITEMAP_LIMIT);
+  const safeOffset = safeSqlInt(offset, 0);
+  return mysqlQuery(`
       SELECT
         p.id,
         COALESCE(NULLIF(p.name,''), 'product') AS name,
@@ -213,15 +219,14 @@ async function fetchProducts(limit, offset) {
       FROM products p
       WHERE ${PRODUCT_ACTIVE_WHERE}
       ORDER BY COALESCE(p.updated_at, p.created_at) DESC, p.id DESC
-      LIMIT ? OFFSET ?
-    `,
-    [limit, offset]
-  );
+      LIMIT ${safeLimit} OFFSET ${safeOffset}
+    `);
 }
 
 async function fetchVendors(limit, offset) {
-  return mysqlQuery(
-    `
+  const safeLimit = safeSqlInt(limit, SITEMAP_LIMIT, SITEMAP_LIMIT);
+  const safeOffset = safeSqlInt(offset, 0);
+  return mysqlQuery(`
       SELECT
         v.id,
         COALESCE(NULLIF(v.company_name,''), NULLIF(v.vendor_id,''), v.email, 'vendor') AS name,
@@ -230,18 +235,17 @@ async function fetchVendors(limit, offset) {
       FROM vendors v
       WHERE ${VENDOR_ACTIVE_WHERE}
       ORDER BY COALESCE(v.updated_at, v.created_at) DESC, v.id DESC
-      LIMIT ? OFFSET ?
-    `,
-    [limit, offset]
-  );
+      LIMIT ${safeLimit} OFFSET ${safeOffset}
+    `);
 }
 
 async function fetchCategories(limit, offset) {
+  const safeLimit = safeSqlInt(limit, SITEMAP_LIMIT, SITEMAP_LIMIT);
+  const safeOffset = safeSqlInt(offset, 0);
   const usedJoin = CATEGORY_SCOPE === 'all'
     ? ''
     : `JOIN (SELECT DISTINCT micro_category_id FROM products p WHERE ${PRODUCT_ACTIVE_WHERE} AND p.micro_category_id IS NOT NULL) used ON used.micro_category_id = mc.id`;
-  return mysqlQuery(
-    `
+  return mysqlQuery(`
       SELECT
         mc.id,
         COALESCE(NULLIF(mc.name,''), 'category') AS name,
@@ -251,15 +255,14 @@ async function fetchCategories(limit, offset) {
       ${usedJoin}
       WHERE COALESCE(mc.is_active,1)=1
       ORDER BY COALESCE(mc.updated_at, mc.created_at) DESC, mc.id DESC
-      LIMIT ? OFFSET ?
-    `,
-    [limit, offset]
-  );
+      LIMIT ${safeLimit} OFFSET ${safeOffset}
+    `);
 }
 
 async function fetchVendorServices(limit, offset) {
-  return mysqlQuery(
-    `
+  const safeLimit = safeSqlInt(limit, SITEMAP_LIMIT, SITEMAP_LIMIT);
+  const safeOffset = safeSqlInt(offset, 0);
+  return mysqlQuery(`
       SELECT
         p.vendor_id,
         p.micro_category_id,
@@ -281,10 +284,8 @@ async function fetchVendorServices(limit, offset) {
         AND COALESCE(mc.is_active,1)=1
       GROUP BY p.vendor_id, p.micro_category_id, v.company_name, v.vendor_id, v.email, v.slug, v.id, v.updated_at, v.created_at, mc.name, mc.slug, mc.id, mc.updated_at, mc.created_at
       ORDER BY updated_at DESC, p.vendor_id DESC, p.micro_category_id DESC
-      LIMIT ? OFFSET ?
-    `,
-    [limit, offset]
-  );
+      LIMIT ${safeLimit} OFFSET ${safeOffset}
+    `);
 }
 
 async function crossLocationEntries({ req, fetchEntities, entityCount, makeBaseSlug, priority = '0.65' }) {
