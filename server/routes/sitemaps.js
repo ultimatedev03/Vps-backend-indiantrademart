@@ -219,6 +219,29 @@ const sitemapIndexEntries = (counts) => [
   ...pagesFor('sitemap-locations', counts.locations),
 ];
 
+const sitemapFamilyIndexes = [
+  {
+    loc: '/sitemap-product-locations-index.xml',
+    baseName: 'sitemap-product-locations',
+    countKey: 'productLocations',
+  },
+  {
+    loc: '/sitemap-vendor-locations-index.xml',
+    baseName: 'sitemap-vendor-locations',
+    countKey: 'vendorLocations',
+  },
+  {
+    loc: '/sitemap-vendor-services-index.xml',
+    baseName: 'sitemap-vendor-services',
+    countKey: 'vendorServiceLocations',
+  },
+  {
+    loc: '/sitemap-category-locations-index.xml',
+    baseName: 'sitemap-category-locations',
+    countKey: 'categoryLocations',
+  },
+];
+
 const parsePage = (req) => Math.max(1, Number.parseInt(String(req.params?.page || req.query.page || '1'), 10) || 1);
 
 async function fetchProducts(limit, offset) {
@@ -585,6 +608,10 @@ Disallow: /finance-portal/
 Disallow: /migration-tools
 
 Sitemap: ${SITE_URL}/sitemap.xml
+Sitemap: ${SITE_URL}/sitemap-product-locations-index.xml
+Sitemap: ${SITE_URL}/sitemap-vendor-locations-index.xml
+Sitemap: ${SITE_URL}/sitemap-vendor-services-index.xml
+Sitemap: ${SITE_URL}/sitemap-category-locations-index.xml
 `;
 
 router.get('/robots.txt', (_req, res) => {
@@ -601,6 +628,17 @@ async function handleSitemapIndex(_req, res, next) {
   } catch (error) {
     next(error);
   }
+}
+
+function makeFamilyIndexHandler(baseName, countKey) {
+  return async (_req, res, next) => {
+    try {
+      const counts = await getCounts();
+      sendXml(res, renderIndex(pagesFor(baseName, counts[countKey])), 900);
+    } catch (error) {
+      next(error);
+    }
+  };
 }
 
 function handleStaticSitemap(_req, res) {
@@ -757,6 +795,9 @@ const cleanPagedSitemapHandlers = {
 
 router.get('/sitemap.xml', handleSitemapIndex);
 router.get('/sitemap-static.xml', handleStaticSitemap);
+sitemapFamilyIndexes.forEach((family) => {
+  router.get(family.loc, makeFamilyIndexHandler(family.baseName, family.countKey));
+});
 router.get('/sitemap-products.xml', handleProductsSitemap);
 router.get('/sitemap-vendors.xml', handleVendorsSitemap);
 router.get('/sitemap-locations.xml', handleLocationsSitemap);
