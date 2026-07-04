@@ -612,10 +612,6 @@ Disallow: /finance-portal/
 Disallow: /migration-tools
 
 Sitemap: ${SITE_URL}/sitemap.xml
-Sitemap: ${SITE_URL}/sitemap-product-locations-index.xml
-Sitemap: ${SITE_URL}/sitemap-vendor-locations-index.xml
-Sitemap: ${SITE_URL}/sitemap-vendor-services-index.xml
-Sitemap: ${SITE_URL}/sitemap-category-locations-index.xml
 `;
 
 router.get('/robots.txt', (_req, res) => {
