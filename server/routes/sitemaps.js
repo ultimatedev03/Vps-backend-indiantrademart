@@ -231,7 +231,12 @@ const sitemapFamilyIndexes = [
 ];
 
 const sitemapIndexEntries = (counts) => [
-  ...fullSitemapIndexEntries(counts),
+  { loc: '/sitemap-static.xml' },
+  ...pagesFor('sitemap-products', counts.products),
+  ...pagesFor('sitemap-vendors', counts.vendors),
+  ...pagesFor('sitemap-categories', counts.categories),
+  ...pagesFor('sitemap-locations', counts.locations),
+  ...sitemapFamilyIndexes.map((family) => ({ loc: family.loc })),
 ];
 
 const fullSitemapIndexEntries = (counts) => [
