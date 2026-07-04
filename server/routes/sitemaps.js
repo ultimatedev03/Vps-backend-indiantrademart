@@ -207,18 +207,6 @@ const pagesFor = (baseName, total) => {
   }));
 };
 
-const sitemapIndexEntries = (counts) => [
-  { loc: '/sitemap-static.xml' },
-  ...pagesFor('sitemap-products', counts.products),
-  ...pagesFor('sitemap-product-locations', counts.productLocations),
-  ...pagesFor('sitemap-vendors', counts.vendors),
-  ...pagesFor('sitemap-vendor-locations', counts.vendorLocations),
-  ...pagesFor('sitemap-vendor-services', counts.vendorServiceLocations),
-  ...pagesFor('sitemap-categories', counts.categories),
-  ...pagesFor('sitemap-category-locations', counts.categoryLocations),
-  ...pagesFor('sitemap-locations', counts.locations),
-];
-
 const sitemapFamilyIndexes = [
   {
     loc: '/sitemap-product-locations-index.xml',
@@ -240,6 +228,29 @@ const sitemapFamilyIndexes = [
     baseName: 'sitemap-category-locations',
     countKey: 'categoryLocations',
   },
+];
+
+const sitemapIndexEntries = (counts) => [
+  { loc: '/sitemap-static.xml' },
+  ...pagesFor('sitemap-products', counts.products),
+  ...pagesFor('sitemap-vendors', counts.vendors),
+  ...pagesFor('sitemap-categories', counts.categories),
+  ...pagesFor('sitemap-locations', counts.locations),
+  ...sitemapFamilyIndexes
+    .filter((family) => Number(counts[family.countKey] || 0) > 0)
+    .map((family) => ({ loc: family.loc })),
+];
+
+const fullSitemapIndexEntries = (counts) => [
+  { loc: '/sitemap-static.xml' },
+  ...pagesFor('sitemap-products', counts.products),
+  ...pagesFor('sitemap-product-locations', counts.productLocations),
+  ...pagesFor('sitemap-vendors', counts.vendors),
+  ...pagesFor('sitemap-vendor-locations', counts.vendorLocations),
+  ...pagesFor('sitemap-vendor-services', counts.vendorServiceLocations),
+  ...pagesFor('sitemap-categories', counts.categories),
+  ...pagesFor('sitemap-category-locations', counts.categoryLocations),
+  ...pagesFor('sitemap-locations', counts.locations),
 ];
 
 const parsePage = (req) => Math.max(1, Number.parseInt(String(req.params?.page || req.query.page || '1'), 10) || 1);
@@ -823,7 +834,7 @@ router.get('/sitemap-seo-files.xml', async (_req, res) => {
 router.get('/sitemap-seo-exports.xml', async (_req, res, next) => {
   try {
     const counts = await getCounts();
-    sendXml(res, renderIndex(sitemapIndexEntries(counts)), 900);
+    sendXml(res, renderIndex(fullSitemapIndexEntries(counts)), 900);
   } catch (error) {
     next(error);
   }
