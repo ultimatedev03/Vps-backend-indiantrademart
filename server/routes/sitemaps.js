@@ -209,9 +209,19 @@ const pagesFor = (baseName, total) => {
 
 const sitemapFamilyIndexes = [
   {
+    loc: '/sitemap-products-index.xml',
+    baseName: 'sitemap-products',
+    countKey: 'products',
+  },
+  {
     loc: '/sitemap-product-locations-index.xml',
     baseName: 'sitemap-product-locations',
     countKey: 'productLocations',
+  },
+  {
+    loc: '/sitemap-vendors-index.xml',
+    baseName: 'sitemap-vendors',
+    countKey: 'vendors',
   },
   {
     loc: '/sitemap-vendor-locations-index.xml',
@@ -228,15 +238,23 @@ const sitemapFamilyIndexes = [
     baseName: 'sitemap-category-locations',
     countKey: 'categoryLocations',
   },
+  {
+    loc: '/sitemap-locations-index.xml',
+    baseName: 'sitemap-locations',
+    countKey: 'locations',
+  },
 ];
 
 const sitemapIndexEntries = (counts) => [
   { loc: '/sitemap-static.xml' },
   ...pagesFor('sitemap-products', counts.products),
+  ...pagesFor('sitemap-product-locations', counts.productLocations),
   ...pagesFor('sitemap-vendors', counts.vendors),
+  ...pagesFor('sitemap-vendor-locations', counts.vendorLocations),
+  ...pagesFor('sitemap-vendor-services', counts.vendorServiceLocations),
   ...pagesFor('sitemap-categories', counts.categories),
+  ...pagesFor('sitemap-category-locations', counts.categoryLocations),
   ...pagesFor('sitemap-locations', counts.locations),
-  ...sitemapFamilyIndexes.map((family) => ({ loc: family.loc })),
 ];
 
 const fullSitemapIndexEntries = (counts) => [
