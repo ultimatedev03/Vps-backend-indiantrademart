@@ -54,6 +54,17 @@ const absoluteUrl = (urlPath = '/') => {
   return `${SITE_URL}${clean}`;
 };
 
+const removeCrawlerUnfriendlyHeaders = (res) => {
+  [
+    'Content-Security-Policy',
+    'Cross-Origin-Opener-Policy',
+    'Cross-Origin-Resource-Policy',
+    'Origin-Agent-Cluster',
+    'Permissions-Policy',
+    'X-Frame-Options',
+  ].forEach((header) => res.removeHeader(header));
+};
+
 const dateOnly = (value) => {
   if (!value) return new Date().toISOString().slice(0, 10);
   const parsed = new Date(value);
@@ -62,8 +73,10 @@ const dateOnly = (value) => {
 };
 
 const sendXml = (res, xml, maxAge = 900) => {
+  removeCrawlerUnfriendlyHeaders(res);
   res.setHeader('Content-Type', XML_TYPE);
   res.setHeader('Cache-Control', `public, max-age=${maxAge}, stale-while-revalidate=${maxAge * 4}`);
+  res.setHeader('X-Robots-Tag', 'index, follow');
   res.send(xml);
 };
 
@@ -190,7 +203,7 @@ const searchUrl = (baseSlug, loc) => {
 const pagesFor = (baseName, total) => {
   const pages = Math.ceil(Math.max(0, Number(total || 0)) / SITEMAP_LIMIT);
   return Array.from({ length: pages }, (_, index) => ({
-    loc: `/${baseName}.xml?page=${index + 1}`,
+    loc: pages === 1 ? `/${baseName}.xml` : `/${baseName}-${index + 1}.xml`,
   }));
 };
 
@@ -206,7 +219,7 @@ const sitemapIndexEntries = (counts) => [
   ...pagesFor('sitemap-locations', counts.locations),
 ];
 
-const parsePage = (req) => Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
+const parsePage = (req) => Math.max(1, Number.parseInt(String(req.params?.page || req.query.page || '1'), 10) || 1);
 
 async function fetchProducts(limit, offset) {
   const safeLimit = safeSqlInt(limit, SITEMAP_LIMIT, SITEMAP_LIMIT);
@@ -575,25 +588,26 @@ Sitemap: ${SITE_URL}/sitemap.xml
 `;
 
 router.get('/robots.txt', (_req, res) => {
+  removeCrawlerUnfriendlyHeaders(res);
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.setHeader('Cache-Control', 'public, max-age=900, stale-while-revalidate=3600');
   res.send(robotsText());
 });
 
-router.get('/sitemap.xml', async (_req, res, next) => {
+async function handleSitemapIndex(_req, res, next) {
   try {
     const counts = await getCounts();
     sendXml(res, renderIndex(sitemapIndexEntries(counts)), 900);
   } catch (error) {
     next(error);
   }
-});
+}
 
-router.get('/sitemap-static.xml', (_req, res) => {
+function handleStaticSitemap(_req, res) {
   sendXml(res, renderUrlset(staticPages), 1800);
-});
+}
 
-router.get('/sitemap-products.xml', async (req, res, next) => {
+async function handleProductsSitemap(req, res, next) {
   try {
     const page = parsePage(req);
     const rows = await fetchProducts(SITEMAP_LIMIT, (page - 1) * SITEMAP_LIMIT);
@@ -609,9 +623,9 @@ router.get('/sitemap-products.xml', async (req, res, next) => {
   } catch (error) {
     next(error);
   }
-});
+}
 
-router.get('/sitemap-vendors.xml', async (req, res, next) => {
+async function handleVendorsSitemap(req, res, next) {
   try {
     const page = parsePage(req);
     const rows = await fetchVendors(SITEMAP_LIMIT, (page - 1) * SITEMAP_LIMIT);
@@ -627,9 +641,9 @@ router.get('/sitemap-vendors.xml', async (req, res, next) => {
   } catch (error) {
     next(error);
   }
-});
+}
 
-router.get('/sitemap-locations.xml', async (req, res, next) => {
+async function handleLocationsSitemap(req, res, next) {
   try {
     const page = parsePage(req);
     const locations = await fetchLocations();
@@ -646,9 +660,9 @@ router.get('/sitemap-locations.xml', async (req, res, next) => {
   } catch (error) {
     next(error);
   }
-});
+}
 
-router.get('/sitemap-product-locations.xml', async (req, res, next) => {
+async function handleProductLocationsSitemap(req, res, next) {
   try {
     const counts = await getCounts();
     const entries = await crossLocationEntries({
@@ -662,9 +676,9 @@ router.get('/sitemap-product-locations.xml', async (req, res, next) => {
   } catch (error) {
     next(error);
   }
-});
+}
 
-router.get('/sitemap-vendor-locations.xml', async (req, res, next) => {
+async function handleVendorLocationsSitemap(req, res, next) {
   try {
     const counts = await getCounts();
     const entries = await crossLocationEntries({
@@ -678,9 +692,9 @@ router.get('/sitemap-vendor-locations.xml', async (req, res, next) => {
   } catch (error) {
     next(error);
   }
-});
+}
 
-router.get('/sitemap-categories.xml', async (req, res, next) => {
+async function handleCategoriesSitemap(req, res, next) {
   try {
     const page = parsePage(req);
     const rows = await fetchCategories(SITEMAP_LIMIT, (page - 1) * SITEMAP_LIMIT);
@@ -696,9 +710,9 @@ router.get('/sitemap-categories.xml', async (req, res, next) => {
   } catch (error) {
     next(error);
   }
-});
+}
 
-router.get('/sitemap-category-locations.xml', async (req, res, next) => {
+async function handleCategoryLocationsSitemap(req, res, next) {
   try {
     const counts = await getCounts();
     const entries = await crossLocationEntries({
@@ -712,9 +726,9 @@ router.get('/sitemap-category-locations.xml', async (req, res, next) => {
   } catch (error) {
     next(error);
   }
-});
+}
 
-router.get('/sitemap-vendor-services.xml', async (req, res, next) => {
+async function handleVendorServicesSitemap(req, res, next) {
   try {
     const counts = await getCounts();
     const entries = await crossLocationEntries({
@@ -728,6 +742,37 @@ router.get('/sitemap-vendor-services.xml', async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+}
+
+const cleanPagedSitemapHandlers = {
+  'sitemap-products': handleProductsSitemap,
+  'sitemap-product-locations': handleProductLocationsSitemap,
+  'sitemap-vendors': handleVendorsSitemap,
+  'sitemap-vendor-locations': handleVendorLocationsSitemap,
+  'sitemap-vendor-services': handleVendorServicesSitemap,
+  'sitemap-categories': handleCategoriesSitemap,
+  'sitemap-category-locations': handleCategoryLocationsSitemap,
+  'sitemap-locations': handleLocationsSitemap,
+};
+
+router.get('/sitemap.xml', handleSitemapIndex);
+router.get('/sitemap-static.xml', handleStaticSitemap);
+router.get('/sitemap-products.xml', handleProductsSitemap);
+router.get('/sitemap-vendors.xml', handleVendorsSitemap);
+router.get('/sitemap-locations.xml', handleLocationsSitemap);
+router.get('/sitemap-product-locations.xml', handleProductLocationsSitemap);
+router.get('/sitemap-vendor-locations.xml', handleVendorLocationsSitemap);
+router.get('/sitemap-categories.xml', handleCategoriesSitemap);
+router.get('/sitemap-category-locations.xml', handleCategoryLocationsSitemap);
+router.get('/sitemap-vendor-services.xml', handleVendorServicesSitemap);
+
+router.get(/^\/(sitemap-(?:products|product-locations|vendors|vendor-locations|vendor-services|categories|category-locations|locations))-(\d+)\.xml$/, (req, res, next) => {
+  const family = req.params?.[0];
+  const page = req.params?.[1];
+  const handler = cleanPagedSitemapHandlers[family];
+  if (!handler) return next();
+  req.params = { page };
+  return handler(req, res, next);
 });
 
 router.get('/sitemap-seo-files.xml', async (_req, res) => {
