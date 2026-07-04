@@ -231,14 +231,7 @@ const sitemapFamilyIndexes = [
 ];
 
 const sitemapIndexEntries = (counts) => [
-  { loc: '/sitemap-static.xml' },
-  ...pagesFor('sitemap-products', counts.products),
-  ...pagesFor('sitemap-vendors', counts.vendors),
-  ...pagesFor('sitemap-categories', counts.categories),
-  ...pagesFor('sitemap-locations', counts.locations),
-  ...sitemapFamilyIndexes
-    .filter((family) => Number(counts[family.countKey] || 0) > 0)
-    .map((family) => ({ loc: family.loc })),
+  ...fullSitemapIndexEntries(counts),
 ];
 
 const fullSitemapIndexEntries = (counts) => [
