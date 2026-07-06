@@ -8,7 +8,7 @@ import { mysqlQuery } from '../lib/mysqlPool.js';
 const router = express.Router();
 
 const SITE_URL = String(process.env.SITE_URL || process.env.VITE_SITE_URL || 'https://indiantrademart.com').replace(/\/+$/, '');
-const SITEMAP_LIMIT = Math.min(50000, Math.max(1000, Number(process.env.SITEMAP_URL_LIMIT || 50000)));
+const SITEMAP_LIMIT = Math.min(50000, Math.max(1000, Number(process.env.SITEMAP_URL_LIMIT || 10000)));
 const CATEGORY_SCOPE = String(process.env.SITEMAP_CATEGORY_SCOPE || 'all').trim().toLowerCase();
 const XML_TYPE = 'application/xml; charset=utf-8';
 const PRODUCT_ACTIVE_WHERE = "LOWER(COALESCE(p.status,'active')) NOT IN ('deleted','inactive','rejected')";
