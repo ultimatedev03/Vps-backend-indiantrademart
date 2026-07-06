@@ -315,7 +315,9 @@ const searchUrl = (baseSlug, loc) => {
 const pagesFor = (baseName, total) => {
   const pages = Math.ceil(Math.max(0, Number(total || 0)) / SITEMAP_LIMIT);
   return Array.from({ length: pages }, (_, index) => ({
-    loc: pages === 1 ? `/${baseName}.xml` : `/${baseName}${SITEMAP_REVISION_SEGMENT}-${index + 1}.xml`,
+    loc: pages === 1 && !SITEMAP_REVISION_SEGMENT
+      ? `/${baseName}.xml`
+      : `/${baseName}${SITEMAP_REVISION_SEGMENT}-${index + 1}.xml`,
     lastmod: SITEMAP_GENERATED_AT,
   }));
 };
