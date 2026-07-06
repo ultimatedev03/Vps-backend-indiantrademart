@@ -965,6 +965,16 @@ const cleanPagedSitemapHandlers = {
 
 router.get('/sitemap.xml', handleSitemapIndex);
 router.get('/sitemap-static.xml', handleStaticSitemap);
+router.use((req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+  const cleanPath = String(req.path || req.url || '').split('?')[0];
+  const match = VERSIONED_FAMILY_INDEX_RE.exec(cleanPath);
+  if (!match) return next();
+  const family = sitemapFamilyByBaseName.get(match[1]);
+  const revisionSegment = revisionSegmentFor(match[2]);
+  if (!family || !revisionSegment) return next();
+  return makeFamilyIndexHandler(family.baseName, family.countKey, revisionSegment)(req, res, next);
+});
 sitemapFamilyIndexes.forEach((family) => {
   router.get(family.loc, makeFamilyIndexHandler(family.baseName, family.countKey));
   const revisedLoc = versionedFamilyIndexLoc(family.loc);
