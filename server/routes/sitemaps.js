@@ -356,6 +356,11 @@ const sitemapFamilyIndexes = [
   },
 ];
 
+const versionedFamilyIndexLoc = (loc) => {
+  if (!SITEMAP_REVISION_SEGMENT) return null;
+  return loc.replace(/-index\.xml$/i, `${SITEMAP_REVISION_SEGMENT}-index.xml`);
+};
+
 const familyPageEntries = (counts) => sitemapFamilyIndexes
   .flatMap(({ baseName, countKey }) => pagesFor(baseName, counts?.[countKey] || 0));
 
@@ -725,6 +730,7 @@ const robotsSitemapEntries = () => [
   '/sitemap.xml',
   '/sitemap-static.xml',
   ...sitemapFamilyIndexes.map((entry) => entry.loc),
+  ...sitemapFamilyIndexes.map((entry) => versionedFamilyIndexLoc(entry.loc)).filter(Boolean),
 ];
 
 const robotsText = () => [
@@ -941,6 +947,10 @@ router.get('/sitemap.xml', handleSitemapIndex);
 router.get('/sitemap-static.xml', handleStaticSitemap);
 sitemapFamilyIndexes.forEach((family) => {
   router.get(family.loc, makeFamilyIndexHandler(family.baseName, family.countKey));
+  const revisedLoc = versionedFamilyIndexLoc(family.loc);
+  if (revisedLoc) {
+    router.get(revisedLoc, makeFamilyIndexHandler(family.baseName, family.countKey));
+  }
 });
 router.get('/sitemap-products.xml', handleProductsSitemap);
 router.get('/sitemap-vendors.xml', handleVendorsSitemap);
