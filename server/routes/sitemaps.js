@@ -8,7 +8,7 @@ import { mysqlQuery } from '../lib/mysqlPool.js';
 const router = express.Router();
 
 const SITE_URL = String(process.env.SITE_URL || process.env.VITE_SITE_URL || 'https://indiantrademart.com').replace(/\/+$/, '');
-const SITEMAP_LIMIT = Math.min(50000, Math.max(1000, Number(process.env.SITEMAP_URL_LIMIT || 10000)));
+const SITEMAP_LIMIT = Math.min(50000, Math.max(1000, Number(process.env.SITEMAP_URL_LIMIT || 50000)));
 const CATEGORY_SCOPE = String(process.env.SITEMAP_CATEGORY_SCOPE || 'all').trim().toLowerCase();
 const XML_TYPE = 'application/xml; charset=utf-8';
 const PRODUCT_ACTIVE_WHERE = "LOWER(COALESCE(p.status,'active')) NOT IN ('deleted','inactive','rejected')";
@@ -234,6 +234,11 @@ const sitemapFamilyIndexes = [
     countKey: 'vendorServiceLocations',
   },
   {
+    loc: '/sitemap-categories-index.xml',
+    baseName: 'sitemap-categories',
+    countKey: 'categories',
+  },
+  {
     loc: '/sitemap-category-locations-index.xml',
     baseName: 'sitemap-category-locations',
     countKey: 'categoryLocations',
@@ -245,29 +250,15 @@ const sitemapFamilyIndexes = [
   },
 ];
 
+const familyPageEntries = (counts) => sitemapFamilyIndexes
+  .flatMap(({ baseName, countKey }) => pagesFor(baseName, counts?.[countKey] || 0));
+
 const sitemapIndexEntries = (counts) => [
   { loc: '/sitemap-static.xml' },
-  ...pagesFor('sitemap-products', counts.products),
-  ...pagesFor('sitemap-product-locations', counts.productLocations),
-  ...pagesFor('sitemap-vendors', counts.vendors),
-  ...pagesFor('sitemap-vendor-locations', counts.vendorLocations),
-  ...pagesFor('sitemap-vendor-services', counts.vendorServiceLocations),
-  ...pagesFor('sitemap-categories', counts.categories),
-  ...pagesFor('sitemap-category-locations', counts.categoryLocations),
-  ...pagesFor('sitemap-locations', counts.locations),
+  ...familyPageEntries(counts),
 ];
 
-const fullSitemapIndexEntries = (counts) => [
-  { loc: '/sitemap-static.xml' },
-  ...pagesFor('sitemap-products', counts.products),
-  ...pagesFor('sitemap-product-locations', counts.productLocations),
-  ...pagesFor('sitemap-vendors', counts.vendors),
-  ...pagesFor('sitemap-vendor-locations', counts.vendorLocations),
-  ...pagesFor('sitemap-vendor-services', counts.vendorServiceLocations),
-  ...pagesFor('sitemap-categories', counts.categories),
-  ...pagesFor('sitemap-category-locations', counts.categoryLocations),
-  ...pagesFor('sitemap-locations', counts.locations),
-];
+const fullSitemapIndexEntries = sitemapIndexEntries;
 
 const parsePage = (req) => Math.max(1, Number.parseInt(String(req.params?.page || req.query.page || '1'), 10) || 1);
 
