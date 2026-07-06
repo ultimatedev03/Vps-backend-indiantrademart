@@ -14,11 +14,16 @@ const XML_TYPE = 'application/xml; charset=utf-8';
 const PRODUCT_ACTIVE_WHERE = "LOWER(COALESCE(p.status,'active')) NOT IN ('deleted','inactive','rejected')";
 const VENDOR_ACTIVE_WHERE = "COALESCE(v.is_active,1)=1 AND LOWER(COALESCE(v.status,'active')) NOT IN ('deleted','inactive','rejected','terminated')";
 const SITEMAP_GENERATED_AT = new Date().toISOString();
-const SITEMAP_REVISION = String(process.env.SITEMAP_REVISION || '')
+const sanitizeSitemapRevision = (value = '') => String(value || '')
   .trim()
   .replace(/[^a-z0-9_-]+/gi, '')
   .slice(0, 32);
-const SITEMAP_REVISION_SEGMENT = SITEMAP_REVISION ? `-${SITEMAP_REVISION}` : '';
+const revisionSegmentFor = (value = '') => {
+  const revision = sanitizeSitemapRevision(value);
+  return revision ? `-${revision}` : '';
+};
+const SITEMAP_REVISION = sanitizeSitemapRevision(process.env.SITEMAP_REVISION);
+const SITEMAP_REVISION_SEGMENT = revisionSegmentFor(SITEMAP_REVISION);
 const toPositiveInt = (value, fallback, max = Number.MAX_SAFE_INTEGER) => {
   const parsed = Number.parseInt(String(value), 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -312,12 +317,12 @@ const searchUrl = (baseSlug, loc) => {
   return `/directory/search/${baseSlug}/${state}/${city}`;
 };
 
-const pagesFor = (baseName, total) => {
+const pagesFor = (baseName, total, revisionSegment = SITEMAP_REVISION_SEGMENT) => {
   const pages = Math.ceil(Math.max(0, Number(total || 0)) / SITEMAP_LIMIT);
   return Array.from({ length: pages }, (_, index) => ({
-    loc: pages === 1 && !SITEMAP_REVISION_SEGMENT
+    loc: pages === 1 && !revisionSegment
       ? `/${baseName}.xml`
-      : `/${baseName}${SITEMAP_REVISION_SEGMENT}-${index + 1}.xml`,
+      : `/${baseName}${revisionSegment}-${index + 1}.xml`,
     lastmod: SITEMAP_GENERATED_AT,
   }));
 };
@@ -369,6 +374,10 @@ const versionedFamilyIndexLoc = (loc) => {
   if (!SITEMAP_REVISION_SEGMENT) return null;
   return loc.replace(/-index\.xml$/i, `${SITEMAP_REVISION_SEGMENT}-index.xml`);
 };
+
+const sitemapFamilyByBaseName = new Map(
+  sitemapFamilyIndexes.map((family) => [family.baseName, family])
+);
 
 const familyPageEntries = (counts) => sitemapFamilyIndexes
   .flatMap(({ baseName, countKey }) => pagesFor(baseName, counts?.[countKey] || 0));
@@ -775,12 +784,12 @@ async function handleSitemapIndex(_req, res, next) {
   }
 }
 
-function makeFamilyIndexHandler(baseName, countKey) {
+function makeFamilyIndexHandler(baseName, countKey, revisionSegment = SITEMAP_REVISION_SEGMENT) {
   return async (_req, res, next) => {
     try {
-      await sendXmlFromCache(_req, res, `sitemap:index:${baseName}`, async () => {
+      await sendXmlFromCache(_req, res, `sitemap:index:${baseName}:${revisionSegment || 'plain'}`, async () => {
         const counts = await getCounts();
-        return renderIndex(pagesFor(baseName, counts[countKey]));
+        return renderIndex(pagesFor(baseName, counts[countKey], revisionSegment));
       }, 900);
     } catch (error) {
       next(error);
@@ -961,6 +970,14 @@ sitemapFamilyIndexes.forEach((family) => {
     router.get(revisedLoc, makeFamilyIndexHandler(family.baseName, family.countKey));
   }
 });
+
+router.get(/^\/(sitemap-(?:products|product-locations|vendors|vendor-locations|vendor-services|categories|category-locations|locations))-([A-Za-z0-9_-]+)-index\.xml$/, (req, res, next) => {
+  const family = sitemapFamilyByBaseName.get(req.params?.[0]);
+  const revisionSegment = revisionSegmentFor(req.params?.[1]);
+  if (!family || !revisionSegment) return next();
+  return makeFamilyIndexHandler(family.baseName, family.countKey, revisionSegment)(req, res, next);
+});
+
 router.get('/sitemap-products.xml', handleProductsSitemap);
 router.get('/sitemap-vendors.xml', handleVendorsSitemap);
 router.get('/sitemap-locations.xml', handleLocationsSitemap);
