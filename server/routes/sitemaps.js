@@ -789,9 +789,10 @@ async function handleSitemapIndex(_req, res, next) {
 function makeFamilyIndexHandler(baseName, countKey, revisionSegment = SITEMAP_REVISION_SEGMENT) {
   return async (_req, res, next) => {
     try {
-      await sendXmlFromCache(_req, res, `sitemap:index:${baseName}:${revisionSegment || 'plain'}`, async () => {
+      const requestRevisionSegment = revisionSegment || revisionSegmentFor(_req.query?.rev) || SITEMAP_REVISION_SEGMENT;
+      await sendXmlFromCache(_req, res, `sitemap:index:${baseName}:${requestRevisionSegment || 'plain'}`, async () => {
         const counts = await getCounts();
-        return renderIndex(pagesFor(baseName, counts[countKey], revisionSegment));
+        return renderIndex(pagesFor(baseName, counts[countKey], requestRevisionSegment));
       }, 900);
     } catch (error) {
       next(error);
