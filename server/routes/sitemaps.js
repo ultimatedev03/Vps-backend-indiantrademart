@@ -81,6 +81,11 @@ const removeCrawlerUnfriendlyHeaders = (res) => {
     'Cross-Origin-Resource-Policy',
     'Origin-Agent-Cluster',
     'Permissions-Policy',
+    'Access-Control-Allow-Credentials',
+    'Access-Control-Allow-Origin',
+    'ETag',
+    'Vary',
+    'X-Powered-By',
     'X-Frame-Options',
   ].forEach((header) => res.removeHeader(header));
 };
@@ -167,9 +172,11 @@ async function buildXmlWithCache(cacheKey, producer, ttlMs = XML_CACHE_MS) {
 const sendXml = (res, xml, maxAge = 900) => {
   removeCrawlerUnfriendlyHeaders(res);
   res.setHeader('Content-Type', XML_TYPE);
-  res.setHeader('Cache-Control', `public, max-age=${maxAge}, stale-while-revalidate=${maxAge * 4}`);
+  res.setHeader('Cache-Control', `public, max-age=${maxAge}, must-revalidate`);
+  res.setHeader('Last-Modified', new Date(SITEMAP_GENERATED_AT).toUTCString());
+  res.setHeader('Content-Length', Buffer.byteLength(xml, 'utf8'));
   res.setHeader('X-Robots-Tag', 'index, follow');
-  res.send(xml);
+  res.status(200).end(xml);
 };
 
 async function sendXmlFromCache(req, res, cacheKey, producer, maxAge = 900) {
