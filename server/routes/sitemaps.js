@@ -13,11 +13,25 @@ const CATEGORY_SCOPE = String(process.env.SITEMAP_CATEGORY_SCOPE || 'all').trim(
 const XML_TYPE = 'application/xml; charset=utf-8';
 const PRODUCT_ACTIVE_WHERE = "LOWER(COALESCE(p.status,'active')) NOT IN ('deleted','inactive','rejected')";
 const VENDOR_ACTIVE_WHERE = "COALESCE(v.is_active,1)=1 AND LOWER(COALESCE(v.status,'active')) NOT IN ('deleted','inactive','rejected','terminated')";
+const toPositiveInt = (value, fallback, max = Number.MAX_SAFE_INTEGER) => {
+  const parsed = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(parsed, max);
+};
+const COUNTS_CACHE_MS = toPositiveInt(process.env.SITEMAP_COUNTS_CACHE_MS, 10 * 60 * 1000, 60 * 60 * 1000);
+const LOCATIONS_CACHE_MS = toPositiveInt(process.env.SITEMAP_LOCATIONS_CACHE_MS, 10 * 60 * 1000, 60 * 60 * 1000);
+const XML_CACHE_MS = toPositiveInt(process.env.SITEMAP_XML_CACHE_MS, 15 * 60 * 1000, 60 * 60 * 1000);
+const XML_CACHE_MAX_ENTRIES = toPositiveInt(process.env.SITEMAP_XML_CACHE_MAX_ENTRIES, 64, 500);
 const safeSqlInt = (value, fallback = 0, max = Number.MAX_SAFE_INTEGER) => {
   const parsed = Number.parseInt(String(value), 10);
   if (!Number.isFinite(parsed) || parsed < 0) return fallback;
   return Math.min(parsed, max);
 };
+
+const sitemapXmlCache = new Map();
+const sitemapXmlInflight = new Map();
+const countsCache = { value: null, expiresAt: 0, promise: null };
+const locationsCache = { value: null, expiresAt: 0, promise: null };
 
 const staticPages = [
   { loc: '/', priority: '1.0', changefreq: 'daily' },
@@ -72,6 +86,71 @@ const dateOnly = (value) => {
   return parsed.toISOString().slice(0, 10);
 };
 
+async function readThroughCache(cache, ttlMs, loader) {
+  const now = Date.now();
+  if (cache.value && cache.expiresAt > now) return cache.value;
+  if (cache.promise) return cache.promise;
+
+  cache.promise = Promise.resolve()
+    .then(loader)
+    .then((value) => {
+      cache.value = value;
+      cache.expiresAt = Date.now() + ttlMs;
+      return value;
+    })
+    .finally(() => {
+      cache.promise = null;
+    });
+
+  return cache.promise;
+}
+
+function getCachedXml(cacheKey) {
+  const hit = sitemapXmlCache.get(cacheKey);
+  if (!hit) return null;
+  if (hit.expiresAt <= Date.now()) {
+    sitemapXmlCache.delete(cacheKey);
+    return null;
+  }
+
+  sitemapXmlCache.delete(cacheKey);
+  sitemapXmlCache.set(cacheKey, hit);
+  return hit.xml;
+}
+
+function setCachedXml(cacheKey, xml, ttlMs = XML_CACHE_MS) {
+  if (!cacheKey || !xml) return;
+  sitemapXmlCache.delete(cacheKey);
+  sitemapXmlCache.set(cacheKey, {
+    xml,
+    expiresAt: Date.now() + ttlMs,
+  });
+
+  while (sitemapXmlCache.size > XML_CACHE_MAX_ENTRIES) {
+    const oldestKey = sitemapXmlCache.keys().next().value;
+    sitemapXmlCache.delete(oldestKey);
+  }
+}
+
+async function buildXmlWithCache(cacheKey, producer, ttlMs = XML_CACHE_MS) {
+  const cached = getCachedXml(cacheKey);
+  if (cached) return cached;
+  if (sitemapXmlInflight.has(cacheKey)) return sitemapXmlInflight.get(cacheKey);
+
+  const promise = Promise.resolve()
+    .then(producer)
+    .then((xml) => {
+      setCachedXml(cacheKey, xml, ttlMs);
+      return xml;
+    })
+    .finally(() => {
+      sitemapXmlInflight.delete(cacheKey);
+    });
+
+  sitemapXmlInflight.set(cacheKey, promise);
+  return promise;
+}
+
 const sendXml = (res, xml, maxAge = 900) => {
   removeCrawlerUnfriendlyHeaders(res);
   res.setHeader('Content-Type', XML_TYPE);
@@ -79,6 +158,11 @@ const sendXml = (res, xml, maxAge = 900) => {
   res.setHeader('X-Robots-Tag', 'index, follow');
   res.send(xml);
 };
+
+async function sendXmlFromCache(req, res, cacheKey, producer, maxAge = 900) {
+  const xml = await buildXmlWithCache(cacheKey || req.originalUrl || req.url, producer);
+  sendXml(res, xml, maxAge);
+}
 
 const renderUrlset = (entries = [], options = {}) => {
   const includeSeo = Boolean(options.includeSeo);
@@ -120,7 +204,7 @@ async function tableExists(tableName) {
   return firstNumber(rows) > 0;
 }
 
-async function getCounts() {
+async function loadCounts() {
   const [locations, products, vendors, allMicros, usedMicros, vendorServices] = await Promise.all([
     mysqlQuery(`
       SELECT COUNT(*) AS total
@@ -168,7 +252,11 @@ async function getCounts() {
   };
 }
 
-async function fetchLocations() {
+async function getCounts() {
+  return readThroughCache(countsCache, COUNTS_CACHE_MS, loadCounts);
+}
+
+async function loadLocations() {
   return mysqlQuery(`
     SELECT
       COALESCE(s.name,'') AS state_name,
@@ -188,6 +276,10 @@ async function fetchLocations() {
     WHERE COALESCE(c.is_active,1)=1 AND COALESCE(s.is_active,1)=1
     ORDER BY s.name, d.name, c.name
   `);
+}
+
+async function fetchLocations() {
+  return readThroughCache(locationsCache, LOCATIONS_CACHE_MS, loadLocations);
 }
 
 const searchUrl = (baseSlug, loc) => {
@@ -615,30 +707,40 @@ async function readSeoExportEntries(page = 1, limit = SITEMAP_LIMIT) {
   return entries;
 }
 
-const robotsText = () => `User-agent: *
-Allow: /
-Disallow: /admin/
-Disallow: /superadmin/
-Disallow: /vendor/
-Disallow: /buyer/
-Disallow: /employee/
-Disallow: /finance-portal/
-Disallow: /migration-tools
+const robotsSitemapEntries = () => [
+  '/sitemap.xml',
+  '/sitemap-static.xml',
+  ...sitemapFamilyIndexes.map((entry) => entry.loc),
+];
 
-Sitemap: ${SITE_URL}/sitemap.xml
-`;
+const robotsText = () => [
+  'User-agent: *',
+  'Allow: /',
+  'Disallow: /admin/',
+  'Disallow: /superadmin/',
+  'Disallow: /vendor/',
+  'Disallow: /buyer/',
+  'Disallow: /employee/',
+  'Disallow: /finance-portal/',
+  'Disallow: /migration-tools',
+  '',
+  ...robotsSitemapEntries().map((loc) => `Sitemap: ${absoluteUrl(loc)}`),
+  '',
+].join('\n');
 
 router.get('/robots.txt', (_req, res) => {
   removeCrawlerUnfriendlyHeaders(res);
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-  res.setHeader('Cache-Control', 'public, max-age=900, stale-while-revalidate=3600');
+  res.setHeader('Cache-Control', 'public, max-age=300, must-revalidate');
   res.send(robotsText());
 });
 
 async function handleSitemapIndex(_req, res, next) {
   try {
-    const counts = await getCounts();
-    sendXml(res, renderIndex(sitemapIndexEntries(counts)), 900);
+    await sendXmlFromCache(_req, res, 'sitemap:index', async () => {
+      const counts = await getCounts();
+      return renderIndex(sitemapIndexEntries(counts));
+    }, 900);
   } catch (error) {
     next(error);
   }
@@ -647,31 +749,36 @@ async function handleSitemapIndex(_req, res, next) {
 function makeFamilyIndexHandler(baseName, countKey) {
   return async (_req, res, next) => {
     try {
-      const counts = await getCounts();
-      sendXml(res, renderIndex(pagesFor(baseName, counts[countKey])), 900);
+      await sendXmlFromCache(_req, res, `sitemap:index:${baseName}`, async () => {
+        const counts = await getCounts();
+        return renderIndex(pagesFor(baseName, counts[countKey]));
+      }, 900);
     } catch (error) {
       next(error);
     }
   };
 }
 
-function handleStaticSitemap(_req, res) {
-  sendXml(res, renderUrlset(staticPages), 1800);
+async function handleStaticSitemap(req, res, next) {
+  try {
+    await sendXmlFromCache(req, res, 'sitemap:static', () => renderUrlset(staticPages), 1800);
+  } catch (error) {
+    next(error);
+  }
 }
 
 async function handleProductsSitemap(req, res, next) {
   try {
     const page = parsePage(req);
-    const rows = await fetchProducts(SITEMAP_LIMIT, (page - 1) * SITEMAP_LIMIT);
-    sendXml(
-      res,
-      renderUrlset(rows.map((row) => ({
+    await sendXmlFromCache(req, res, `sitemap:products:${page}`, async () => {
+      const rows = await fetchProducts(SITEMAP_LIMIT, (page - 1) * SITEMAP_LIMIT);
+      return renderUrlset(rows.map((row) => ({
         loc: `/product/${encodeURIComponent(slugify(row.slug || row.name || row.id))}`,
         lastmod: row.updated_at,
         changefreq: 'weekly',
         priority: '0.85',
-      })))
-    );
+      })));
+    });
   } catch (error) {
     next(error);
   }
@@ -680,16 +787,15 @@ async function handleProductsSitemap(req, res, next) {
 async function handleVendorsSitemap(req, res, next) {
   try {
     const page = parsePage(req);
-    const rows = await fetchVendors(SITEMAP_LIMIT, (page - 1) * SITEMAP_LIMIT);
-    sendXml(
-      res,
-      renderUrlset(rows.map((row) => ({
+    await sendXmlFromCache(req, res, `sitemap:vendors:${page}`, async () => {
+      const rows = await fetchVendors(SITEMAP_LIMIT, (page - 1) * SITEMAP_LIMIT);
+      return renderUrlset(rows.map((row) => ({
         loc: `/directory/vendor/${encodeURIComponent(slugify(row.slug || row.name || row.id))}`,
         lastmod: row.updated_at,
         changefreq: 'weekly',
         priority: '0.8',
-      })))
-    );
+      })));
+    });
   } catch (error) {
     next(error);
   }
@@ -698,17 +804,16 @@ async function handleVendorsSitemap(req, res, next) {
 async function handleLocationsSitemap(req, res, next) {
   try {
     const page = parsePage(req);
-    const locations = await fetchLocations();
-    const start = (page - 1) * SITEMAP_LIMIT;
-    sendXml(
-      res,
-      renderUrlset(locations.slice(start, start + SITEMAP_LIMIT).map((loc) => ({
+    await sendXmlFromCache(req, res, `sitemap:locations:${page}`, async () => {
+      const locations = await fetchLocations();
+      const start = (page - 1) * SITEMAP_LIMIT;
+      return renderUrlset(locations.slice(start, start + SITEMAP_LIMIT).map((loc) => ({
         loc: searchUrl('all', loc),
         lastmod: loc.updated_at,
         changefreq: 'weekly',
         priority: '0.55',
-      })))
-    );
+      })));
+    });
   } catch (error) {
     next(error);
   }
@@ -716,15 +821,18 @@ async function handleLocationsSitemap(req, res, next) {
 
 async function handleProductLocationsSitemap(req, res, next) {
   try {
-    const counts = await getCounts();
-    const entries = await crossLocationEntries({
-      req,
-      fetchEntities: fetchProducts,
-      entityCount: counts.products,
-      makeBaseSlug: (row) => slugify(row.slug || row.name || row.id),
-      priority: '0.72',
+    const page = parsePage(req);
+    await sendXmlFromCache(req, res, `sitemap:product-locations:${page}`, async () => {
+      const counts = await getCounts();
+      const entries = await crossLocationEntries({
+        req,
+        fetchEntities: fetchProducts,
+        entityCount: counts.products,
+        makeBaseSlug: (row) => slugify(row.slug || row.name || row.id),
+        priority: '0.72',
+      });
+      return renderUrlset(entries);
     });
-    sendXml(res, renderUrlset(entries));
   } catch (error) {
     next(error);
   }
@@ -732,15 +840,18 @@ async function handleProductLocationsSitemap(req, res, next) {
 
 async function handleVendorLocationsSitemap(req, res, next) {
   try {
-    const counts = await getCounts();
-    const entries = await crossLocationEntries({
-      req,
-      fetchEntities: fetchVendors,
-      entityCount: counts.vendors,
-      makeBaseSlug: (row) => slugify(row.slug || row.name || row.id),
-      priority: '0.66',
+    const page = parsePage(req);
+    await sendXmlFromCache(req, res, `sitemap:vendor-locations:${page}`, async () => {
+      const counts = await getCounts();
+      const entries = await crossLocationEntries({
+        req,
+        fetchEntities: fetchVendors,
+        entityCount: counts.vendors,
+        makeBaseSlug: (row) => slugify(row.slug || row.name || row.id),
+        priority: '0.66',
+      });
+      return renderUrlset(entries);
     });
-    sendXml(res, renderUrlset(entries));
   } catch (error) {
     next(error);
   }
@@ -749,16 +860,15 @@ async function handleVendorLocationsSitemap(req, res, next) {
 async function handleCategoriesSitemap(req, res, next) {
   try {
     const page = parsePage(req);
-    const rows = await fetchCategories(SITEMAP_LIMIT, (page - 1) * SITEMAP_LIMIT);
-    sendXml(
-      res,
-      renderUrlset(rows.map((row) => ({
+    await sendXmlFromCache(req, res, `sitemap:categories:${page}`, async () => {
+      const rows = await fetchCategories(SITEMAP_LIMIT, (page - 1) * SITEMAP_LIMIT);
+      return renderUrlset(rows.map((row) => ({
         loc: `/directory/search/${encodeURIComponent(slugify(row.slug || row.name || row.id))}`,
         lastmod: row.updated_at,
         changefreq: 'weekly',
         priority: '0.82',
-      })))
-    );
+      })));
+    });
   } catch (error) {
     next(error);
   }
@@ -766,15 +876,18 @@ async function handleCategoriesSitemap(req, res, next) {
 
 async function handleCategoryLocationsSitemap(req, res, next) {
   try {
-    const counts = await getCounts();
-    const entries = await crossLocationEntries({
-      req,
-      fetchEntities: fetchCategories,
-      entityCount: counts.categories,
-      makeBaseSlug: (row) => slugify(row.slug || row.name || row.id),
-      priority: '0.75',
+    const page = parsePage(req);
+    await sendXmlFromCache(req, res, `sitemap:category-locations:${page}`, async () => {
+      const counts = await getCounts();
+      const entries = await crossLocationEntries({
+        req,
+        fetchEntities: fetchCategories,
+        entityCount: counts.categories,
+        makeBaseSlug: (row) => slugify(row.slug || row.name || row.id),
+        priority: '0.75',
+      });
+      return renderUrlset(entries);
     });
-    sendXml(res, renderUrlset(entries));
   } catch (error) {
     next(error);
   }
@@ -782,15 +895,18 @@ async function handleCategoryLocationsSitemap(req, res, next) {
 
 async function handleVendorServicesSitemap(req, res, next) {
   try {
-    const counts = await getCounts();
-    const entries = await crossLocationEntries({
-      req,
-      fetchEntities: fetchVendorServices,
-      entityCount: counts.vendorServices,
-      makeBaseSlug: (row) => slugify(row.service_slug || row.service_name),
-      priority: '0.7',
+    const page = parsePage(req);
+    await sendXmlFromCache(req, res, `sitemap:vendor-services:${page}`, async () => {
+      const counts = await getCounts();
+      const entries = await crossLocationEntries({
+        req,
+        fetchEntities: fetchVendorServices,
+        entityCount: counts.vendorServices,
+        makeBaseSlug: (row) => slugify(row.service_slug || row.service_name),
+        priority: '0.7',
+      });
+      return renderUrlset(entries);
     });
-    sendXml(res, renderUrlset(entries));
   } catch (error) {
     next(error);
   }
@@ -830,14 +946,20 @@ router.get(/^\/(sitemap-(?:products|product-locations|vendors|vendor-locations|v
   return handler(req, res, next);
 });
 
-router.get('/sitemap-seo-files.xml', async (_req, res) => {
-  sendXml(res, renderUrlset([]), 900);
+router.get('/sitemap-seo-files.xml', async (req, res, next) => {
+  try {
+    await sendXmlFromCache(req, res, 'sitemap:seo-files', () => renderUrlset([]), 900);
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.get('/sitemap-seo-exports.xml', async (_req, res, next) => {
+router.get('/sitemap-seo-exports.xml', async (req, res, next) => {
   try {
-    const counts = await getCounts();
-    sendXml(res, renderIndex(fullSitemapIndexEntries(counts)), 900);
+    await sendXmlFromCache(req, res, 'sitemap:seo-exports', async () => {
+      const counts = await getCounts();
+      return renderIndex(fullSitemapIndexEntries(counts));
+    }, 900);
   } catch (error) {
     next(error);
   }
