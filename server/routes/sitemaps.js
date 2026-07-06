@@ -969,6 +969,11 @@ sitemapFamilyIndexes.forEach((family) => {
   if (revisedLoc) {
     router.get(revisedLoc, makeFamilyIndexHandler(family.baseName, family.countKey));
   }
+  router.get(`/${family.baseName}-:revision-index.xml`, (req, res, next) => {
+    const revisionSegment = revisionSegmentFor(req.params?.revision);
+    if (!revisionSegment) return next();
+    return makeFamilyIndexHandler(family.baseName, family.countKey, revisionSegment)(req, res, next);
+  });
 });
 
 router.get(/^\/(sitemap-(?:products|product-locations|vendors|vendor-locations|vendor-services|categories|category-locations|locations))-([A-Za-z0-9_-]+)-index\.xml$/, (req, res, next) => {
