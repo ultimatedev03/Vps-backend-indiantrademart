@@ -13,6 +13,12 @@ const CATEGORY_SCOPE = String(process.env.SITEMAP_CATEGORY_SCOPE || 'all').trim(
 const XML_TYPE = 'application/xml; charset=utf-8';
 const PRODUCT_ACTIVE_WHERE = "LOWER(COALESCE(p.status,'active')) NOT IN ('deleted','inactive','rejected')";
 const VENDOR_ACTIVE_WHERE = "COALESCE(v.is_active,1)=1 AND LOWER(COALESCE(v.status,'active')) NOT IN ('deleted','inactive','rejected','terminated')";
+const SITEMAP_GENERATED_AT = new Date().toISOString();
+const SITEMAP_REVISION = String(process.env.SITEMAP_REVISION || '')
+  .trim()
+  .replace(/[^a-z0-9_-]+/gi, '')
+  .slice(0, 32);
+const SITEMAP_REVISION_SEGMENT = SITEMAP_REVISION ? `-${SITEMAP_REVISION}` : '';
 const toPositiveInt = (value, fallback, max = Number.MAX_SAFE_INTEGER) => {
   const parsed = Number.parseInt(String(value), 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -84,6 +90,13 @@ const dateOnly = (value) => {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return new Date().toISOString().slice(0, 10);
   return parsed.toISOString().slice(0, 10);
+};
+
+const sitemapLastmod = (value) => {
+  if (!value) return SITEMAP_GENERATED_AT;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return SITEMAP_GENERATED_AT;
+  return parsed.toISOString();
 };
 
 async function readThroughCache(cache, ttlMs, loader) {
@@ -188,7 +201,7 @@ const renderIndex = (entries = []) => {
     .filter((entry) => entry?.loc)
     .map((entry) => {
       const loc = escapeXml(entry.loc.startsWith('http') ? entry.loc : absoluteUrl(entry.loc));
-      return `  <sitemap>\n    <loc>${loc}</loc>\n    <lastmod>${escapeXml(dateOnly(entry.lastmod))}</lastmod>\n  </sitemap>`;
+      return `  <sitemap>\n    <loc>${loc}</loc>\n    <lastmod>${escapeXml(sitemapLastmod(entry.lastmod))}</lastmod>\n  </sitemap>`;
     })
     .join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>\n<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${rows}\n</sitemapindex>`;
@@ -295,7 +308,8 @@ const searchUrl = (baseSlug, loc) => {
 const pagesFor = (baseName, total) => {
   const pages = Math.ceil(Math.max(0, Number(total || 0)) / SITEMAP_LIMIT);
   return Array.from({ length: pages }, (_, index) => ({
-    loc: pages === 1 ? `/${baseName}.xml` : `/${baseName}-${index + 1}.xml`,
+    loc: pages === 1 ? `/${baseName}.xml` : `/${baseName}${SITEMAP_REVISION_SEGMENT}-${index + 1}.xml`,
+    lastmod: SITEMAP_GENERATED_AT,
   }));
 };
 
@@ -346,7 +360,7 @@ const familyPageEntries = (counts) => sitemapFamilyIndexes
   .flatMap(({ baseName, countKey }) => pagesFor(baseName, counts?.[countKey] || 0));
 
 const sitemapIndexEntries = (counts) => [
-  { loc: '/sitemap-static.xml' },
+  { loc: '/sitemap-static.xml', lastmod: SITEMAP_GENERATED_AT },
   ...familyPageEntries(counts),
 ];
 
@@ -937,7 +951,7 @@ router.get('/sitemap-categories.xml', handleCategoriesSitemap);
 router.get('/sitemap-category-locations.xml', handleCategoryLocationsSitemap);
 router.get('/sitemap-vendor-services.xml', handleVendorServicesSitemap);
 
-router.get(/^\/(sitemap-(?:products|product-locations|vendors|vendor-locations|vendor-services|categories|category-locations|locations))-(\d+)\.xml$/, (req, res, next) => {
+router.get(/^\/(sitemap-(?:products|product-locations|vendors|vendor-locations|vendor-services|categories|category-locations|locations))(?:-[A-Za-z0-9_-]+)?-(\d+)\.xml$/, (req, res, next) => {
   const family = req.params?.[0];
   const page = req.params?.[1];
   const handler = cleanPagedSitemapHandlers[family];
