@@ -379,6 +379,8 @@ const sitemapFamilyByBaseName = new Map(
   sitemapFamilyIndexes.map((family) => [family.baseName, family])
 );
 
+const VERSIONED_FAMILY_INDEX_RE = /^\/(sitemap-(?:products|product-locations|vendors|vendor-locations|vendor-services|categories|category-locations|locations))-([A-Za-z0-9_-]+)-index\.xml$/;
+
 const familyPageEntries = (counts) => sitemapFamilyIndexes
   .flatMap(({ baseName, countKey }) => pagesFor(baseName, counts?.[countKey] || 0));
 
@@ -979,6 +981,16 @@ sitemapFamilyIndexes.forEach((family) => {
 router.get(/^\/(sitemap-(?:products|product-locations|vendors|vendor-locations|vendor-services|categories|category-locations|locations))-([A-Za-z0-9_-]+)-index\.xml$/, (req, res, next) => {
   const family = sitemapFamilyByBaseName.get(req.params?.[0]);
   const revisionSegment = revisionSegmentFor(req.params?.[1]);
+  if (!family || !revisionSegment) return next();
+  return makeFamilyIndexHandler(family.baseName, family.countKey, revisionSegment)(req, res, next);
+});
+
+router.get(/^\/sitemap-.*-index\.xml$/, (req, res, next) => {
+  const cleanPath = String(req.path || req.url || '').split('?')[0];
+  const match = VERSIONED_FAMILY_INDEX_RE.exec(cleanPath);
+  if (!match) return next();
+  const family = sitemapFamilyByBaseName.get(match[1]);
+  const revisionSegment = revisionSegmentFor(match[2]);
   if (!family || !revisionSegment) return next();
   return makeFamilyIndexHandler(family.baseName, family.countKey, revisionSegment)(req, res, next);
 });
