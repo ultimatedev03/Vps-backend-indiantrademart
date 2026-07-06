@@ -149,7 +149,7 @@ async function findVendor(slug) {
         COALESCE(NULLIF(v.city,''), '') AS city,
         COALESCE(NULLIF(v.state,''), '') AS state,
         COALESCE(NULLIF(v.primary_business_type,''), NULLIF(v.secondary_business,''), '') AS business_type,
-        COALESCE(NULLIF(v.description,''), NULLIF(v.business_description,''), '') AS description
+        COALESCE(NULLIF(v.business_description,''), '') AS description
       FROM vendors v
       WHERE ${VENDOR_ACTIVE_WHERE}
         AND (
