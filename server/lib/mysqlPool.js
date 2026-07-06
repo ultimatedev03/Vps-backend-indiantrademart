@@ -68,7 +68,9 @@ export function getMysqlPool() {
 }
 
 export async function mysqlQuery(sql, params = []) {
-  const [rows] = await getMysqlPool().execute(sql, params);
+  // Use text protocol for app-wide dynamic SQL so MySQL does not accumulate
+  // server-side prepared statements until max_prepared_stmt_count is exhausted.
+  const [rows] = await getMysqlPool().query(sql, params);
   return rows;
 }
 

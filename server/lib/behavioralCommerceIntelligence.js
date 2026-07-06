@@ -193,7 +193,7 @@ async function upsertHourlyAggregates(connection, events = []) {
 
   for (const bucket of buckets.values()) {
     // eslint-disable-next-line no-await-in-loop
-    await connection.execute(
+    await connection.query(
       `INSERT INTO behavioral_hourly_aggregates
         (id, bucket_start, event_type, demand_key, display_label, category, state, city,
          entity_type, entity_id, event_count, unique_visitors, computed_at)
@@ -352,7 +352,7 @@ function scoreSignals(events = [], leads = [], days = 30) {
 async function upsertScores(connection, scored = []) {
   for (const row of scored) {
     // eslint-disable-next-line no-await-in-loop
-    await connection.execute(
+    await connection.query(
       `INSERT INTO behavioral_demand_scores
         (id, demand_key, display_label, category, state, city, window_days, demand_score,
          intent_score, event_count, search_count, product_views, vendor_views, requirement_opens,
@@ -405,7 +405,7 @@ async function upsertScores(connection, scored = []) {
     );
 
     // eslint-disable-next-line no-await-in-loop
-    await connection.execute(
+    await connection.query(
       `INSERT INTO behavioral_forecasts
         (id, demand_key, display_label, state, city, window_days, forecast_7d, forecast_30d,
          trend_percent, confidence, model_name, features, computed_at)
