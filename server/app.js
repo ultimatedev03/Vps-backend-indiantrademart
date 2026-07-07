@@ -32,6 +32,7 @@ const app = express();
 
 // Netlify/Render terminate TLS and forward requests to Express.
 app.set('trust proxy', 1);
+app.set('etag', false);
 
 const resolveExpressMiddleware = (candidate) => {
   if (!candidate) return null;
@@ -57,17 +58,26 @@ app.use((req, res, next) => {
   next();
 });
 
-// 4. Subdomain redirect (optional — redirects wrong subdomain access)
+// 4. Dynamic API responses must not be browser-cached. Revalidated 304
+// responses can leave SPA fetch calls without a usable JSON payload.
+app.use('/api', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
+
+// 5. Subdomain redirect (optional — redirects wrong subdomain access)
 app.use(subdomainRedirectMiddleware);
 
-// 5. Body parsing
+// 6. Body parsing
 //    Quotation PDF attachments are sent as base64 in JSON, so we need a
 //    generous limit. This is configurable via JSON_BODY_LIMIT env var.
 app.use(express.json({ limit: runtimeConfig.jsonBodyLimit }));
 app.use(express.urlencoded({ extended: true, limit: runtimeConfig.jsonBodyLimit }));
 app.use('/uploads', express.static(storageRoot));
 
-// 6. Input sanitization — prevent NoSQL injection and basic XSS
+// 7. Input sanitization — prevent NoSQL injection and basic XSS
 app.use(mongoSanitize());
 app.use((req, res, next) => {
   if (req.body && typeof req.body === 'object') {
