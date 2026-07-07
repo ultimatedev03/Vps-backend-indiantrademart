@@ -35,6 +35,8 @@ const toPositiveInt = (value, fallback, max = Number.MAX_SAFE_INTEGER) => {
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.min(parsed, max);
 };
+const SITEMAP_INDEX_ENTRY_LIMIT = toPositiveInt(process.env.SITEMAP_INDEX_ENTRY_LIMIT, 50000, 50000);
+const SITEMAP_BATCH_URL_TARGET = toPositiveInt(process.env.SITEMAP_BATCH_URL_TARGET, 10000000, 2500000000);
 const COUNTS_CACHE_MS = toPositiveInt(process.env.SITEMAP_COUNTS_CACHE_MS, 10 * 60 * 1000, 60 * 60 * 1000);
 const LOCATIONS_CACHE_MS = toPositiveInt(process.env.SITEMAP_LOCATIONS_CACHE_MS, 10 * 60 * 1000, 60 * 60 * 1000);
 const XML_CACHE_MS = toPositiveInt(process.env.SITEMAP_XML_CACHE_MS, 15 * 60 * 1000, 60 * 60 * 1000);
@@ -387,13 +389,44 @@ const sitemapFamilyByBaseName = new Map(
 
 const VERSIONED_FAMILY_INDEX_RE = /^\/(sitemap-(?:products|product-locations|vendors|vendor-locations|vendor-services|categories|category-locations|locations))-([A-Za-z0-9_-]+)-index\.xml$/;
 
-const familyPageEntries = (counts) => sitemapFamilyIndexes
-  .flatMap(({ baseName, countKey }) => pagesFor(baseName, counts?.[countKey] || 0));
+const familyPageEntries = (counts, revisionSegment = SITEMAP_REVISION_SEGMENT) => sitemapFamilyIndexes
+  .flatMap(({ baseName, countKey }) => pagesFor(baseName, counts?.[countKey] || 0, revisionSegment));
+
+const roundRobinFamilyPageEntries = (
+  counts,
+  entryLimit = Math.ceil(SITEMAP_BATCH_URL_TARGET / SITEMAP_LIMIT),
+  revisionSegment = SITEMAP_REVISION_SEGMENT
+) => {
+  const queues = sitemapFamilyIndexes
+    .map(({ baseName, countKey }) => pagesFor(baseName, counts?.[countKey] || 0, revisionSegment))
+    .filter((entries) => entries.length > 0);
+  const limitedEntryCount = Math.min(SITEMAP_INDEX_ENTRY_LIMIT, Math.max(1, Number(entryLimit) || 1));
+  const entries = [];
+
+  while (queues.length && entries.length < limitedEntryCount) {
+    for (let index = 0; index < queues.length && entries.length < limitedEntryCount;) {
+      const nextEntry = queues[index].shift();
+      if (nextEntry) entries.push(nextEntry);
+      if (!queues[index]?.length) {
+        queues.splice(index, 1);
+      } else {
+        index += 1;
+      }
+    }
+  }
+
+  return entries;
+};
 
 const sitemapIndexEntries = (counts) => [
   { loc: '/sitemap-static.xml', lastmod: SITEMAP_GENERATED_AT },
   ...familyPageEntries(counts),
-];
+].slice(0, SITEMAP_INDEX_ENTRY_LIMIT);
+
+const batchSitemapIndexEntries = (counts) => [
+  { loc: '/sitemap-static.xml', lastmod: SITEMAP_GENERATED_AT },
+  ...roundRobinFamilyPageEntries(counts),
+].slice(0, SITEMAP_INDEX_ENTRY_LIMIT);
 
 const fullSitemapIndexEntries = sitemapIndexEntries;
 
@@ -754,6 +787,7 @@ async function readSeoExportEntries(page = 1, limit = SITEMAP_LIMIT) {
 
 const robotsSitemapEntries = () => [
   '/sitemap.xml',
+  '/sitemap-1cr.xml',
   '/sitemap-static.xml',
   ...sitemapFamilyIndexes.map((entry) => entry.loc),
   ...sitemapFamilyIndexes.map((entry) => versionedFamilyIndexLoc(entry.loc)).filter(Boolean),
@@ -786,6 +820,17 @@ async function handleSitemapIndex(_req, res, next) {
     await sendXmlFromCache(_req, res, 'sitemap:index', async () => {
       const counts = await getCounts();
       return renderIndex(sitemapIndexEntries(counts));
+    }, 900);
+  } catch (error) {
+    next(error);
+  }
+}
+
+async function handleOneCroreSitemapIndex(req, res, next) {
+  try {
+    await sendXmlFromCache(req, res, `sitemap:batch:1cr:${SITEMAP_REVISION_SEGMENT || 'plain'}:${SITEMAP_BATCH_URL_TARGET}`, async () => {
+      const counts = await getCounts();
+      return renderIndex(batchSitemapIndexEntries(counts));
     }, 900);
   } catch (error) {
     next(error);
@@ -971,6 +1016,8 @@ const cleanPagedSitemapHandlers = {
 };
 
 router.get('/sitemap.xml', handleSitemapIndex);
+router.get('/sitemap-1cr.xml', handleOneCroreSitemapIndex);
+router.get(/^\/sitemap-1cr(?:-[A-Za-z0-9_-]+)?\.xml$/, handleOneCroreSitemapIndex);
 router.get('/sitemap-static.xml', handleStaticSitemap);
 router.use((req, res, next) => {
   if (req.method !== 'GET' && req.method !== 'HEAD') return next();
