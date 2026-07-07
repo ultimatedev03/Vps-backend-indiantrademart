@@ -64,6 +64,64 @@ const normalizeImpersonationTarget = (value) => {
   return IMPERSONATION_TARGETS.has(normalized) ? normalized : '';
 };
 
+const normalizeHostname = (value = '') =>
+  String(value || '')
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/.*$/, '')
+    .replace(/:\d+$/, '')
+    .toLowerCase();
+
+const getDefaultFrontendOrigin = () => {
+  const raw =
+    process.env.FRONTEND_URL ||
+    process.env.VITE_FRONTEND_URL ||
+    process.env.VITE_SITE_URL ||
+    process.env.SITE_URL ||
+    'https://indiantrademart.com';
+
+  try {
+    return new URL(String(raw).trim()).origin;
+  } catch {
+    return 'https://indiantrademart.com';
+  }
+};
+
+const getMainFrontendHost = () => {
+  const host = normalizeHostname(getDefaultFrontendOrigin());
+  return host.replace(/^www\./, '') || 'indiantrademart.com';
+};
+
+const isAllowedDashboardRedirectOrigin = (origin = '') => {
+  try {
+    const parsed = new URL(origin);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+    const host = normalizeHostname(parsed.hostname);
+    const mainHost = getMainFrontendHost();
+
+    if (host === mainHost || host === `www.${mainHost}` || host.endsWith(`.${mainHost}`)) {
+      return true;
+    }
+
+    if (process.env.NODE_ENV !== 'production') {
+      return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+};
+
+const buildDashboardRedirectUrl = (req, path = '/') => {
+  const requestedOrigin = compactText(req.body?.return_to_origin || req.body?.returnToOrigin);
+  const origin = isAllowedDashboardRedirectOrigin(requestedOrigin)
+    ? new URL(requestedOrigin).origin
+    : getDefaultFrontendOrigin();
+  const cleanPath = String(path || '/').startsWith('/') ? String(path || '/') : `/${path}`;
+  return new URL(cleanPath, origin).toString();
+};
+
 const normalizeBooleanInput = (value, fallback = false) => {
   if (value === true || value === 1) return true;
   if (value === false || value === 0) return false;
@@ -780,7 +838,7 @@ router.post('/impersonation/open', async (req, res) => {
     req.actor = session.actor;
 
     const result = await createImpersonationSession(req, res);
-    return res.redirect(303, result.next);
+    return res.redirect(303, buildDashboardRedirectUrl(req, result.next));
   } catch (error) {
     const statusCode = error?.statusCode || 500;
     const message = escapeHtml(error?.message || 'Could not open assisted dashboard access');
