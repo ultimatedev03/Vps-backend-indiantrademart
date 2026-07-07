@@ -100,7 +100,9 @@ const sendSeoHtml = (req, res, payload) => {
   const html = renderSeoShell({ req, ...payload });
   res.removeHeader('X-Frame-Options');
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.setHeader('Cache-Control', 'public, max-age=900, stale-while-revalidate=3600');
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   res.setHeader('X-Robots-Tag', 'index, follow');
   res.status(200).send(html);
 };
