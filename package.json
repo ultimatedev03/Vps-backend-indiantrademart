@@ -19,6 +19,7 @@
     "analytics:behavioral": "node server/scripts/runBehavioralCommerceIntelligence.js",
     "analytics:kafka:consume": "node server/scripts/consumeBehavioralKafkaEvents.js",
     "seo:export:all-urls": "node -e \"console.log('SEO URL ZIP export is disabled. Dynamic sitemap.xml now generates URLs from the database without writing export files.')\"",
+    "seo:sitemap:snapshot": "node server/scripts/refreshSitemapSnapshots.js",
     "plans:seed": "node server/scripts/seedVendorPlanCatalog.js",
     "plans:guide": "node server/scripts/generatePlanSalesGuide.js",
     "admin:create": "node server/scripts/createAdmin.js",
