@@ -86,6 +86,61 @@ function signSuperAdminToken(superadmin) {
   return jwt.sign(payload, secret, { expiresIn });
 }
 
+export async function resolveSuperAdminSessionToken(token) {
+  const cleanToken = String(token || '').trim();
+  if (!cleanToken) {
+    const err = new Error('Missing superadmin token');
+    err.statusCode = 401;
+    throw err;
+  }
+
+  const secret = getJwtSecret();
+  let decoded;
+  try {
+    decoded = jwt.verify(cleanToken, secret);
+  } catch {
+    const err = new Error('Invalid or expired superadmin token');
+    err.statusCode = 401;
+    throw err;
+  }
+
+  const superadminId = decoded?.sub;
+  if (!superadminId) {
+    const err = new Error('Invalid superadmin token payload');
+    err.statusCode = 401;
+    throw err;
+  }
+
+  const { data: superadmin, error } = await db
+    .from('superadmin_users')
+    .select('*')
+    .eq('id', superadminId)
+    .maybeSingle();
+
+  if (error) {
+    const err = new Error(error.message);
+    err.statusCode = 500;
+    throw err;
+  }
+
+  if (!superadmin || superadmin.is_active === false) {
+    const err = new Error('Superadmin account is inactive');
+    err.statusCode = 403;
+    throw err;
+  }
+
+  const resolvedRole = normalizeSuperAdminRole(superadmin.role);
+  const resolvedSuperadmin = { ...superadmin, role: resolvedRole };
+  const actor = {
+    id: superadmin.id,
+    type: 'SUPERADMIN',
+    role: resolvedRole,
+    email: superadmin.email,
+  };
+
+  return { superadmin: resolvedSuperadmin, actor, decoded };
+}
+
 export async function loginSuperAdmin(req, res) {
   try {
     await assertCaptchaForExpressRequest(req, { action: 'superadmin_login' });
@@ -175,50 +230,17 @@ export function requireSuperAdmin(req, res, next) {
   const run = async () => {
     try {
       const token = parseBearerToken(req);
-      if (!token) {
-        return res.status(401).json({ success: false, error: 'Missing superadmin token' });
-      }
-
-      const secret = getJwtSecret();
-      let decoded;
-      try {
-        decoded = jwt.verify(token, secret);
-      } catch (error) {
-        return res.status(401).json({ success: false, error: 'Invalid or expired superadmin token' });
-      }
-
-      const superadminId = decoded?.sub;
-      if (!superadminId) {
-        return res.status(401).json({ success: false, error: 'Invalid superadmin token payload' });
-      }
-
-      const { data: superadmin, error } = await db
-        .from('superadmin_users')
-        .select('*')
-        .eq('id', superadminId)
-        .maybeSingle();
-
-      if (error) {
-        return res.status(500).json({ success: false, error: error.message });
-      }
-
-      if (!superadmin || superadmin.is_active === false) {
-        return res.status(403).json({ success: false, error: 'Superadmin account is inactive' });
-      }
-
-      const resolvedRole = normalizeSuperAdminRole(superadmin.role);
-      req.superadmin = { ...superadmin, role: resolvedRole };
-      req.actor = {
-        id: superadmin.id,
-        type: 'SUPERADMIN',
-        role: resolvedRole,
-        email: superadmin.email,
-      };
+      const session = await resolveSuperAdminSessionToken(token);
+      req.superadmin = session.superadmin;
+      req.actor = session.actor;
 
       return next();
     } catch (error) {
       console.error('[SuperAdminAuth] Superadmin check failed:', error?.message || error);
-      return res.status(401).json({ success: false, error: 'Unauthorized' });
+      return res.status(error?.statusCode || 401).json({
+        success: false,
+        error: error?.message || 'Unauthorized',
+      });
     }
   };
 

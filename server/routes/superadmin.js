@@ -21,6 +21,7 @@ import {
   requireSuperAdmin,
   requireGodMode,
   changeSuperAdminPassword,
+  resolveSuperAdminSessionToken,
 } from '../lib/superadminAuth.js';
 import { getWebsiteVisitorActivity } from '../lib/visitorActivity.js';
 import { getBehavioralCommerceIntelligence } from '../lib/behavioralCommerceIntelligence.js';
@@ -761,6 +762,34 @@ router.get('/me', requireSuperAdmin, async (req, res) => {
 
 router.put('/password', requireSuperAdmin, changeSuperAdminPassword);
 
+function escapeHtml(value = '') {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+router.post('/impersonation/open', async (req, res) => {
+  try {
+    const session = await resolveSuperAdminSessionToken(
+      req.body?.superadmin_token || req.body?.token
+    );
+    req.superadmin = session.superadmin;
+    req.actor = session.actor;
+
+    const result = await createImpersonationSession(req, res);
+    return res.redirect(303, result.next);
+  } catch (error) {
+    const statusCode = error?.statusCode || 500;
+    const message = escapeHtml(error?.message || 'Could not open assisted dashboard access');
+    return res.status(statusCode).send(
+      `<!doctype html><html><head><meta charset="utf-8"><title>Assisted access failed</title></head><body><h1>Assisted access failed</h1><p>${message}</p><p><a href="/admin/superadmin/dashboard">Back to Super Admin</a></p></body></html>`
+    );
+  }
+});
+
 // All routes below require superadmin.
 router.use(requireSuperAdmin);
 
@@ -912,6 +941,72 @@ function buildSuperadminActor(req) {
   };
 }
 
+async function createImpersonationSession(req, res) {
+  const targetType = normalizeImpersonationTarget(req.body?.target_type || req.body?.type);
+  if (!targetType) {
+    const err = new Error('Invalid target_type. Use VENDOR or BUYER.');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const target = await loadImpersonationTarget(
+    targetType,
+    req.body?.target_id || req.body?.targetId || req.body?.id
+  );
+  const user = await ensureTargetSessionUser(targetType, target);
+  const actor = buildSuperadminActor(req);
+
+  const token = signAuthToken({
+    sub: user.id,
+    email: user.email || target.email || null,
+    role: targetType,
+    type: 'IMPERSONATION',
+    impersonated_by: actor.id,
+    impersonated_by_role: actor.role,
+    impersonated_by_email: actor.email,
+    impersonation_target_type: targetType,
+    impersonation_target_id: target.id,
+  });
+
+  const csrfToken = createCsrfToken();
+  setAuthCookies(res, token, csrfToken);
+
+  await writeAuditLog({
+    req,
+    actor,
+    action: 'SUPERADMIN_IMPERSONATION_STARTED',
+    entityType: getTargetTable(targetType),
+    entityId: target.id,
+    details: {
+      target_type: targetType,
+      target_name: getTargetDisplayName(targetType, target),
+      target_email: target.email || null,
+      target_user_id: user.id,
+      dashboard_path: getTargetDashboardPath(targetType),
+    },
+  });
+
+  return {
+    success: true,
+    target_type: targetType,
+    target: summarizeImpersonationTarget(targetType, target),
+    user: {
+      id: user.id,
+      email: user.email || target.email || null,
+      role: targetType,
+    },
+    impersonation: {
+      active: true,
+      by_user_id: actor.id,
+      by_email: actor.email,
+      by_role: actor.role,
+      target_type: targetType,
+      target_id: target.id,
+    },
+    next: getTargetDashboardPath(targetType),
+  };
+}
+
 router.get('/impersonation/targets', async (req, res) => {
   try {
     const targetType = normalizeImpersonationTarget(req.query?.target_type || req.query?.type || 'BUYER');
@@ -974,67 +1069,7 @@ router.get('/impersonation/targets', async (req, res) => {
 
 router.post('/impersonation/start', async (req, res) => {
   try {
-    const targetType = normalizeImpersonationTarget(req.body?.target_type || req.body?.type);
-    if (!targetType) {
-      return res.status(400).json({ success: false, error: 'Invalid target_type. Use VENDOR or BUYER.' });
-    }
-
-    const target = await loadImpersonationTarget(
-      targetType,
-      req.body?.target_id || req.body?.targetId || req.body?.id
-    );
-    const user = await ensureTargetSessionUser(targetType, target);
-    const actor = buildSuperadminActor(req);
-
-    const token = signAuthToken({
-      sub: user.id,
-      email: user.email || target.email || null,
-      role: targetType,
-      type: 'IMPERSONATION',
-      impersonated_by: actor.id,
-      impersonated_by_role: actor.role,
-      impersonated_by_email: actor.email,
-      impersonation_target_type: targetType,
-      impersonation_target_id: target.id,
-    });
-
-    const csrfToken = createCsrfToken();
-    setAuthCookies(res, token, csrfToken);
-
-    await writeAuditLog({
-      req,
-      actor,
-      action: 'SUPERADMIN_IMPERSONATION_STARTED',
-      entityType: getTargetTable(targetType),
-      entityId: target.id,
-      details: {
-        target_type: targetType,
-        target_name: getTargetDisplayName(targetType, target),
-        target_email: target.email || null,
-        target_user_id: user.id,
-        dashboard_path: getTargetDashboardPath(targetType),
-      },
-    });
-
-    return res.json({
-      success: true,
-      target_type: targetType,
-      target: summarizeImpersonationTarget(targetType, target),
-      user: {
-        id: user.id,
-        email: user.email || target.email || null,
-        role: targetType,
-      },
-      impersonation: {
-        active: true,
-        by_user_id: actor.id,
-        by_email: actor.email,
-        by_role: actor.role,
-        target_type: targetType,
-        target_id: target.id,
-      },
-      next: getTargetDashboardPath(targetType),
-    });
+    return res.json(await createImpersonationSession(req, res));
   } catch (error) {
     return res.status(error?.statusCode || 500).json({
       success: false,
