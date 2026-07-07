@@ -20,12 +20,14 @@
     "analytics:kafka:consume": "node server/scripts/consumeBehavioralKafkaEvents.js",
     "seo:export:all-urls": "node -e \"console.log('SEO URL ZIP export is disabled. Dynamic sitemap.xml now generates URLs from the database without writing export files.')\"",
     "seo:sitemap:snapshot": "node server/scripts/refreshSitemapSnapshots.js",
+    "seo:sitemap:r2:publish": "node server/scripts/publishR2Sitemaps.js",
     "plans:seed": "node server/scripts/seedVendorPlanCatalog.js",
     "plans:guide": "node server/scripts/generatePlanSalesGuide.js",
     "admin:create": "node server/scripts/createAdmin.js",
     "admin:password": "node server/scripts/changeAdminPassword.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.614.0",
     "@clickhouse/client": "^1.23.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
