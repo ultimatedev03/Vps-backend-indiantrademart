@@ -147,8 +147,7 @@ class SitemapPublisher {
     await shard.done;
     const key = objectKey(shard.fileName);
     await this.uploadFile(key, shard.filePath, {
-      ContentType: 'application/xml',
-      ContentEncoding: 'gzip',
+      ContentType: 'application/x-gzip',
       CacheControl: 'public, max-age=86400, immutable',
     });
     this.indexEntries.push({ loc: publicUrlForKey(key), lastmod: GENERATED_AT });
