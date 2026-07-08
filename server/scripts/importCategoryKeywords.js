@@ -42,8 +42,16 @@ const normalizeKeywords = (value = '') => {
 };
 
 const splitRow = (line) => {
-  const columns = String(line).split(/\t+/);
+  const columns = String(line).replace(/^\uFEFF/, '').split('\t');
   while (columns.length < 4) columns.push('');
+  if (columns.length > 4) {
+    return [
+      columns[0],
+      columns[1],
+      columns[2],
+      columns.slice(3).join(' '),
+    ].map((column) => column.trim());
+  }
   return columns.map((column) => column.trim());
 };
 
