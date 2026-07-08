@@ -20,6 +20,7 @@
     "analytics:kafka:consume": "node server/scripts/consumeBehavioralKafkaEvents.js",
     "seo:export:all-urls": "node -e \"console.log('SEO URL ZIP export is disabled. R2 dynamic sitemap publishing is the canonical sitemap pipeline.')\"",
     "seo:sitemap:r2:publish": "node server/scripts/publishR2Sitemaps.js",
+    "categories:import-keywords": "node server/scripts/importCategoryKeywords.js",
     "plans:seed": "node server/scripts/seedVendorPlanCatalog.js",
     "plans:guide": "node server/scripts/generatePlanSalesGuide.js",
     "images:optimize": "node server/scripts/optimizeLocalImages.js",

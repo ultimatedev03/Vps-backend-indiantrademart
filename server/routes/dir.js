@@ -2836,11 +2836,11 @@ router.get('/categories/home-showcase', cacheResponse('dir:home-showcase', 900),
     const subLimit = Number(req.query.subLimit) || 0;
     const microLimit = Number(req.query.microLimit) || 0;
 
-    let headQuery = db.from('head_categories').select('id, name, slug, image_url, description').eq('is_active', true).order('sort_order', { ascending: true }).order('name', { ascending: true });
+    let headQuery = db.from('head_categories').select('id, name, slug, image_url, description, keywords').eq('is_active', true).order('sort_order', { ascending: true }).order('name', { ascending: true });
     if (headLimit > 0) headQuery = headQuery.limit(headLimit);
     let headRes = await headQuery;
     if (headRes.error && isMissingColumnErr(headRes.error, 'sort_order')) {
-      let fallbackHeadQuery = db.from('head_categories').select('id, name, slug, image_url, description').eq('is_active', true).order('name', { ascending: true });
+      let fallbackHeadQuery = db.from('head_categories').select('id, name, slug, image_url, description, keywords').eq('is_active', true).order('name', { ascending: true });
       if (headLimit > 0) fallbackHeadQuery = fallbackHeadQuery.limit(headLimit);
       headRes = await fallbackHeadQuery;
     }
@@ -2849,9 +2849,9 @@ router.get('/categories/home-showcase', cacheResponse('dir:home-showcase', 900),
     if (heads.length === 0) return res.json({ success: true, categories: [] });
 
     const headIds = heads.map((h) => h.id);
-    let subRes = await db.from('sub_categories').select('id, head_category_id, name, slug, image_url, description').in('head_category_id', headIds).eq('is_active', true).order('sort_order', { ascending: true }).order('name', { ascending: true });
+    let subRes = await db.from('sub_categories').select('id, head_category_id, name, slug, image_url, description, keywords').in('head_category_id', headIds).eq('is_active', true).order('sort_order', { ascending: true }).order('name', { ascending: true });
     if (subRes.error && isMissingColumnErr(subRes.error, 'sort_order')) {
-      subRes = await db.from('sub_categories').select('id, head_category_id, name, slug, image_url, description').in('head_category_id', headIds).eq('is_active', true).order('name', { ascending: true });
+      subRes = await db.from('sub_categories').select('id, head_category_id, name, slug, image_url, description, keywords').in('head_category_id', headIds).eq('is_active', true).order('name', { ascending: true });
     }
     if (subRes.error) throw subRes.error;
     const subs = subRes.data || [];
@@ -2995,7 +2995,7 @@ router.get('/categories', cacheResponse('dir:categories', 1800), async (req, res
   try {
     const { data, error } = await db
       .from('head_categories')
-      .select('id, name, slug, image_url, description')
+      .select('id, name, slug, image_url, description, keywords')
       .eq('is_active', true)
       .order('name', { ascending: true });
     if (error) throw error;
@@ -3009,8 +3009,8 @@ router.get('/categories', cacheResponse('dir:categories', 1800), async (req, res
 router.get('/hierarchy', cacheResponse('dir:hierarchy', 1800), async (req, res) => {
   try {
     const [headsRes, subsRes, microsRes] = await Promise.all([
-      db.from('head_categories').select('id, name, slug, image_url').eq('is_active', true).order('name'),
-      db.from('sub_categories').select('id, name, slug, head_category_id, image_url').eq('is_active', true).order('name'),
+      db.from('head_categories').select('id, name, slug, image_url, keywords').eq('is_active', true).order('name'),
+      db.from('sub_categories').select('id, name, slug, head_category_id, image_url, keywords').eq('is_active', true).order('name'),
       db.from('micro_categories').select('id, name, slug, sub_category_id, image_url').eq('is_active', true).order('name'),
     ]);
 
@@ -3024,7 +3024,7 @@ router.get('/hierarchy', cacheResponse('dir:hierarchy', 1800), async (req, res) 
 
     const subsByHead = (subsRes.data || []).reduce((acc, s) => {
       if (!acc[s.head_category_id]) acc[s.head_category_id] = [];
-      acc[s.head_category_id].push({ id: s.id, name: s.name, slug: s.slug, image_url: s.image_url || null, micros: microsBySub[s.id] || [] });
+      acc[s.head_category_id].push({ id: s.id, name: s.name, slug: s.slug, image_url: s.image_url || null, keywords: s.keywords || null, micros: microsBySub[s.id] || [] });
       return acc;
     }, {});
 
@@ -3454,7 +3454,7 @@ router.get('/categories/heads', cacheResponse('dir:heads-alias', 1800), async (r
   try {
     const { data, error } = await db
       .from('head_categories')
-      .select('id, name, slug, image_url, description, is_active')
+      .select('id, name, slug, image_url, description, keywords, is_active')
       .eq('is_active', true)
       .order('name');
     if (error) throw error;
@@ -3471,7 +3471,7 @@ router.get('/categories/subs', cacheResponse('dir:subs-alias', 1800), async (req
     if (!headId) return res.status(400).json({ success: false, error: 'head_id is required' });
     const { data, error } = await db
       .from('sub_categories')
-      .select('id, name, slug, head_category_id, image_url, is_active')
+      .select('id, name, slug, head_category_id, image_url, keywords, is_active')
       .eq('head_category_id', headId)
       .eq('is_active', true)
       .order('name');
