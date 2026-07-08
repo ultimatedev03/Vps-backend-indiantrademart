@@ -30,10 +30,17 @@ const revisionSegmentFor = (value = '') => {
 };
 const SITEMAP_REVISION = sanitizeSitemapRevision(process.env.SITEMAP_REVISION);
 const SITEMAP_REVISION_SEGMENT = revisionSegmentFor(SITEMAP_REVISION);
+const R2_PUBLIC_SITEMAP_BASE_URL = String(
+  process.env.R2_SITEMAP_PUBLIC_BASE_URL ||
+  process.env.SITEMAP_PUBLIC_BASE_URL ||
+  'https://sitemaps.indiantrademart.com'
+).replace(/\/+$/, '');
+const R2_SITEMAP_PREFIX = String(process.env.R2_SITEMAP_PREFIX || process.env.SITEMAP_R2_PREFIX || 'sitemaps')
+  .replace(/^\/+|\/+$/g, '');
 const EXTERNAL_SITEMAP_INDEX_URL = String(
   process.env.EXTERNAL_SITEMAP_INDEX_URL ||
   process.env.R2_SITEMAP_INDEX_URL ||
-  `${SITE_URL}/sitemaps/sitemap-index.xml`
+  `${R2_PUBLIC_SITEMAP_BASE_URL}/${R2_SITEMAP_PREFIX ? `${R2_SITEMAP_PREFIX}/` : ''}sitemap-index.xml`
 ).trim();
 const toPositiveInt = (value, fallback, max = Number.MAX_SAFE_INTEGER) => {
   const parsed = Number.parseInt(String(value), 10);
@@ -86,6 +93,8 @@ const escapeXml = (value = '') =>
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
+
+const escapeRegExp = (value = '') => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const absoluteUrl = (urlPath = '/') => {
   const clean = String(urlPath || '/').startsWith('/') ? String(urlPath || '/') : `/${urlPath}`;
@@ -200,6 +209,44 @@ const sendXml = (res, xml, maxAge = 900) => {
 async function sendXmlFromCache(req, res, cacheKey, producer, maxAge = 900) {
   const xml = await buildXmlWithCache(cacheKey || req.originalUrl || req.url, producer);
   sendXml(res, xml, maxAge);
+}
+
+const isSameSiteUrl = (value = '') => {
+  try {
+    const parsed = new URL(value);
+    const site = new URL(SITE_URL);
+    return parsed.origin === site.origin;
+  } catch {
+    return false;
+  }
+};
+
+const normalizeExternalSitemapIndex = (xml = '') => {
+  if (!xml.includes('<sitemapindex')) {
+    throw new Error('External sitemap index did not return a sitemapindex XML document');
+  }
+  return xml
+    .replace(/https:\/\/sitemaps\.indiantrademart\.com\/sitemaps\//g, `${SITE_URL}/sitemaps/`)
+    .replace(new RegExp(`${escapeRegExp(R2_PUBLIC_SITEMAP_BASE_URL)}/${escapeRegExp(R2_SITEMAP_PREFIX)}/`, 'g'), `${SITE_URL}/sitemaps/`);
+};
+
+async function fetchExternalSitemapIndex() {
+  if (!EXTERNAL_SITEMAP_INDEX_URL || isSameSiteUrl(EXTERNAL_SITEMAP_INDEX_URL)) {
+    throw new Error(`Invalid EXTERNAL_SITEMAP_INDEX_URL for dynamic sitemap proxy: ${EXTERNAL_SITEMAP_INDEX_URL}`);
+  }
+
+  const response = await fetch(EXTERNAL_SITEMAP_INDEX_URL, {
+    headers: {
+      Accept: 'application/xml,text/xml;q=0.9,*/*;q=0.1',
+      'User-Agent': 'IndianTradeMart-SitemapProxy/1.0',
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`External sitemap index fetch failed: HTTP ${response.status}`);
+  }
+
+  return normalizeExternalSitemapIndex(await response.text());
 }
 
 const renderUrlset = (entries = [], options = {}) => {
@@ -791,12 +838,7 @@ async function readSeoExportEntries(page = 1, limit = SITEMAP_LIMIT) {
 }
 
 const robotsSitemapEntries = () => [
-  EXTERNAL_SITEMAP_INDEX_URL,
   '/sitemap.xml',
-  '/sitemap-1cr.xml',
-  '/sitemap-static.xml',
-  ...sitemapFamilyIndexes.map((entry) => entry.loc),
-  ...sitemapFamilyIndexes.map((entry) => versionedFamilyIndexLoc(entry.loc)).filter(Boolean),
 ];
 
 const robotsText = () => [
@@ -823,10 +865,7 @@ router.get('/robots.txt', (_req, res) => {
 
 async function handleSitemapIndex(_req, res, next) {
   try {
-    await sendXmlFromCache(_req, res, 'sitemap:index', async () => {
-      const counts = await getCounts();
-      return renderIndex(sitemapIndexEntries(counts));
-    }, 900);
+    await sendXmlFromCache(_req, res, `sitemap:external:index:${EXTERNAL_SITEMAP_INDEX_URL}`, fetchExternalSitemapIndex, 300);
   } catch (error) {
     next(error);
   }
@@ -1021,85 +1060,45 @@ const cleanPagedSitemapHandlers = {
   'sitemap-locations': handleLocationsSitemap,
 };
 
+const redirectToCanonicalSitemap = (_req, res) => res.redirect(301, '/sitemap.xml');
+
 router.get('/sitemap.xml', handleSitemapIndex);
-router.get('/sitemap-1cr.xml', handleOneCroreSitemapIndex);
-router.get(/^\/sitemap-1cr(?:-[A-Za-z0-9_-]+)?\.xml$/, handleOneCroreSitemapIndex);
-router.get('/sitemap-static.xml', handleStaticSitemap);
+router.get('/sitemap-1cr.xml', redirectToCanonicalSitemap);
+router.get(/^\/sitemap-1cr(?:-[A-Za-z0-9_-]+)?\.xml$/, redirectToCanonicalSitemap);
+router.get('/sitemap-static.xml', redirectToCanonicalSitemap);
 router.use((req, res, next) => {
   if (req.method !== 'GET' && req.method !== 'HEAD') return next();
   const cleanPath = String(req.path || req.url || '').split('?')[0];
   const match = VERSIONED_FAMILY_INDEX_RE.exec(cleanPath);
   if (!match) return next();
-  const family = sitemapFamilyByBaseName.get(match[1]);
-  const revisionSegment = revisionSegmentFor(match[2]);
-  if (!family || !revisionSegment) return next();
-  return makeFamilyIndexHandler(family.baseName, family.countKey, revisionSegment)(req, res, next);
+  return redirectToCanonicalSitemap(req, res);
 });
 sitemapFamilyIndexes.forEach((family) => {
-  router.get(family.loc, makeFamilyIndexHandler(family.baseName, family.countKey));
+  router.get(family.loc, redirectToCanonicalSitemap);
   const revisedLoc = versionedFamilyIndexLoc(family.loc);
   if (revisedLoc) {
-    router.get(revisedLoc, makeFamilyIndexHandler(family.baseName, family.countKey));
+    router.get(revisedLoc, redirectToCanonicalSitemap);
   }
-  router.get(`/${family.baseName}-:revision-index.xml`, (req, res, next) => {
-    const revisionSegment = revisionSegmentFor(req.params?.revision);
-    if (!revisionSegment) return next();
-    return makeFamilyIndexHandler(family.baseName, family.countKey, revisionSegment)(req, res, next);
-  });
+  router.get(`/${family.baseName}-:revision-index.xml`, redirectToCanonicalSitemap);
 });
 
-router.get(/^\/(sitemap-(?:products|product-locations|vendors|vendor-locations|vendor-services|categories|category-locations|locations))-([A-Za-z0-9_-]+)-index\.xml$/, (req, res, next) => {
-  const family = sitemapFamilyByBaseName.get(req.params?.[0]);
-  const revisionSegment = revisionSegmentFor(req.params?.[1]);
-  if (!family || !revisionSegment) return next();
-  return makeFamilyIndexHandler(family.baseName, family.countKey, revisionSegment)(req, res, next);
-});
+router.get(/^\/(sitemap-(?:products|product-locations|vendors|vendor-locations|vendor-services|categories|category-locations|locations))-([A-Za-z0-9_-]+)-index\.xml$/, redirectToCanonicalSitemap);
 
-router.get(/^\/sitemap-.*-index\.xml$/, (req, res, next) => {
-  const cleanPath = String(req.path || req.url || '').split('?')[0];
-  const match = VERSIONED_FAMILY_INDEX_RE.exec(cleanPath);
-  if (!match) return next();
-  const family = sitemapFamilyByBaseName.get(match[1]);
-  const revisionSegment = revisionSegmentFor(match[2]);
-  if (!family || !revisionSegment) return next();
-  return makeFamilyIndexHandler(family.baseName, family.countKey, revisionSegment)(req, res, next);
-});
+router.get(/^\/sitemap-.*-index\.xml$/, redirectToCanonicalSitemap);
 
-router.get('/sitemap-products.xml', handleProductsSitemap);
-router.get('/sitemap-vendors.xml', handleVendorsSitemap);
-router.get('/sitemap-locations.xml', handleLocationsSitemap);
-router.get('/sitemap-product-locations.xml', handleProductLocationsSitemap);
-router.get('/sitemap-vendor-locations.xml', handleVendorLocationsSitemap);
-router.get('/sitemap-categories.xml', handleCategoriesSitemap);
-router.get('/sitemap-category-locations.xml', handleCategoryLocationsSitemap);
-router.get('/sitemap-vendor-services.xml', handleVendorServicesSitemap);
+router.get('/sitemap-products.xml', redirectToCanonicalSitemap);
+router.get('/sitemap-vendors.xml', redirectToCanonicalSitemap);
+router.get('/sitemap-locations.xml', redirectToCanonicalSitemap);
+router.get('/sitemap-product-locations.xml', redirectToCanonicalSitemap);
+router.get('/sitemap-vendor-locations.xml', redirectToCanonicalSitemap);
+router.get('/sitemap-categories.xml', redirectToCanonicalSitemap);
+router.get('/sitemap-category-locations.xml', redirectToCanonicalSitemap);
+router.get('/sitemap-vendor-services.xml', redirectToCanonicalSitemap);
 
-router.get(/^\/(sitemap-(?:products|product-locations|vendors|vendor-locations|vendor-services|categories|category-locations|locations))(?:-[A-Za-z0-9_-]+)?-(\d+)\.xml$/, (req, res, next) => {
-  const family = req.params?.[0];
-  const page = req.params?.[1];
-  const handler = cleanPagedSitemapHandlers[family];
-  if (!handler) return next();
-  req.params = { page };
-  return handler(req, res, next);
-});
+router.get(/^\/(sitemap-(?:products|product-locations|vendors|vendor-locations|vendor-services|categories|category-locations|locations))(?:-[A-Za-z0-9_-]+)?-(\d+)\.xml$/, redirectToCanonicalSitemap);
 
-router.get('/sitemap-seo-files.xml', async (req, res, next) => {
-  try {
-    await sendXmlFromCache(req, res, 'sitemap:seo-files', () => renderUrlset([]), 900);
-  } catch (error) {
-    next(error);
-  }
-});
+router.get('/sitemap-seo-files.xml', redirectToCanonicalSitemap);
 
-router.get('/sitemap-seo-exports.xml', async (req, res, next) => {
-  try {
-    await sendXmlFromCache(req, res, 'sitemap:seo-exports', async () => {
-      const counts = await getCounts();
-      return renderIndex(fullSitemapIndexEntries(counts));
-    }, 900);
-  } catch (error) {
-    next(error);
-  }
-});
+router.get('/sitemap-seo-exports.xml', redirectToCanonicalSitemap);
 
 export default router;
