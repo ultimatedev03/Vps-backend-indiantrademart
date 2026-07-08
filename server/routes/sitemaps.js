@@ -30,6 +30,11 @@ const revisionSegmentFor = (value = '') => {
 };
 const SITEMAP_REVISION = sanitizeSitemapRevision(process.env.SITEMAP_REVISION);
 const SITEMAP_REVISION_SEGMENT = revisionSegmentFor(SITEMAP_REVISION);
+const EXTERNAL_SITEMAP_INDEX_URL = String(
+  process.env.EXTERNAL_SITEMAP_INDEX_URL ||
+  process.env.R2_SITEMAP_INDEX_URL ||
+  'https://sitemaps.indiantrademart.com/sitemaps/sitemap-index.xml'
+).trim();
 const toPositiveInt = (value, fallback, max = Number.MAX_SAFE_INTEGER) => {
   const parsed = Number.parseInt(String(value), 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -786,6 +791,7 @@ async function readSeoExportEntries(page = 1, limit = SITEMAP_LIMIT) {
 }
 
 const robotsSitemapEntries = () => [
+  EXTERNAL_SITEMAP_INDEX_URL,
   '/sitemap.xml',
   '/sitemap-1cr.xml',
   '/sitemap-static.xml',
