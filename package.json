@@ -23,6 +23,7 @@
     "seo:sitemap:r2:publish": "node server/scripts/publishR2Sitemaps.js",
     "plans:seed": "node server/scripts/seedVendorPlanCatalog.js",
     "plans:guide": "node server/scripts/generatePlanSalesGuide.js",
+    "images:optimize": "node server/scripts/optimizeLocalImages.js",
     "admin:create": "node server/scripts/createAdmin.js",
     "admin:password": "node server/scripts/changeAdminPassword.js"
   },
@@ -44,6 +45,7 @@
     "nodemailer": "^9.0.1",
     "openai": "^4.77.4",
     "pg": "^8.21.0",
-    "razorpay": "^2.9.6"
+    "razorpay": "^2.9.6",
+    "sharp": "^0.33.5"
   }
 }

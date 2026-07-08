@@ -10,6 +10,7 @@ import { requireAuth } from '../middleware/requireAuth.js';
 import { requireEmployeeRoles } from '../middleware/requireEmployeeRoles.js';
 import { mysqlQuery } from '../lib/mysqlPool.js';
 import { cacheGetJson, cacheSetJson, isRedisConfigured } from '../lib/redisCache.js';
+import { buildOptimizedImageUpload, uploadImageVariants } from '../lib/imageOptimization.js';
 import {
   buildSearch360ActorFromEmployee,
   createSearch360Escalation,
@@ -1147,6 +1148,10 @@ router.post('/category-image-upload', requireAuth(), async (req, res) => {
     const hasExt = originalName.includes('.');
     const ext = hasExt ? originalName.split('.').pop() : extFromMime;
     const objectPath = `category-images/${level}/${slug}-${Date.now()}-${randomUUID()}.${ext}`;
+    const optimizedUpload = await buildOptimizedImageUpload({ buffer, contentType, objectPath });
+    const uploadBody = optimizedUpload.primary.buffer;
+    const uploadContentType = optimizedUpload.primary.contentType;
+    const uploadObjectPath = optimizedUpload.primary.objectPath;
 
     if (isCloudinaryConfigured()) {
       const uploaded = await uploadBufferToCloudinary({
@@ -1169,8 +1174,8 @@ router.post('/category-image-upload', requireAuth(), async (req, res) => {
 
     const { error: uploadError } = await db.storage
       .from(CATEGORY_IMAGE_BUCKET)
-      .upload(objectPath, buffer, {
-        contentType,
+      .upload(uploadObjectPath, uploadBody, {
+        contentType: uploadContentType,
         upsert: true,
       });
 
@@ -1178,12 +1183,21 @@ router.post('/category-image-upload', requireAuth(), async (req, res) => {
       return res.status(500).json({ success: false, error: uploadError.message || 'Upload failed' });
     }
 
-    const { data } = db.storage.from(CATEGORY_IMAGE_BUCKET).getPublicUrl(objectPath);
+    const variants = await uploadImageVariants({
+      storage: db.storage,
+      bucket: CATEGORY_IMAGE_BUCKET,
+      variants: optimizedUpload.variants,
+      upsert: true,
+    });
+
+    const { data } = db.storage.from(CATEGORY_IMAGE_BUCKET).getPublicUrl(uploadObjectPath);
     return res.json({
       success: true,
       bucket: CATEGORY_IMAGE_BUCKET,
-      path: objectPath,
+      path: uploadObjectPath,
       publicUrl: data?.publicUrl || null,
+      optimized: optimizedUpload.optimized,
+      variants,
     });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message || 'Failed to upload category image' });
@@ -1244,6 +1258,16 @@ router.post('/product-media-upload', requireAuth(), async (req, res) => {
       originalName,
       contentType,
     });
+    const optimizedUpload = finalType === 'image'
+      ? await buildOptimizedImageUpload({ buffer, contentType, objectPath })
+      : {
+          optimized: false,
+          primary: { buffer, contentType, objectPath },
+          variants: [],
+        };
+    const uploadBody = optimizedUpload.primary.buffer;
+    const uploadContentType = optimizedUpload.primary.contentType;
+    const uploadObjectPath = optimizedUpload.primary.objectPath;
 
     if (isCloudinaryConfigured()) {
       const uploaded = await uploadBufferToCloudinary({
@@ -1268,20 +1292,20 @@ router.post('/product-media-upload', requireAuth(), async (req, res) => {
     let uploadedBucket = null;
     let lastUploadError = null;
     const uploadOptions = {
-      contentType,
+      contentType: uploadContentType,
       upsert: true,
     };
 
     for (const bucket of buckets) {
       let { error: uploadError } = await db.storage
         .from(bucket)
-        .upload(objectPath, buffer, uploadOptions);
+        .upload(uploadObjectPath, uploadBody, uploadOptions);
       const bucketMissingOnInitialTry = !!uploadError && isBucketMissingError(uploadError);
 
       if (bucketMissingOnInitialTry) {
         const bucketCreateError = await ensurePublicBucket(bucket);
         if (!bucketCreateError) {
-          const retryUpload = await db.storage.from(bucket).upload(objectPath, buffer, uploadOptions);
+          const retryUpload = await db.storage.from(bucket).upload(uploadObjectPath, uploadBody, uploadOptions);
           uploadError = retryUpload.error || null;
         } else {
           uploadError = bucketCreateError;
@@ -1306,12 +1330,21 @@ router.post('/product-media-upload', requireAuth(), async (req, res) => {
       return res.status(500).json({ success: false, error: errorMessage });
     }
 
-    const { data } = db.storage.from(uploadedBucket).getPublicUrl(objectPath);
+    const variants = await uploadImageVariants({
+      storage: db.storage,
+      bucket: uploadedBucket,
+      variants: optimizedUpload.variants,
+      upsert: true,
+    });
+
+    const { data } = db.storage.from(uploadedBucket).getPublicUrl(uploadObjectPath);
     return res.json({
       success: true,
       bucket: uploadedBucket,
-      path: objectPath,
+      path: uploadObjectPath,
       publicUrl: data?.publicUrl || null,
+      optimized: optimizedUpload.optimized,
+      variants,
     });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message || 'Failed to upload media' });

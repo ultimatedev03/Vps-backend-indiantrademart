@@ -3,6 +3,7 @@ import express from 'express';
 import { randomUUID } from 'crypto';
 import { db } from '../lib/dbClient.js';
 import { isCloudinaryConfigured, uploadBufferToCloudinary } from '../lib/cloudinaryUpload.js';
+import { buildOptimizedImageUpload, uploadImageVariants } from '../lib/imageOptimization.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 import {
   buildAuthUserPayload,
@@ -1325,6 +1326,10 @@ router.post('/buyer/profile/avatar', requireAuth({ roles: ['BUYER'] }), async (r
     const baseName = rawName.includes('.') ? rawName.replace(/\.[^/.]+$/, '') : rawName;
     const fileName = `${baseName || 'avatar'}.${ext}`;
     const objectPath = `buyer-avatars/${buyer.id}/${Date.now()}-${randomUUID()}-${fileName}`;
+    const optimizedUpload = await buildOptimizedImageUpload({ buffer, contentType: mime, objectPath });
+    const uploadBody = optimizedUpload.primary.buffer;
+    const uploadContentType = optimizedUpload.primary.contentType;
+    const uploadObjectPath = optimizedUpload.primary.objectPath;
 
     if (isCloudinaryConfigured()) {
       const uploaded = await uploadBufferToCloudinary({
@@ -1362,8 +1367,8 @@ router.post('/buyer/profile/avatar', requireAuth({ roles: ['BUYER'] }), async (r
 
     const { error: uploadError } = await db.storage
       .from('avatars')
-      .upload(objectPath, buffer, {
-        contentType: mime,
+      .upload(uploadObjectPath, uploadBody, {
+        contentType: uploadContentType,
         upsert: false,
         cacheControl: '3600',
       });
@@ -1372,7 +1377,14 @@ router.post('/buyer/profile/avatar', requireAuth({ roles: ['BUYER'] }), async (r
       return res.status(500).json({ success: false, error: uploadError.message || 'Upload failed' });
     }
 
-    const { data } = db.storage.from('avatars').getPublicUrl(objectPath);
+    const variants = await uploadImageVariants({
+      storage: db.storage,
+      bucket: 'avatars',
+      variants: optimizedUpload.variants,
+      upsert: false,
+    });
+
+    const { data } = db.storage.from('avatars').getPublicUrl(uploadObjectPath);
     const publicUrl = data?.publicUrl || null;
     if (!publicUrl) {
       return res.status(500).json({ success: false, error: 'Failed to build public url' });
@@ -1390,7 +1402,13 @@ router.post('/buyer/profile/avatar', requireAuth({ roles: ['BUYER'] }), async (r
       return res.status(500).json({ success: false, error: updateError.message || 'Failed to save avatar' });
     }
 
-    return res.json({ success: true, publicUrl });
+    return res.json({
+      success: true,
+      publicUrl,
+      optimized: optimizedUpload.optimized,
+      path: uploadObjectPath,
+      variants,
+    });
   } catch (error) {
     logger.error('[Auth] Buyer avatar upload failed:', error?.message || error);
     return res.status(500).json({ success: false, error: 'Failed to upload avatar' });

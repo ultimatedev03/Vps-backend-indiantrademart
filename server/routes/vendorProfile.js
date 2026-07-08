@@ -3,6 +3,7 @@ import express from 'express';
 import { randomUUID } from 'crypto';
 import { db } from '../lib/dbClient.js';
 import { inferCloudinaryResourceType, isCloudinaryConfigured, uploadBufferToCloudinary } from '../lib/cloudinaryUpload.js';
+import { buildOptimizedImageUpload, uploadImageVariants } from '../lib/imageOptimization.js';
 import { normalizeEmail } from '../lib/auth.js';
 import { optionalAuth, requireAuth } from '../middleware/requireAuth.js';
 import { notifyRole, notifyUser } from '../lib/notify.js';
@@ -2911,6 +2912,17 @@ router.post('/me/upload', requireAuth({ roles: ['VENDOR'] }), async (req, res) =
       originalName,
       contentType,
     });
+    const shouldOptimizeLocalImage = isImage && uploadPurpose !== 'KYC_DOCUMENT';
+    const optimizedUpload = shouldOptimizeLocalImage
+      ? await buildOptimizedImageUpload({ buffer, contentType, objectPath })
+      : {
+          optimized: false,
+          primary: { buffer, contentType, objectPath },
+          variants: [],
+        };
+    const uploadBody = optimizedUpload.primary.buffer;
+    const uploadContentType = optimizedUpload.primary.contentType;
+    const uploadObjectPath = optimizedUpload.primary.objectPath;
 
     if (isCloudinaryConfigured()) {
       const uploadFolder =
@@ -2952,8 +2964,8 @@ router.post('/me/upload', requireAuth({ roles: ['VENDOR'] }), async (req, res) =
     for (const candidateBucket of bucketCandidates) {
       const { error: uploadError } = await db.storage
         .from(candidateBucket)
-        .upload(objectPath, buffer, {
-          contentType,
+        .upload(uploadObjectPath, uploadBody, {
+          contentType: uploadContentType,
           upsert: true,
         });
 
@@ -2972,12 +2984,21 @@ router.post('/me/upload', requireAuth({ roles: ['VENDOR'] }), async (req, res) =
       return res.status(500).json({ success: false, error: lastUploadError?.message || 'Upload failed' });
     }
 
-    const { data } = db.storage.from(uploadedBucket).getPublicUrl(objectPath);
+    const variants = await uploadImageVariants({
+      storage: db.storage,
+      bucket: uploadedBucket,
+      variants: optimizedUpload.variants,
+      upsert: true,
+    });
+
+    const { data } = db.storage.from(uploadedBucket).getPublicUrl(uploadObjectPath);
     return res.json({
       success: true,
       bucket: uploadedBucket,
-      path: objectPath,
+      path: uploadObjectPath,
       publicUrl: data?.publicUrl || null,
+      optimized: optimizedUpload.optimized,
+      variants,
     });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });
