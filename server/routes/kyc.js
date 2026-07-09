@@ -170,13 +170,45 @@ function extractStoragePath(url) {
   const m =
     url.match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/i) ||
     url.match(/\/storage\/v1\/object\/sign\/([^/]+)\/(.+?)(\?.*)?$/i) ||
-    url.match(/\/storage\/v1\/object\/([^/]+)\/(.+)$/i);
+    url.match(/\/storage\/v1\/object\/([^/]+)\/(.+)$/i) ||
+    url.match(/\/uploads\/([^/]+)\/(.+)$/i);
 
   if (!m) return null;
 
   const bucket = decodeURIComponent(m[1]);
-  const path = decodeURIComponent(m[2]).split('?')[0];
+  const path = normalizeObjectPath(decodeURIComponent(m[2]).split('?')[0], bucket);
   return { bucket, path };
+}
+
+function normalizeObjectPath(value, bucket = 'avatars') {
+  let path = String(value || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+    .replace(/\/+/g, '/');
+
+  const safeBucket = String(bucket || 'avatars').trim().replace(/^\/+|\/+$/g, '') || 'avatars';
+
+  if (path.toLowerCase().startsWith('uploads/')) {
+    const parts = path.split('/');
+    if (parts.length >= 3) {
+      path = parts.slice(2).join('/');
+    }
+  }
+
+  while (path.toLowerCase().startsWith(`uploads/${safeBucket.toLowerCase()}/`)) {
+    path = path.split('/').slice(2).join('/');
+  }
+
+  while (path.toLowerCase().startsWith(`${safeBucket.toLowerCase()}/uploads/${safeBucket.toLowerCase()}/`)) {
+    path = path.split('/').slice(3).join('/');
+  }
+
+  if (path.toLowerCase().startsWith(`${safeBucket.toLowerCase()}/`)) {
+    path = path.split('/').slice(1).join('/');
+  }
+
+  return path;
 }
 
 async function toWorkingUrl(value, defaultBucket = 'avatars', expiresSec = 60 * 60) {
@@ -192,7 +224,7 @@ async function toWorkingUrl(value, defaultBucket = 'avatars', expiresSec = 60 * 
       return value;
     }
 
-    const path = String(value).replace(/^\/+/, '');
+    const path = normalizeObjectPath(value, defaultBucket);
     const { data, error } = await db.storage.from(defaultBucket).createSignedUrl(path, expiresSec);
     if (!error && data?.signedUrl) return data.signedUrl;
 
