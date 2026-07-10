@@ -128,7 +128,7 @@ function renderSeoShell({ req, title, description, keywords = '', bodyHtml = '' 
   const fallbackHtml = `<main data-seo-fallback="true" style="font-family:Arial,sans-serif;max-width:1040px;margin:0 auto;padding:32px 20px;line-height:1.65;color:#111827">${bodyHtml}</main>`;
   let html = stripManagedHeadTags(loadIndexTemplate());
   html = html.includes('</head>') ? html.replace('</head>', `    ${seoHead}\n</head>`) : `${seoHead}${html}`;
-  const hydratedRoot = /<div\s+id=["']root["'][^>]*>[\s\S]*?<\/div>(?=\s*<script\b[^>]*type=["']module["'])/i;
+  const hydratedRoot = /<div\s+id=["']root["'][^>]*>[\s\S]*<\/div>(?=\s*(?:<script\b[^>]*>[\s\S]*?<\/script>\s*)*<\/body>)/i;
   if (hydratedRoot.test(html)) {
     html = html.replace(hydratedRoot, `<div id="root">${fallbackHtml}</div>`);
   } else if (/<div\s+id=["']root["'][^>]*>\s*<\/div>/i.test(html)) {
