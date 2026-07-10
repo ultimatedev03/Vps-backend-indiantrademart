@@ -2713,12 +2713,60 @@ router.get('/category/:type/:slug', cacheResponse('dir:category-detail', 1800, {
     }
     
     if (type === 'micro') {
-      const { data: micro, error } = await db.from('micro_categories').select(`
-          id, name, slug,
-          sub_categories (id, name, slug, head_categories (id, name, slug))
-        `).eq('slug', slug).order('updated_at', { ascending: false }).limit(1).maybeSingle();
-        
-      if (error || !micro) return res.json({ success: true, category: null });
+      const headSlug = String(req.query.headSlug || '').trim();
+      const subSlug = String(req.query.subSlug || '').trim();
+      const hierarchyFilters = ['mc.slug = ?', 'COALESCE(mc.is_active,1)=1'];
+      const hierarchyParams = [slug];
+
+      if (headSlug) {
+        hierarchyFilters.push('hc.slug = ?');
+        hierarchyParams.push(headSlug);
+      }
+      if (subSlug) {
+        hierarchyFilters.push('sc.slug = ?');
+        hierarchyParams.push(subSlug);
+      }
+
+      const rows = await mysqlQuery(
+        `
+          SELECT
+            mc.id,
+            mc.name,
+            mc.slug,
+            sc.id AS sub_id,
+            sc.name AS sub_name,
+            sc.slug AS sub_slug,
+            hc.id AS head_id,
+            hc.name AS head_name,
+            hc.slug AS head_slug
+          FROM micro_categories mc
+          LEFT JOIN sub_categories sc ON sc.id = mc.sub_category_id
+          LEFT JOIN head_categories hc ON hc.id = sc.head_category_id
+          WHERE ${hierarchyFilters.join(' AND ')}
+          ORDER BY COALESCE(mc.updated_at, mc.created_at) DESC, mc.id DESC
+          LIMIT 1
+        `,
+        hierarchyParams
+      );
+
+      const row = rows?.[0];
+      if (!row) return res.json({ success: true, category: null });
+
+      const micro = {
+        id: row.id,
+        name: row.name,
+        slug: row.slug,
+        sub_categories: row.sub_id ? {
+          id: row.sub_id,
+          name: row.sub_name,
+          slug: row.sub_slug,
+          head_categories: row.head_id ? {
+            id: row.head_id,
+            name: row.head_name,
+            slug: row.head_slug,
+          } : null,
+        } : null,
+      };
       
       let metaRes = await db.from('micro_category_meta').select('meta_tags, description, keywords').eq('micro_categories', micro.id).order('updated_at', { ascending: false }).limit(1).maybeSingle();
       if (metaRes.error) metaRes = await db.from('micro_category_meta').select('meta_tags, description').eq('micro_category_id', micro.id).order('updated_at', { ascending: false }).limit(1).maybeSingle();

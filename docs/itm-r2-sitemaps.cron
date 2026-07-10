@@ -1,0 +1,6 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Regenerate a complete static snapshot every six hours. flock prevents overlap;
+# sitemap-index.xml switches only after every new shard has uploaded successfully.
+15 */6 * * * root if [ -f /opt/indiantrademart-backend/.env.r2-sitemap ]; then flock -n /var/lock/itm-r2-sitemaps.lock bash -lc 'set -a; source /opt/indiantrademart-backend/.env.r2-sitemap; set +a; export SITEMAP_CATEGORY_SCOPE=all; cd /opt/indiantrademart-backend && nice -n 10 npm run seo:sitemap:r2:publish' >> /var/log/itm-r2-sitemaps.log 2>&1; fi

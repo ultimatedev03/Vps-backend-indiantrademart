@@ -1,10 +1,11 @@
 import dotenv from 'dotenv';
-import fs from 'fs';
-import fsp from 'fs/promises';
-import os from 'os';
-import path from 'path';
 import zlib from 'zlib';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import {
+  DeleteObjectsCommand,
+  ListObjectsV2Command,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3';
 import { getMysqlPool, mysqlQuery } from '../lib/mysqlPool.js';
 
 dotenv.config();
@@ -22,11 +23,18 @@ const PREFIX = String(process.env.R2_SITEMAP_PREFIX || process.env.SITEMAP_R2_PR
 const URL_LIMIT = clampInt(process.env.SITEMAP_R2_URL_LIMIT, 50000, 1, 50000);
 const QUERY_LIMIT = clampInt(process.env.SITEMAP_R2_QUERY_LIMIT, 2000, 50, 10000);
 const MAX_URLS = clampInt(process.env.SITEMAP_R2_MAX_URLS, Number.MAX_SAFE_INTEGER, 1, Number.MAX_SAFE_INTEGER);
+const GZIP_LEVEL = clampInt(process.env.SITEMAP_R2_GZIP_LEVEL, 6, 1, 9);
+const RETAIN_SNAPSHOTS = clampInt(process.env.SITEMAP_R2_RETAIN_SNAPSHOTS, 4, 2, 30);
 const CATEGORY_SCOPE = String(process.env.SITEMAP_CATEGORY_SCOPE || 'all').trim().toLowerCase();
 const DRY_RUN = String(process.env.SITEMAP_R2_DRY_RUN || '').trim() === '1' || String(process.env.DRY_RUN || '').trim() === '1';
-const KEEP_LOCAL = String(process.env.SITEMAP_R2_KEEP_LOCAL || '').trim() === '1';
-const TMP_ROOT = process.env.SITEMAP_R2_TMP_DIR || path.join(os.tmpdir(), 'itm-r2-sitemaps');
 const GENERATED_AT = new Date().toISOString();
+const SNAPSHOT_ID = sanitizeSegment(
+  process.env.SITEMAP_R2_SNAPSHOT_ID || GENERATED_AT.replace(/[-:.TZ]/g, '').slice(0, 14),
+  'snapshot'
+);
+const SNAPSHOT_DIR = `snapshots/${SNAPSHOT_ID}`;
+const MAX_XML_BYTES = 50 * 1024 * 1024;
+const MAX_INDEX_ENTRIES = 50000;
 const PRODUCT_ACTIVE_WHERE = "LOWER(COALESCE(p.status,'active')) NOT IN ('deleted','inactive','rejected')";
 const VENDOR_ACTIVE_WHERE = "COALESCE(v.is_active,1)=1 AND LOWER(COALESCE(v.status,'active')) NOT IN ('deleted','inactive','rejected','terminated')";
 
@@ -34,6 +42,15 @@ function clampInt(value, fallback, min, max) {
   const parsed = Number.parseInt(String(value || ''), 10);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(max, Math.max(min, parsed));
+}
+
+function sanitizeSegment(value = '', fallback = 'sitemap') {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '') || fallback;
 }
 
 const slugify = (value = '') =>
@@ -45,6 +62,11 @@ const slugify = (value = '') =>
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '') || 'india';
 
+const optionalSlug = (value = '') => {
+  const clean = String(value || '').trim();
+  return clean ? slugify(clean) : '';
+};
+
 const escapeXml = (value = '') =>
   String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -54,10 +76,17 @@ const escapeXml = (value = '') =>
     .replace(/'/g, '&apos;');
 
 const dateOnly = (value) => {
-  if (!value) return new Date().toISOString().slice(0, 10);
+  if (!value) return GENERATED_AT.slice(0, 10);
   const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return new Date().toISOString().slice(0, 10);
+  if (Number.isNaN(parsed.getTime())) return GENERATED_AT.slice(0, 10);
   return parsed.toISOString().slice(0, 10);
+};
+
+const newestDate = (...values) => {
+  const timestamps = values
+    .map((value) => new Date(value || 0).getTime())
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return timestamps.length ? new Date(Math.max(...timestamps)).toISOString() : GENERATED_AT;
 };
 
 const absoluteUrl = (urlPath = '/') => {
@@ -68,12 +97,17 @@ const absoluteUrl = (urlPath = '/') => {
 const objectKey = (fileName) => (PREFIX ? `${PREFIX}/${fileName}` : fileName);
 const publicUrlForKey = (key) => `${PUBLIC_BASE_URL}/${key.split('/').map(encodeURIComponent).join('/')}`;
 
-const renderUrlEntry = ({ loc, lastmod, changefreq, priority }) => {
-  const url = loc.startsWith('http') ? loc : absoluteUrl(loc);
-  const freq = changefreq ? `\n    <changefreq>${escapeXml(changefreq)}</changefreq>` : '';
-  const rank = priority ? `\n    <priority>${escapeXml(priority)}</priority>` : '';
-  return `  <url>\n    <loc>${escapeXml(url)}</loc>\n    <lastmod>${escapeXml(dateOnly(lastmod))}</lastmod>${freq}${rank}\n  </url>\n`;
+const renderUrlEntry = ({ loc, lastmod }) => {
+  const url = String(loc || '').startsWith('http') ? loc : absoluteUrl(loc);
+  return `  <url>\n    <loc>${escapeXml(url)}</loc>\n    <lastmod>${escapeXml(dateOnly(lastmod))}</lastmod>\n  </url>\n`;
 };
+
+const renderUrlset = (entries) => (
+  `<?xml version="1.0" encoding="UTF-8"?>\n` +
+  `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
+  entries.join('') +
+  `</urlset>\n`
+);
 
 const renderIndex = (entries) => {
   const body = entries.map((entry) =>
@@ -95,92 +129,201 @@ function createS3Client() {
   });
 }
 
-class SitemapPublisher {
+class StaticSitemapPublisher {
   constructor(s3) {
     this.s3 = s3;
-    this.shardNo = 0;
-    this.urlsInShard = 0;
+    this.currentFamily = 'general';
+    this.familyShardNo = 0;
+    this.currentEntries = [];
     this.totalUrls = 0;
     this.indexEntries = [];
-    this.current = null;
-  }
-
-  async add(entry) {
-    if (this.totalUrls >= MAX_URLS) return false;
-    if (!this.current || this.urlsInShard >= URL_LIMIT) {
-      await this.finishShard();
-      await this.startShard();
-    }
-
-    this.current.gzip.write(renderUrlEntry(entry));
-    this.urlsInShard += 1;
-    this.totalUrls += 1;
-    return this.totalUrls < MAX_URLS;
+    this.familyStats = {};
   }
 
   get isFull() {
     return this.totalUrls >= MAX_URLS;
   }
 
-  async startShard() {
-    this.shardNo += 1;
-    this.urlsInShard = 0;
-    const fileName = `sitemap-${String(this.shardNo).padStart(5, '0')}.xml.gz`;
-    const filePath = path.join(TMP_ROOT, fileName);
-    const fileStream = fs.createWriteStream(filePath);
-    const gzip = zlib.createGzip({ level: 9 });
-    gzip.pipe(fileStream);
-    const done = new Promise((resolve, reject) => {
-      fileStream.on('finish', resolve);
-      fileStream.on('error', reject);
-      gzip.on('error', reject);
-    });
-    gzip.write('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n');
-    this.current = { fileName, filePath, gzip, done };
+  async startFamily(name) {
+    await this.finishShard();
+    this.currentFamily = sanitizeSegment(name, 'general');
+    this.familyShardNo = 0;
+    if (!this.familyStats[this.currentFamily]) {
+      this.familyStats[this.currentFamily] = { urls: 0, shards: 0 };
+    }
+  }
+
+  async add(entry) {
+    if (this.isFull) return false;
+    if (!entry?.loc) return true;
+    if (this.currentEntries.length >= URL_LIMIT) await this.finishShard();
+
+    this.currentEntries.push(renderUrlEntry(entry));
+    this.totalUrls += 1;
+    this.familyStats[this.currentFamily].urls += 1;
+    return !this.isFull;
   }
 
   async finishShard() {
-    if (!this.current) return;
-    const shard = this.current;
-    this.current = null;
-    shard.gzip.end('</urlset>\n');
-    await shard.done;
-    const key = objectKey(shard.fileName);
-    await this.uploadFile(key, shard.filePath, {
+    if (!this.currentEntries.length) return;
+
+    this.familyShardNo += 1;
+    const fileName = `${this.currentFamily}-${String(this.familyShardNo).padStart(5, '0')}.xml.gz`;
+    const key = objectKey(`${SNAPSHOT_DIR}/${fileName}`);
+    const xml = renderUrlset(this.currentEntries);
+    const xmlBytes = Buffer.byteLength(xml, 'utf8');
+    const urlCount = this.currentEntries.length;
+    this.currentEntries = [];
+
+    if (xmlBytes > MAX_XML_BYTES) {
+      throw new Error(`${fileName} exceeds the 50 MB uncompressed sitemap limit`);
+    }
+
+    const compressed = zlib.gzipSync(Buffer.from(xml, 'utf8'), { level: GZIP_LEVEL });
+    await this.uploadBuffer(key, compressed, {
       ContentType: 'application/x-gzip',
-      CacheControl: 'public, max-age=86400, immutable',
+      CacheControl: 'public, max-age=31536000, immutable',
     });
+
     this.indexEntries.push({ loc: publicUrlForKey(key), lastmod: GENERATED_AT });
-    if (!KEEP_LOCAL && !DRY_RUN) await fsp.rm(shard.filePath, { force: true });
-    console.log(`${shard.fileName}: ${this.urlsInShard} urls`);
+    this.familyStats[this.currentFamily].shards += 1;
+    console.log(`${SNAPSHOT_ID}/${fileName}: ${urlCount} urls, ${compressed.length} compressed bytes`);
   }
 
-  async uploadFile(key, filePath, metadata = {}) {
+  async uploadBuffer(key, body, metadata = {}) {
     if (DRY_RUN || !this.s3) return;
     await this.s3.send(new PutObjectCommand({
       Bucket: BUCKET,
       Key: key,
-      Body: fs.createReadStream(filePath),
+      Body: body,
       ...metadata,
     }));
   }
 
-  async publishIndex() {
+  async cleanupOldSnapshots() {
+    if (DRY_RUN || !this.s3) return;
+    const snapshotsPrefix = objectKey('snapshots/');
+    const keysBySnapshot = new Map();
+    let continuationToken;
+
+    do {
+      const page = await this.s3.send(new ListObjectsV2Command({
+        Bucket: BUCKET,
+        Prefix: snapshotsPrefix,
+        ContinuationToken: continuationToken,
+      }));
+      for (const object of page.Contents || []) {
+        const key = String(object.Key || '');
+        const relative = key.slice(snapshotsPrefix.length);
+        const snapshotId = relative.split('/')[0];
+        if (!snapshotId || !relative.includes('/')) continue;
+        if (!keysBySnapshot.has(snapshotId)) keysBySnapshot.set(snapshotId, []);
+        keysBySnapshot.get(snapshotId).push(key);
+      }
+      continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (continuationToken);
+
+    const snapshotIds = Array.from(keysBySnapshot.keys()).sort().reverse();
+    const keep = new Set(snapshotIds.slice(0, RETAIN_SNAPSHOTS));
+    keep.add(SNAPSHOT_ID);
+    const staleKeys = snapshotIds
+      .filter((snapshotId) => !keep.has(snapshotId))
+      .flatMap((snapshotId) => keysBySnapshot.get(snapshotId) || []);
+
+    for (let offset = 0; offset < staleKeys.length; offset += 1000) {
+      const batch = staleKeys.slice(offset, offset + 1000);
+      await this.s3.send(new DeleteObjectsCommand({
+        Bucket: BUCKET,
+        Delete: {
+          Objects: batch.map((Key) => ({ Key })),
+          Quiet: true,
+        },
+      }));
+    }
+
+    if (staleKeys.length) {
+      console.log(`cleanup: deleted ${staleKeys.length} objects from old snapshots`);
+    }
+  }
+
+  async publish() {
     await this.finishShard();
-    const xml = renderIndex(this.indexEntries);
-    const indexPath = path.join(TMP_ROOT, 'sitemap-index.xml');
-    await fsp.writeFile(indexPath, xml, 'utf8');
-    await this.uploadFile(objectKey('sitemap-index.xml'), indexPath, {
+    if (!this.indexEntries.length) throw new Error('No sitemap URLs were generated');
+    if (this.indexEntries.length > MAX_INDEX_ENTRIES) {
+      throw new Error(`Sitemap index has ${this.indexEntries.length} entries; maximum is ${MAX_INDEX_ENTRIES}`);
+    }
+
+    const indexXml = renderIndex(this.indexEntries);
+    const manifest = {
+      version: 1,
+      mode: 'static-r2-snapshot',
+      snapshotId: SNAPSHOT_ID,
+      generatedAt: GENERATED_AT,
+      siteUrl: SITE_URL,
+      urlLimit: URL_LIMIT,
+      totalUrls: this.totalUrls,
+      totalShards: this.indexEntries.length,
+      families: this.familyStats,
+    };
+    const snapshotIndexKey = objectKey(`${SNAPSHOT_DIR}/sitemap-index.xml`);
+    const snapshotManifestKey = objectKey(`${SNAPSHOT_DIR}/manifest.json`);
+
+    await this.uploadBuffer(snapshotIndexKey, Buffer.from(indexXml, 'utf8'), {
+      ContentType: 'application/xml; charset=utf-8',
+      CacheControl: 'public, max-age=31536000, immutable',
+    });
+    await this.uploadBuffer(snapshotManifestKey, Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8'), {
+      ContentType: 'application/json; charset=utf-8',
+      CacheControl: 'public, max-age=31536000, immutable',
+    });
+    // Publish the stable master last. Until this succeeds, crawlers keep using the previous complete snapshot.
+    await this.uploadBuffer(objectKey('sitemap-index.xml'), Buffer.from(indexXml, 'utf8'), {
       ContentType: 'application/xml; charset=utf-8',
       CacheControl: 'public, max-age=300, must-revalidate',
     });
-    console.log(`sitemap-index.xml: ${this.indexEntries.length} sitemap files, ${this.totalUrls} urls`);
-    console.log(`submit: ${publicUrlForKey(objectKey('sitemap-index.xml'))}`);
+    await this.uploadBuffer(objectKey('sitemap-manifest.json'), Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8'), {
+      ContentType: 'application/json; charset=utf-8',
+      CacheControl: 'public, max-age=300, must-revalidate',
+    });
+
+    try {
+      await this.cleanupOldSnapshots();
+    } catch (error) {
+      console.warn(`cleanup warning: ${error?.message || error}`);
+    }
+
+    console.log(`sitemap-index.xml: snapshot=${SNAPSHOT_ID}, files=${this.indexEntries.length}, urls=${this.totalUrls}`);
+    console.log(`manifest: ${publicUrlForKey(objectKey('sitemap-manifest.json'))}`);
+    console.log(`submit: ${SITE_URL}/sitemap.xml`);
   }
 }
 
+async function loadPagedRows(query) {
+  const rows = [];
+  let offset = 0;
+  for (;;) {
+    const page = await mysqlQuery(`${query}\nLIMIT ${QUERY_LIMIT} OFFSET ${offset}`);
+    if (!page.length) break;
+    rows.push(...page);
+    offset += page.length;
+  }
+  return rows;
+}
+
+const uniqueRows = (rows, keyFor) => {
+  const seen = new Set();
+  const result = [];
+  for (const row of rows) {
+    const key = String(keyFor(row) || '').trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(row);
+  }
+  return result;
+};
+
 async function loadLocations() {
-  return mysqlQuery(`
+  const rows = await mysqlQuery(`
     SELECT
       COALESCE(s.name,'') AS state_name,
       COALESCE(NULLIF(s.slug,''), s.name) AS state_slug,
@@ -199,53 +342,37 @@ async function loadLocations() {
     WHERE COALESCE(c.is_active,1)=1 AND COALESCE(s.is_active,1)=1
     ORDER BY s.name, d.name, c.name
   `);
+  return uniqueRows(rows, (row) => locationPath(row));
 }
 
-const searchUrl = (baseSlug, loc) => {
+const locationPath = (loc) => {
   const state = slugify(loc.state_slug || loc.state_name);
   const district = slugify(loc.district_slug || loc.district_name);
   const city = slugify(loc.city_slug || loc.city_name);
-  if (district && district !== city && district !== state) {
-    return `/directory/search/${baseSlug}/${state}/${district}/${city}`;
-  }
-  return `/directory/search/${baseSlug}/${state}/${city}`;
+  return district && district !== city && district !== state
+    ? `${state}/${district}/${city}`
+    : `${state}/${city}`;
 };
 
-async function forEachPage(query, mapper, publisher) {
-  let offset = 0;
-  for (;;) {
-    if (publisher.isFull) return false;
-    const rows = await mysqlQuery(`${query}\nLIMIT ${QUERY_LIMIT} OFFSET ${offset}`);
-    if (!rows.length) break;
-    for (const row of rows) {
-      const keepGoing = await publisher.add(mapper(row));
-      if (!keepGoing) return false;
-    }
-    offset += rows.length;
+const searchUrl = (baseSlug, loc) => `/directory/search/${encodeURIComponent(baseSlug)}/${locationPath(loc)}`;
+
+async function addRows(publisher, rows, mapper) {
+  for (const row of rows) {
+    if (!(await publisher.add(mapper(row)))) return false;
   }
   return true;
 }
 
-async function forEachCrossLocation({ entityQuery, locations, makeBaseSlug, makeLastmod, priority, publisher }) {
-  let offset = 0;
-  for (;;) {
-    if (publisher.isFull) return false;
-    const rows = await mysqlQuery(`${entityQuery}\nLIMIT ${QUERY_LIMIT} OFFSET ${offset}`);
-    if (!rows.length) break;
-    for (const row of rows) {
-      const baseSlug = makeBaseSlug(row);
-      if (!baseSlug) continue;
-      for (const loc of locations) {
-        const keepGoing = await publisher.add({
-          loc: searchUrl(baseSlug, loc),
-          lastmod: makeLastmod(row, loc),
-          changefreq: 'weekly',
-          priority,
-        });
-        if (!keepGoing) return false;
-      }
+async function addCrossLocation({ publisher, entities, locations, makeLoc }) {
+  for (const entity of entities) {
+    for (const loc of locations) {
+      const url = makeLoc(entity, loc);
+      if (!url) continue;
+      if (!(await publisher.add({
+        loc: url,
+        lastmod: newestDate(entity.updated_at, loc.updated_at),
+      }))) return false;
     }
-    offset += rows.length;
   }
   return true;
 }
@@ -266,33 +393,77 @@ const vendorQuery = `
   WHERE ${VENDOR_ACTIVE_WHERE}
   ORDER BY COALESCE(v.updated_at, v.created_at) DESC, v.id DESC`;
 
-const categoryQuery = `
+const microCategoryQuery = `
   SELECT mc.id, COALESCE(NULLIF(mc.name,''), 'category') AS name,
     COALESCE(NULLIF(mc.slug,''), mc.name, mc.id) AS slug,
-    COALESCE(mc.updated_at, mc.created_at) AS updated_at
+    COALESCE(mc.updated_at, mc.created_at) AS updated_at,
+    COALESCE(NULLIF(sc.slug,''), sc.name, sc.id) AS sub_slug,
+    COALESCE(NULLIF(hc.slug,''), hc.name, hc.id) AS head_slug,
+    'micro' AS category_level
   FROM micro_categories mc
+  LEFT JOIN sub_categories sc ON sc.id = mc.sub_category_id
+  LEFT JOIN head_categories hc ON hc.id = sc.head_category_id
   ${CATEGORY_SCOPE === 'all' ? '' : `JOIN (SELECT DISTINCT micro_category_id FROM products p WHERE ${PRODUCT_ACTIVE_WHERE} AND p.micro_category_id IS NOT NULL) used ON used.micro_category_id = mc.id`}
   WHERE COALESCE(mc.is_active,1)=1
   ORDER BY COALESCE(mc.updated_at, mc.created_at) DESC, mc.id DESC`;
 
-const vendorServiceQuery = `
-  SELECT p.vendor_id, p.micro_category_id,
-    COALESCE(NULLIF(mc.name,''), 'service') AS service_name,
-    COALESCE(NULLIF(mc.slug,''), mc.name, mc.id) AS service_slug,
-    GREATEST(
-      COALESCE(MAX(p.updated_at), MAX(p.created_at), '1970-01-01'),
-      COALESCE(v.updated_at, v.created_at, '1970-01-01'),
-      COALESCE(mc.updated_at, mc.created_at, '1970-01-01')
-    ) AS updated_at
-  FROM products p
-  JOIN vendors v ON v.id = p.vendor_id
-  JOIN micro_categories mc ON mc.id = p.micro_category_id
-  WHERE ${PRODUCT_ACTIVE_WHERE}
-    AND ${VENDOR_ACTIVE_WHERE}
-    AND p.micro_category_id IS NOT NULL
-    AND COALESCE(mc.is_active,1)=1
-  GROUP BY p.vendor_id, p.micro_category_id, mc.name, mc.slug, mc.id, mc.updated_at, mc.created_at, v.updated_at, v.created_at
-  ORDER BY updated_at DESC, p.vendor_id DESC, p.micro_category_id DESC`;
+const subCategoryQuery = `
+  SELECT sc.id, COALESCE(NULLIF(sc.name,''), 'category') AS name,
+    COALESCE(NULLIF(sc.slug,''), sc.name, sc.id) AS slug,
+    COALESCE(sc.updated_at, sc.created_at) AS updated_at,
+    '' AS sub_slug,
+    COALESCE(NULLIF(hc.slug,''), hc.name, hc.id) AS head_slug,
+    'sub' AS category_level
+  FROM sub_categories sc
+  LEFT JOIN head_categories hc ON hc.id = sc.head_category_id
+  WHERE COALESCE(sc.is_active,1)=1
+  ORDER BY COALESCE(sc.updated_at, sc.created_at) DESC, sc.id DESC`;
+
+const headCategoryQuery = `
+  SELECT hc.id, COALESCE(NULLIF(hc.name,''), 'category') AS name,
+    COALESCE(NULLIF(hc.slug,''), hc.name, hc.id) AS slug,
+    COALESCE(hc.updated_at, hc.created_at) AS updated_at,
+    '' AS sub_slug,
+    '' AS head_slug,
+    'head' AS category_level
+  FROM head_categories hc
+  WHERE COALESCE(hc.is_active,1)=1
+  ORDER BY COALESCE(hc.updated_at, hc.created_at) DESC, hc.id DESC`;
+
+const staticPages = [
+  '/',
+  '/directory',
+  '/products',
+  '/pricing',
+  '/become-a-vendor',
+  '/about-us',
+  '/contact',
+  '/help',
+  '/privacy-policy',
+  '/terms-of-service',
+];
+
+const categoryBasePath = (row) => {
+  const slug = slugify(row.slug || row.name || row.id);
+  const headSlug = optionalSlug(row.head_slug);
+  const subSlug = optionalSlug(row.sub_slug);
+  if (row.category_level === 'micro' && headSlug && subSlug) {
+    return `/directory/${headSlug}/${subSlug}/${slug}`;
+  }
+  if (row.category_level === 'sub' && headSlug) {
+    return `/directory/${headSlug}/${slug}`;
+  }
+  if (row.category_level === 'head') return `/directory/${slug}`;
+  return `/directory/search/${encodeURIComponent(slug)}`;
+};
+
+const categoryLocationUrl = (row, loc) => {
+  const basePath = categoryBasePath(row);
+  if (row.category_level === 'micro' && !basePath.startsWith('/directory/search/')) {
+    return `${basePath}/${locationPath(loc)}`;
+  }
+  return searchUrl(slugify(row.slug || row.name || row.id), loc);
+};
 
 async function main() {
   if (!PUBLIC_BASE_URL) throw new Error('R2_SITEMAP_PUBLIC_BASE_URL is required, for example https://sitemaps.indiantrademart.com');
@@ -300,108 +471,107 @@ async function main() {
     throw new Error('R2_ENDPOINT/R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY are required');
   }
 
-  await fsp.mkdir(TMP_ROOT, { recursive: true });
   const s3 = createS3Client();
-  const publisher = new SitemapPublisher(s3);
-  const locations = await loadLocations();
-  const finish = async () => {
-    await publisher.publishIndex();
+  const publisher = new StaticSitemapPublisher(s3);
+
+  try {
+    const [locations, productRows, vendorRows, microRows, subRows, headRows] = await Promise.all([
+      loadLocations(),
+      loadPagedRows(productQuery),
+      loadPagedRows(vendorQuery),
+      loadPagedRows(microCategoryQuery),
+      loadPagedRows(subCategoryQuery),
+      loadPagedRows(headCategoryQuery),
+    ]);
+
+    const products = uniqueRows(productRows, (row) => slugify(row.slug || row.name || row.id));
+    const vendors = uniqueRows(vendorRows, (row) => slugify(row.slug || row.name || row.id));
+    const categories = uniqueRows([...microRows, ...subRows, ...headRows], categoryBasePath);
+
+    console.log(JSON.stringify({
+      mode: DRY_RUN ? 'dry-run' : 'publish',
+      snapshotId: SNAPSHOT_ID,
+      urlLimit: URL_LIMIT,
+      maxUrls: MAX_URLS === Number.MAX_SAFE_INTEGER ? null : MAX_URLS,
+      locations: locations.length,
+      products: products.length,
+      vendors: vendors.length,
+      categories: categories.length,
+    }));
+
+    await publisher.startFamily('static');
+    await addRows(publisher, staticPages, (page) => ({ loc: page, lastmod: GENERATED_AT }));
+
+    if (!publisher.isFull) {
+      await publisher.startFamily('products');
+      await addRows(publisher, products, (row) => ({
+        loc: `/product/${encodeURIComponent(slugify(row.slug || row.name || row.id))}`,
+        lastmod: row.updated_at,
+      }));
+    }
+
+    if (!publisher.isFull) {
+      await publisher.startFamily('vendors');
+      await addRows(publisher, vendors, (row) => ({
+        loc: `/directory/vendor/${encodeURIComponent(slugify(row.slug || row.name || row.id))}`,
+        lastmod: row.updated_at,
+      }));
+    }
+
+    if (!publisher.isFull) {
+      await publisher.startFamily('categories');
+      await addRows(publisher, categories, (row) => ({
+        loc: categoryBasePath(row),
+        lastmod: row.updated_at,
+      }));
+    }
+
+    if (!publisher.isFull) {
+      await publisher.startFamily('locations');
+      await addRows(publisher, locations, (loc) => ({
+        loc: searchUrl('all', loc),
+        lastmod: loc.updated_at,
+      }));
+    }
+
+    // Category and service landing pages are generated first because they are the primary SEO inventory.
+    if (!publisher.isFull) {
+      await publisher.startFamily('category-locations');
+      await addCrossLocation({
+        publisher,
+        entities: categories,
+        locations,
+        makeLoc: categoryLocationUrl,
+      });
+    }
+
+    if (!publisher.isFull) {
+      await publisher.startFamily('product-locations');
+      await addCrossLocation({
+        publisher,
+        entities: products,
+        locations,
+        makeLoc: (row, loc) => searchUrl(slugify(row.slug || row.name || row.id), loc),
+      });
+    }
+
+    if (!publisher.isFull) {
+      await publisher.startFamily('vendor-locations');
+      await addCrossLocation({
+        publisher,
+        entities: vendors,
+        locations,
+        makeLoc: (row, loc) => searchUrl(slugify(row.slug || row.name || row.id), loc),
+      });
+    }
+
+    await publisher.publish();
+  } finally {
     await getMysqlPool().end();
-  };
-
-  for (const page of [
-    '/',
-    '/directory',
-    '/products',
-    '/pricing',
-    '/become-a-vendor',
-    '/about-us',
-    '/contact',
-    '/help',
-    '/privacy-policy',
-    '/terms-of-service',
-  ]) {
-    if (!(await publisher.add({ loc: page, lastmod: GENERATED_AT, changefreq: 'daily', priority: page === '/' ? '1.0' : '0.7' }))) break;
   }
-
-  await forEachPage(productQuery, (row) => ({
-    loc: `/product/${encodeURIComponent(slugify(row.slug || row.name || row.id))}`,
-    lastmod: row.updated_at,
-    changefreq: 'weekly',
-    priority: '0.85',
-  }), publisher);
-
-  await forEachPage(vendorQuery, (row) => ({
-    loc: `/directory/vendor/${encodeURIComponent(slugify(row.slug || row.name || row.id))}`,
-    lastmod: row.updated_at,
-    changefreq: 'weekly',
-    priority: '0.8',
-  }), publisher);
-
-  await forEachPage(categoryQuery, (row) => ({
-    loc: `/directory/search/${encodeURIComponent(slugify(row.slug || row.name || row.id))}`,
-    lastmod: row.updated_at,
-    changefreq: 'weekly',
-    priority: '0.82',
-  }), publisher);
-
-  for (const loc of locations) {
-    if (!(await publisher.add({ loc: searchUrl('all', loc), lastmod: loc.updated_at, changefreq: 'weekly', priority: '0.55' }))) break;
-  }
-
-  if (publisher.isFull) return finish();
-
-  await forEachCrossLocation({
-    entityQuery: productQuery,
-    locations,
-    makeBaseSlug: (row) => slugify(row.slug || row.name || row.id),
-    makeLastmod: (row, loc) => row.updated_at || loc.updated_at,
-    priority: '0.72',
-    publisher,
-  });
-
-  if (publisher.isFull) return finish();
-
-  await forEachCrossLocation({
-    entityQuery: vendorQuery,
-    locations,
-    makeBaseSlug: (row) => slugify(row.slug || row.name || row.id),
-    makeLastmod: (row, loc) => row.updated_at || loc.updated_at,
-    priority: '0.66',
-    publisher,
-  });
-
-  if (publisher.isFull) return finish();
-
-  await forEachCrossLocation({
-    entityQuery: vendorServiceQuery,
-    locations,
-    makeBaseSlug: (row) => slugify(row.service_slug || row.service_name),
-    makeLastmod: (row, loc) => row.updated_at || loc.updated_at,
-    priority: '0.7',
-    publisher,
-  });
-
-  if (publisher.isFull) return finish();
-
-  await forEachCrossLocation({
-    entityQuery: categoryQuery,
-    locations,
-    makeBaseSlug: (row) => slugify(row.slug || row.name || row.id),
-    makeLastmod: (row, loc) => row.updated_at || loc.updated_at,
-    priority: '0.75',
-    publisher,
-  });
-
-  await finish();
 }
 
-main().catch(async (error) => {
+main().catch((error) => {
   console.error(error);
-  try {
-    await getMysqlPool().end();
-  } catch {
-    // ignore cleanup failure
-  }
   process.exitCode = 1;
 });

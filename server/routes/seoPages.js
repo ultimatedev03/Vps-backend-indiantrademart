@@ -35,6 +35,48 @@ const slugToTitle = (value = '') =>
 
 const slugToSearchText = (value = '') => String(value || '').replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
 
+const cleanText = (value = '') => String(value || '')
+  .replace(/<[^>]*>/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const truncateText = (value = '', limit = 160) => {
+  const text = cleanText(value);
+  if (text.length <= limit) return text;
+  return `${text.slice(0, Math.max(0, limit - 1)).trim()}…`;
+};
+
+const buildKeywords = (...values) => {
+  const seen = new Set();
+  const keywords = [];
+  values.filter(Boolean).forEach((value) => {
+    String(value).split(',').forEach((part) => {
+      const keyword = cleanText(part);
+      const key = keyword.toLowerCase();
+      if (!keyword || seen.has(key)) return;
+      seen.add(key);
+      keywords.push(keyword);
+    });
+  });
+  return keywords.slice(0, 24).join(', ');
+};
+
+const buildLocationSeoTitle = (topic = '', location = '') => {
+  const suffix = ' | IndianTradeMart';
+  const geo = location ? ` in ${location}` : '';
+  let cleanTopic = cleanText(topic)
+    .replace(/\s*\|\s*IndianTradeMart.*$/i, '')
+    .trim();
+  if (!/\b(supplier|manufacturer|service provider)s?\b/i.test(cleanTopic)) {
+    cleanTopic = `${cleanTopic} Suppliers`.trim();
+  }
+  const available = Math.max(18, 60 - suffix.length - geo.length);
+  const fittedTopic = cleanTopic.length > available
+    ? cleanTopic.slice(0, available).replace(/\s+\S*$/, '').trim()
+    : cleanTopic;
+  return `${fittedTopic || 'B2B Suppliers'}${geo}${suffix}`;
+};
+
 const absoluteUrl = (req) => `${SITE_URL}${String(req.path || '/').startsWith('/') ? req.path : `/${req.path}`}`;
 
 function loadIndexTemplate() {
@@ -168,30 +210,100 @@ async function findVendor(slug) {
   return rows?.[0] || null;
 }
 
-async function findService(slug) {
-  const searchText = slugToSearchText(slug);
-  const rows = await mysqlQuery(
+async function findService(slug, hierarchy = {}) {
+  const headSlug = String(hierarchy.head || '').trim();
+  const subSlug = String(hierarchy.sub || '').trim();
+  const microFilters = ['COALESCE(mc.is_active,1)=1', 'mc.slug = ?'];
+  const microParams = [slugToTitle(slug), slug, slug];
+
+  if (headSlug) {
+    microFilters.push('hc.slug = ?');
+    microParams.push(headSlug);
+  }
+  if (subSlug) {
+    microFilters.push('sc.slug = ?');
+    microParams.push(subSlug);
+  }
+
+  const microRows = await mysqlQuery(
     `
       SELECT
         COALESCE(NULLIF(mc.name,''), ?) AS name,
         COALESCE(NULLIF(mc.slug,''), ?) AS slug,
         COALESCE(NULLIF(sc.name,''), '') AS sub_name,
-        COALESCE(NULLIF(hc.name,''), '') AS head_name
+        COALESCE(NULLIF(hc.name,''), '') AS head_name,
+        COALESCE(NULLIF(meta.meta_tags,''), '') AS seo_title,
+        COALESCE(NULLIF(meta.description,''), '') AS meta_description,
+        COALESCE(NULLIF(meta.keywords,''), '') AS meta_keywords,
+        'micro' AS category_level
       FROM micro_categories mc
       LEFT JOIN sub_categories sc ON sc.id = mc.sub_category_id
       LEFT JOIN head_categories hc ON hc.id = sc.head_category_id
-      WHERE COALESCE(mc.is_active,1)=1
-        AND (
-          mc.slug = ?
-          OR LOWER(COALESCE(mc.name,'')) = ?
-          OR LOWER(COALESCE(mc.name,'')) LIKE ?
-        )
+      LEFT JOIN micro_category_meta meta ON meta.id = (
+        SELECT latest.id
+        FROM micro_category_meta latest
+        WHERE latest.micro_categories = mc.id
+        ORDER BY COALESCE(latest.updated_at, latest.created_at) DESC, latest.id DESC
+        LIMIT 1
+      )
+      WHERE ${microFilters.join('\n        AND ')}
       ORDER BY mc.id DESC
       LIMIT 1
     `,
-    [slugToTitle(slug), slug, slug, searchText, `%${searchText}%`]
+    microParams
   );
-  return rows?.[0] || { name: slugToTitle(slug), slug, sub_name: '', head_name: '' };
+  if (microRows?.[0]) return microRows[0];
+
+  const subRows = await mysqlQuery(
+    `
+      SELECT
+        COALESCE(NULLIF(sc.name,''), ?) AS name,
+        COALESCE(NULLIF(sc.slug,''), ?) AS slug,
+        COALESCE(NULLIF(sc.name,''), '') AS sub_name,
+        COALESCE(NULLIF(hc.name,''), '') AS head_name,
+        COALESCE(NULLIF(sc.meta_tags,''), '') AS seo_title,
+        COALESCE(NULLIF(sc.description,''), '') AS meta_description,
+        COALESCE(NULLIF(sc.keywords,''), '') AS meta_keywords,
+        'sub' AS category_level
+      FROM sub_categories sc
+      LEFT JOIN head_categories hc ON hc.id = sc.head_category_id
+      WHERE COALESCE(sc.is_active,1)=1 AND sc.slug = ?
+      ORDER BY sc.id DESC
+      LIMIT 1
+    `,
+    [slugToTitle(slug), slug, slug]
+  );
+  if (subRows?.[0]) return subRows[0];
+
+  const headRows = await mysqlQuery(
+    `
+      SELECT
+        COALESCE(NULLIF(hc.name,''), ?) AS name,
+        COALESCE(NULLIF(hc.slug,''), ?) AS slug,
+        '' AS sub_name,
+        COALESCE(NULLIF(hc.name,''), '') AS head_name,
+        COALESCE(NULLIF(hc.meta_tags,''), '') AS seo_title,
+        COALESCE(NULLIF(hc.description,''), '') AS meta_description,
+        COALESCE(NULLIF(hc.keywords,''), '') AS meta_keywords,
+        'head' AS category_level
+      FROM head_categories hc
+      WHERE COALESCE(hc.is_active,1)=1 AND hc.slug = ?
+      ORDER BY hc.id DESC
+      LIMIT 1
+    `,
+    [slugToTitle(slug), slug, slug]
+  );
+
+  return headRows?.[0] || {
+    name: slugToTitle(slug),
+    slug,
+    sub_name: '',
+    head_name: '',
+    seo_title: '',
+    meta_description: '',
+    meta_keywords: '',
+    category_level: 'keyword',
+  };
 }
 
 const locationName = (params = {}) => {
@@ -200,6 +312,10 @@ const locationName = (params = {}) => {
   const state = slugToTitle(params.state || '');
   return [city, district, state].filter(Boolean).join(', ') || 'India';
 };
+
+const primaryLocationName = (params = {}) => (
+  slugToTitle(params.city || params.district || params.state || '') || 'India'
+);
 
 router.get('/product/:slug', async (req, res, next) => {
   try {
@@ -250,22 +366,47 @@ router.get('/directory/vendor/:slug', async (req, res, next) => {
 
 async function handleSearchPage(req, res, next) {
   try {
-    const service = await findService(String(req.params.service || 'all').trim());
+    const service = await findService(
+      String(req.params.service || 'all').trim(),
+      { head: req.params.head, sub: req.params.sub }
+    );
     const serviceName = service?.name || slugToTitle(req.params.service || 'All');
     const place = locationName(req.params);
+    const primaryPlace = primaryLocationName(req.params);
     const isAll = String(req.params.service || '').toLowerCase() === 'all';
-    const title = isAll
+    const heading = isAll
       ? `Suppliers and Manufacturers in ${place} | IndianTradeMart`
       : `${serviceName} in ${place} | Suppliers, Manufacturers and Service Providers`;
-    const description = isAll
+    const generatedDescription = isAll
       ? `Find verified suppliers, manufacturers, exporters and service providers in ${place} on IndianTradeMart.`
       : `Find verified ${serviceName} suppliers, manufacturers and service providers in ${place}. Compare businesses and send enquiries on IndianTradeMart.`;
+    const description = truncateText(
+      service?.meta_description
+        ? `Find ${serviceName} suppliers and service providers in ${place}. ${service.meta_description}`
+        : generatedDescription,
+      160
+    );
+    const title = buildLocationSeoTitle(
+      isAll ? 'Suppliers and Manufacturers' : serviceName,
+      primaryPlace
+    );
+    const keywords = buildKeywords(
+      service?.meta_keywords,
+      service?.seo_title,
+      serviceName,
+      `${serviceName} suppliers in ${place}`,
+      `${serviceName} manufacturers in ${place}`,
+      place,
+      service?.sub_name,
+      service?.head_name,
+      'IndianTradeMart'
+    );
     sendSeoHtml(req, res, {
-      title: `${title} | IndianTradeMart`,
+      title,
       description,
-      keywords: `${serviceName}, ${place}, suppliers, manufacturers, service providers, IndianTradeMart`,
+      keywords,
       bodyHtml: `
-        <h1>${escapeHtml(title)}</h1>
+        <h1>${escapeHtml(heading)}</h1>
         <p>${escapeHtml(description)}</p>
         <p>Browse business listings, product suppliers and local service providers for ${escapeHtml(serviceName)} across ${escapeHtml(place)}.</p>
         <ul>
@@ -284,5 +425,7 @@ router.get('/directory/search/:service/:state/:district/:city', handleSearchPage
 router.get('/directory/search/:service/:state/:city', handleSearchPage);
 router.get('/directory/search/:service/:state', handleSearchPage);
 router.get('/directory/search/:service', handleSearchPage);
+router.get('/directory/:head/:sub/:service/:state/:district/:city', handleSearchPage);
+router.get('/directory/:head/:sub/:service/:state/:city', handleSearchPage);
 
 export default router;
