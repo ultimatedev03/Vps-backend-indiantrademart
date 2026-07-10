@@ -2,6 +2,7 @@ import { logger } from '../utils/logger.js';
 import express from 'express';
 import { randomUUID } from 'crypto';
 import { db } from '../lib/dbClient.js';
+import { invalidateDirCache } from '../lib/cacheMiddleware.js';
 import { inferCloudinaryResourceType, isCloudinaryConfigured, uploadBufferToCloudinary } from '../lib/cloudinaryUpload.js';
 import { buildOptimizedImageUpload, uploadImageVariants } from '../lib/imageOptimization.js';
 import { normalizeEmail } from '../lib/auth.js';
@@ -244,6 +245,113 @@ const clearVendorCacheEntries = (vendorId = '') => {
     }
   });
 };
+
+const PRODUCT_WRITE_BLOCK = new Set([
+  'id',
+  'vendor_id',
+  'created_at',
+  'updated_at',
+  'views',
+  'created_by',
+  'created_by_user_id',
+  'approved_by',
+  'approved_at',
+  'is_featured',
+  'featured_at',
+]);
+const PRODUCT_STATUSES = new Set(['ACTIVE', 'DRAFT', 'ARCHIVED']);
+
+const slugifyProductName = (value = '') =>
+  String(value || '')
+    .toLowerCase()
+    .trim()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 180) || 'product';
+
+const sanitizeVendorProductPayload = (payload = {}, { partial = false } = {}) => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('Invalid product data');
+  }
+
+  const cleaned = {};
+  Object.entries(payload).forEach(([key, value]) => {
+    if (PRODUCT_WRITE_BLOCK.has(key) || value === undefined) return;
+    cleaned[key] = value;
+  });
+
+  if (Object.prototype.hasOwnProperty.call(cleaned, 'name')) {
+    cleaned.name = String(cleaned.name || '').trim().slice(0, 255);
+    if (!partial && !cleaned.name) throw new Error('Product name is required');
+    if (partial && !cleaned.name) throw new Error('Product name cannot be empty');
+  } else if (!partial) {
+    throw new Error('Product name is required');
+  }
+
+  ['category_path', 'category_other', 'category', 'price_unit', 'video_url', 'pdf_url'].forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(cleaned, key)) {
+      cleaned[key] = String(cleaned[key] || '').trim();
+    }
+  });
+
+  ['head_category_id', 'sub_category_id', 'micro_category_id'].forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(cleaned, key)) {
+      cleaned[key] = cleaned[key] ? String(cleaned[key]).trim() : null;
+    }
+  });
+
+  if (Object.prototype.hasOwnProperty.call(cleaned, 'status')) {
+    const status = String(cleaned.status || '').trim().toUpperCase();
+    if (!PRODUCT_STATUSES.has(status)) throw new Error('Invalid product status');
+    cleaned.status = status;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(cleaned, 'images')) {
+    cleaned.images = (Array.isArray(cleaned.images) ? cleaned.images : [])
+      .map((image) => {
+        if (typeof image === 'string') return image.trim();
+        if (image && typeof image === 'object') return String(image.url || image.image_url || image.src || '').trim();
+        return '';
+      })
+      .filter(Boolean)
+      .slice(0, 7);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(cleaned, 'extra_micro_categories')) {
+    cleaned.extra_micro_categories = Array.isArray(cleaned.extra_micro_categories)
+      ? cleaned.extra_micro_categories.slice(0, 2)
+      : [];
+  }
+
+  if (Object.prototype.hasOwnProperty.call(cleaned, 'metadata')) {
+    cleaned.metadata = cleaned.metadata && typeof cleaned.metadata === 'object' && !Array.isArray(cleaned.metadata)
+      ? cleaned.metadata
+      : {};
+  }
+
+  return cleaned;
+};
+
+async function ensureUniqueProductSlug(value, excludeProductId = '') {
+  const base = slugifyProductName(value);
+  const excludedId = String(excludeProductId || '').trim();
+
+  for (let suffix = 0; suffix < 100; suffix += 1) {
+    const candidate = suffix ? `${base}-${suffix + 1}` : base;
+    const { data, error } = await db
+      .from('products')
+      .select('id')
+      .eq('slug', candidate)
+      .maybeSingle();
+
+    if (error) throw new Error(error.message || 'Unable to validate product URL');
+    if (!data?.id || String(data.id) === excludedId) return candidate;
+  }
+
+  return `${base}-${randomUUID().slice(0, 8)}`;
+}
 
 const PAN_NUMBER_RE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
 const AADHAR_NUMBER_RE = /^\d{12}$/;
@@ -5272,12 +5380,16 @@ router.get('/me/products', requireAuth({ roles: ['VENDOR'] }), async (req, res) 
     if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
 
     const includeArchived = String(req.query?.includeArchived || '').toLowerCase() === 'true';
+    const requestedStatus = String(req.query?.status || '').trim().toUpperCase();
+    const requestedCategory = String(req.query?.category || '').trim();
     let query = db
       .from('products')
-      .select('id, name, category, category_path, category_other, extra_micro_categories, is_service, metadata, status, head_category_id, sub_category_id, micro_category_id, created_at, updated_at')
+      .select('*')
       .eq('vendor_id', vendor.id)
       .order('created_at', { ascending: false });
 
+    if (requestedStatus && PRODUCT_STATUSES.has(requestedStatus)) query = query.eq('status', requestedStatus);
+    if (requestedCategory) query = query.eq('micro_category_id', requestedCategory);
     if (!includeArchived) query = query.neq('status', 'ARCHIVED');
 
     const { data, error } = await query;
@@ -5285,6 +5397,97 @@ router.get('/me/products', requireAuth({ roles: ['VENDOR'] }), async (req, res) 
     return res.json({ success: true, products: data || [] });
   } catch (e) {
     return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get('/me/products/:productId', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
+  try {
+    const vendor = await resolveVendorForUser(req.user);
+    if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
+
+    const productId = String(req.params.productId || '').trim();
+    if (!productId) return res.status(400).json({ success: false, error: 'Product ID required' });
+
+    const { data: product, error } = await db
+      .from('products')
+      .select('*')
+      .eq('id', productId)
+      .eq('vendor_id', vendor.id)
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    if (!product) return res.status(404).json({ success: false, error: 'Product not found' });
+    return res.json({ success: true, product });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message || 'Failed to load product' });
+  }
+});
+
+router.post('/me/products', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
+  try {
+    const vendor = await resolveVendorForUser(req.user);
+    if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
+
+    const product = sanitizeVendorProductPayload(req.body, { partial: false });
+    if (!product.category_path && !product.category_other) {
+      return res.status(400).json({ success: false, error: 'Please select a category' });
+    }
+
+    product.vendor_id = vendor.id;
+    product.slug = await ensureUniqueProductSlug(product.slug || product.name);
+    product.status = product.status || 'ACTIVE';
+    product.views = 0;
+    product.created_at = new Date().toISOString();
+    product.updated_at = product.created_at;
+
+    const { data, error } = await db.from('products').insert([product]).select('*').single();
+    if (error) return res.status(500).json({ success: false, error: error.message || 'Failed to create product' });
+
+    clearVendorCacheEntries(vendor.id);
+    invalidateDirCache();
+    return res.status(201).json({ success: true, product: data });
+  } catch (error) {
+    return res.status(400).json({ success: false, error: error.message || 'Failed to create product' });
+  }
+});
+
+router.put('/me/products/:productId', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
+  try {
+    const vendor = await resolveVendorForUser(req.user);
+    if (!vendor) return res.status(404).json({ success: false, error: 'Vendor profile not found' });
+
+    const productId = String(req.params.productId || '').trim();
+    if (!productId) return res.status(400).json({ success: false, error: 'Product ID required' });
+
+    const { data: existing, error: existingError } = await db
+      .from('products')
+      .select('id, slug, name')
+      .eq('id', productId)
+      .eq('vendor_id', vendor.id)
+      .maybeSingle();
+    if (existingError) return res.status(500).json({ success: false, error: existingError.message });
+    if (!existing) return res.status(404).json({ success: false, error: 'Product not found' });
+
+    const updates = sanitizeVendorProductPayload(req.body, { partial: true });
+    if (Object.prototype.hasOwnProperty.call(updates, 'slug') || Object.prototype.hasOwnProperty.call(updates, 'name')) {
+      updates.slug = await ensureUniqueProductSlug(updates.slug || updates.name || existing.slug || existing.name, productId);
+    }
+    updates.updated_at = new Date().toISOString();
+
+    const { data, error } = await db
+      .from('products')
+      .update(updates)
+      .eq('id', productId)
+      .eq('vendor_id', vendor.id)
+      .select('*')
+      .single();
+    if (error) return res.status(500).json({ success: false, error: error.message || 'Failed to update product' });
+
+    clearVendorCacheEntries(vendor.id);
+    invalidateDirCache();
+    return res.json({ success: true, product: data });
+  } catch (error) {
+    return res.status(400).json({ success: false, error: error.message || 'Failed to update product' });
   }
 });
 
