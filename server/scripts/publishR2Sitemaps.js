@@ -347,7 +347,7 @@ async function loadLocations() {
 
 const locationPath = (loc) => {
   const state = slugify(loc.state_slug || loc.state_name);
-  const district = slugify(loc.district_slug || loc.district_name);
+  const district = optionalSlug(loc.district_slug || loc.district_name);
   const city = slugify(loc.city_slug || loc.city_name);
   return district && district !== city && district !== state
     ? `${state}/${district}/${city}`
