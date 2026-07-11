@@ -38,6 +38,22 @@ const MAX_XML_BYTES = 50 * 1024 * 1024;
 const MAX_INDEX_ENTRIES = 50000;
 const PRODUCT_ACTIVE_WHERE = "LOWER(COALESCE(p.status,'active')) NOT IN ('deleted','inactive','rejected')";
 const VENDOR_ACTIVE_WHERE = "COALESCE(v.is_active,1)=1 AND LOWER(COALESCE(v.status,'active')) NOT IN ('deleted','inactive','rejected','terminated')";
+const SITEMAP_INDEX_GROUPS = Object.freeze({
+  all: [
+    'static',
+    'products',
+    'vendors',
+    'categories',
+    'locations',
+    'category-locations',
+    'product-locations',
+    'vendor-locations',
+  ],
+  core: ['static', 'products', 'vendors', 'categories', 'locations'],
+  'category-locations': ['category-locations'],
+  'product-locations': ['product-locations'],
+  'vendor-locations': ['vendor-locations'],
+});
 
 function clampInt(value, fallback, min, max) {
   const parsed = Number.parseInt(String(value || ''), 10);
@@ -139,6 +155,7 @@ class StaticSitemapPublisher {
     this.totalUrls = 0;
     this.indexEntries = [];
     this.familyStats = {};
+    this.familyIndexEntries = {};
   }
 
   get isFull() {
@@ -151,6 +168,9 @@ class StaticSitemapPublisher {
     this.familyShardNo = 0;
     if (!this.familyStats[this.currentFamily]) {
       this.familyStats[this.currentFamily] = { urls: 0, shards: 0 };
+    }
+    if (!this.familyIndexEntries[this.currentFamily]) {
+      this.familyIndexEntries[this.currentFamily] = [];
     }
   }
 
@@ -186,7 +206,9 @@ class StaticSitemapPublisher {
       CacheControl: 'public, max-age=31536000, immutable',
     });
 
-    this.indexEntries.push({ loc: crawlerUrlForKey(key), lastmod: GENERATED_AT });
+    const indexEntry = { loc: crawlerUrlForKey(key), lastmod: GENERATED_AT };
+    this.indexEntries.push(indexEntry);
+    this.familyIndexEntries[this.currentFamily].push(indexEntry);
     this.familyStats[this.currentFamily].shards += 1;
     console.log(`${SNAPSHOT_ID}/${fileName}: ${urlCount} urls, ${compressed.length} compressed bytes`);
   }
@@ -255,6 +277,22 @@ class StaticSitemapPublisher {
     }
 
     const indexXml = renderIndex(this.indexEntries);
+    const groupedIndexes = Object.entries(SITEMAP_INDEX_GROUPS)
+      .map(([name, families]) => {
+        const entries = families.flatMap((family) => this.familyIndexEntries[family] || []);
+        const urls = families.reduce((total, family) => total + (this.familyStats[family]?.urls || 0), 0);
+        const snapshotKey = objectKey(`${SNAPSHOT_DIR}/indexes/${name}-index.xml`);
+        const stableKey = objectKey(`indexes/${name}-index.xml`);
+        return {
+          name,
+          entries,
+          urls,
+          snapshotKey,
+          stableKey,
+          xml: entries.length ? renderIndex(entries) : '',
+        };
+      })
+      .filter((group) => group.entries.length);
     const manifest = {
       version: 1,
       mode: 'static-r2-snapshot',
@@ -267,6 +305,12 @@ class StaticSitemapPublisher {
       totalUrls: this.totalUrls,
       totalShards: this.indexEntries.length,
       families: this.familyStats,
+      indexes: Object.fromEntries(groupedIndexes.map((group) => [group.name, {
+        urls: group.urls,
+        shards: group.entries.length,
+        stableUrl: crawlerUrlForKey(group.stableKey),
+        snapshotUrl: crawlerUrlForKey(group.snapshotKey),
+      }])),
     };
     const snapshotIndexKey = objectKey(`${SNAPSHOT_DIR}/sitemap-index.xml`);
     const snapshotManifestKey = objectKey(`${SNAPSHOT_DIR}/manifest.json`);
@@ -275,10 +319,22 @@ class StaticSitemapPublisher {
       ContentType: 'application/xml; charset=utf-8',
       CacheControl: 'public, max-age=31536000, immutable',
     });
+    for (const group of groupedIndexes) {
+      await this.uploadBuffer(group.snapshotKey, Buffer.from(group.xml, 'utf8'), {
+        ContentType: 'application/xml; charset=utf-8',
+        CacheControl: 'public, max-age=31536000, immutable',
+      });
+    }
     await this.uploadBuffer(snapshotManifestKey, Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, 'utf8'), {
       ContentType: 'application/json; charset=utf-8',
       CacheControl: 'public, max-age=31536000, immutable',
     });
+    for (const group of groupedIndexes) {
+      await this.uploadBuffer(group.stableKey, Buffer.from(group.xml, 'utf8'), {
+        ContentType: 'application/xml; charset=utf-8',
+        CacheControl: 'public, max-age=300, must-revalidate',
+      });
+    }
     // Publish the stable master last. Until this succeeds, crawlers keep using the previous complete snapshot.
     await this.uploadBuffer(objectKey('sitemap-index.xml'), Buffer.from(indexXml, 'utf8'), {
       ContentType: 'application/xml; charset=utf-8',
@@ -296,6 +352,9 @@ class StaticSitemapPublisher {
     }
 
     console.log(`sitemap-index.xml: snapshot=${SNAPSHOT_ID}, files=${this.indexEntries.length}, urls=${this.totalUrls}`);
+    for (const group of groupedIndexes) {
+      console.log(`${group.name}-index.xml: files=${group.entries.length}, urls=${group.urls}`);
+    }
     console.log(`manifest: ${crawlerUrlForKey(objectKey('sitemap-manifest.json'))}`);
     console.log(`submit: ${SITE_URL}/sitemap.xml`);
   }
