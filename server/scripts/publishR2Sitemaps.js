@@ -12,6 +12,7 @@ dotenv.config();
 
 const SITE_URL = String(process.env.SITE_URL || process.env.VITE_SITE_URL || 'https://indiantrademart.com').replace(/\/+$/, '');
 const PUBLIC_BASE_URL = String(process.env.R2_SITEMAP_PUBLIC_BASE_URL || process.env.SITEMAP_PUBLIC_BASE_URL || '').replace(/\/+$/, '');
+const CRAWLER_BASE_URL = String(process.env.SITEMAP_CRAWLER_BASE_URL || SITE_URL).replace(/\/+$/, '');
 const BUCKET = process.env.R2_BUCKET || process.env.SITEMAP_R2_BUCKET || process.env.AWS_BUCKET;
 const ENDPOINT = process.env.R2_ENDPOINT || process.env.SITEMAP_R2_ENDPOINT || (
   process.env.R2_ACCOUNT_ID ? `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com` : ''
@@ -95,7 +96,7 @@ const absoluteUrl = (urlPath = '/') => {
 };
 
 const objectKey = (fileName) => (PREFIX ? `${PREFIX}/${fileName}` : fileName);
-const publicUrlForKey = (key) => `${PUBLIC_BASE_URL}/${key.split('/').map(encodeURIComponent).join('/')}`;
+const crawlerUrlForKey = (key) => `${CRAWLER_BASE_URL}/${key.split('/').map(encodeURIComponent).join('/')}`;
 
 const renderUrlEntry = ({ loc, lastmod }) => {
   const url = String(loc || '').startsWith('http') ? loc : absoluteUrl(loc);
@@ -185,7 +186,7 @@ class StaticSitemapPublisher {
       CacheControl: 'public, max-age=31536000, immutable',
     });
 
-    this.indexEntries.push({ loc: publicUrlForKey(key), lastmod: GENERATED_AT });
+    this.indexEntries.push({ loc: crawlerUrlForKey(key), lastmod: GENERATED_AT });
     this.familyStats[this.currentFamily].shards += 1;
     console.log(`${SNAPSHOT_ID}/${fileName}: ${urlCount} urls, ${compressed.length} compressed bytes`);
   }
@@ -260,6 +261,8 @@ class StaticSitemapPublisher {
       snapshotId: SNAPSHOT_ID,
       generatedAt: GENERATED_AT,
       siteUrl: SITE_URL,
+      crawlerBaseUrl: CRAWLER_BASE_URL,
+      storageBaseUrl: PUBLIC_BASE_URL,
       urlLimit: URL_LIMIT,
       totalUrls: this.totalUrls,
       totalShards: this.indexEntries.length,
@@ -293,7 +296,7 @@ class StaticSitemapPublisher {
     }
 
     console.log(`sitemap-index.xml: snapshot=${SNAPSHOT_ID}, files=${this.indexEntries.length}, urls=${this.totalUrls}`);
-    console.log(`manifest: ${publicUrlForKey(objectKey('sitemap-manifest.json'))}`);
+    console.log(`manifest: ${crawlerUrlForKey(objectKey('sitemap-manifest.json'))}`);
     console.log(`submit: ${SITE_URL}/sitemap.xml`);
   }
 }
