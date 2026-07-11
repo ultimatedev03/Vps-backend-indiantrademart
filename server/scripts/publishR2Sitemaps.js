@@ -29,6 +29,11 @@ const RETAIN_SNAPSHOTS = clampInt(process.env.SITEMAP_R2_RETAIN_SNAPSHOTS, 4, 2,
 const CATEGORY_SCOPE = String(process.env.SITEMAP_CATEGORY_SCOPE || 'all').trim().toLowerCase();
 const DRY_RUN = String(process.env.SITEMAP_R2_DRY_RUN || '').trim() === '1' || String(process.env.DRY_RUN || '').trim() === '1';
 const GENERATED_AT = new Date().toISOString();
+const requestedLastmodDate = String(process.env.SITEMAP_LASTMOD_DATE || '').trim();
+const LASTMOD_DATE = /^\d{4}-\d{2}-\d{2}$/.test(requestedLastmodDate) &&
+  !Number.isNaN(new Date(`${requestedLastmodDate}T00:00:00.000Z`).getTime())
+  ? requestedLastmodDate
+  : GENERATED_AT.slice(0, 10);
 const SNAPSHOT_ID = sanitizeSegment(
   process.env.SITEMAP_R2_SNAPSHOT_ID || GENERATED_AT.replace(/[-:.TZ]/g, '').slice(0, 14),
   'snapshot'
@@ -92,13 +97,6 @@ const escapeXml = (value = '') =>
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
 
-const dateOnly = (value) => {
-  if (!value) return GENERATED_AT.slice(0, 10);
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return GENERATED_AT.slice(0, 10);
-  return parsed.toISOString().slice(0, 10);
-};
-
 const newestDate = (...values) => {
   const timestamps = values
     .map((value) => new Date(value || 0).getTime())
@@ -114,9 +112,9 @@ const absoluteUrl = (urlPath = '/') => {
 const objectKey = (fileName) => (PREFIX ? `${PREFIX}/${fileName}` : fileName);
 const crawlerUrlForKey = (key) => `${CRAWLER_BASE_URL}/${key.split('/').map(encodeURIComponent).join('/')}`;
 
-const renderUrlEntry = ({ loc, lastmod }) => {
+const renderUrlEntry = ({ loc }) => {
   const url = String(loc || '').startsWith('http') ? loc : absoluteUrl(loc);
-  return `  <url>\n    <loc>${escapeXml(url)}</loc>\n    <lastmod>${escapeXml(dateOnly(lastmod))}</lastmod>\n  </url>\n`;
+  return `  <url>\n    <loc>${escapeXml(url)}</loc>\n    <lastmod>${LASTMOD_DATE}</lastmod>\n  </url>\n`;
 };
 
 const renderUrlset = (entries) => (
@@ -128,7 +126,7 @@ const renderUrlset = (entries) => (
 
 const renderIndex = (entries) => {
   const body = entries.map((entry) =>
-    `  <sitemap>\n    <loc>${escapeXml(entry.loc)}</loc>\n    <lastmod>${escapeXml(entry.lastmod || GENERATED_AT)}</lastmod>\n  </sitemap>`
+    `  <sitemap>\n    <loc>${escapeXml(entry.loc)}</loc>\n    <lastmod>${LASTMOD_DATE}</lastmod>\n  </sitemap>`
   ).join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>\n<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${body}\n</sitemapindex>\n`;
 };
@@ -206,7 +204,7 @@ class StaticSitemapPublisher {
       CacheControl: 'public, max-age=31536000, immutable',
     });
 
-    const indexEntry = { loc: crawlerUrlForKey(key), lastmod: GENERATED_AT };
+    const indexEntry = { loc: crawlerUrlForKey(key) };
     this.indexEntries.push(indexEntry);
     this.familyIndexEntries[this.currentFamily].push(indexEntry);
     this.familyStats[this.currentFamily].shards += 1;
@@ -298,6 +296,7 @@ class StaticSitemapPublisher {
       mode: 'static-r2-snapshot',
       snapshotId: SNAPSHOT_ID,
       generatedAt: GENERATED_AT,
+      lastmodDate: LASTMOD_DATE,
       siteUrl: SITE_URL,
       crawlerBaseUrl: CRAWLER_BASE_URL,
       storageBaseUrl: PUBLIC_BASE_URL,
