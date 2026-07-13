@@ -31,6 +31,7 @@ import {
   searchVendors360,
   updateSearch360CaseStatus,
 } from '../lib/search360.js';
+import { getCategoryDemandAnalytics } from '../lib/categoryDemandAnalytics.js';
 import { normalizePlanFeatures } from '../lib/vendorPlanCatalog.js';
 
 const router = express.Router();
@@ -1194,6 +1195,24 @@ router.patch('/search360/cases/:caseId/status', async (req, res) => {
     return res.status(error?.statusCode || 500).json({
       success: false,
       error: error?.message || 'Failed to update Search 360 case',
+    });
+  }
+});
+
+router.get('/analytics/category-demand', async (req, res) => {
+  try {
+    const data = await getCategoryDemandAnalytics({
+      level: req.query?.level,
+      days: req.query?.days,
+      limit: req.query?.limit,
+    });
+
+    return res.json({ success: true, data });
+  } catch (error) {
+    logger.error('[SuperAdmin] Category demand analytics failed:', error);
+    return res.status(500).json({
+      success: false,
+      error: error?.message || 'Failed to load category demand analytics',
     });
   }
 });
