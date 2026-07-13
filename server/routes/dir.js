@@ -2065,6 +2065,164 @@ async function handleRankedProducts(req, res) {
   }
 }
 
+const CATEGORY_SUGGESTION_TYPES = new Set(['micro', 'sub']);
+
+function parseCategorySuggestionTypes(value) {
+  const requested = String(value || '')
+    .split(',')
+    .map((type) => type.trim().toLowerCase())
+    .filter((type) => CATEGORY_SUGGESTION_TYPES.has(type));
+
+  return new Set(requested.length ? requested : CATEGORY_SUGGESTION_TYPES);
+}
+
+router.get('/category-suggestions', cacheResponse('dir:category-suggestions', 300), async (req, res) => {
+  try {
+    const q = safeQ(req.query.q || req.query.query || req.query.term);
+    if (q.length < 2) return res.json({ success: true, suggestions: [] });
+
+    const allowedTypes = parseCategorySuggestionTypes(req.query.types);
+    const limit = clampInt(req.query.limit, 30, 1, 50);
+    const containsQuery = `%${q}%`;
+    const prefixQuery = `${q}%`;
+    const slugQuery = `%${slugifySearch(q)}%`;
+
+    const [microRows, subRows] = await Promise.all([
+      allowedTypes.has('micro')
+        ? mysqlQuery(
+            `SELECT mc.id, mc.name, mc.slug,
+                    sc.id AS sub_id, sc.name AS sub_name, sc.slug AS sub_slug,
+                    hc.id AS head_id, hc.name AS head_name, hc.slug AS head_slug,
+                    CASE
+                      WHEN LOWER(mc.name) = LOWER(?) THEN 0
+                      WHEN LOWER(mc.name) LIKE LOWER(?) THEN 1
+                      WHEN LOWER(mc.name) LIKE LOWER(?) THEN 2
+                      ELSE 3
+                    END AS match_rank
+               FROM micro_categories mc
+               LEFT JOIN sub_categories sc ON sc.id = mc.sub_category_id
+               LEFT JOIN head_categories hc ON hc.id = sc.head_category_id
+              WHERE COALESCE(mc.is_active, 1) = 1
+                AND COALESCE(sc.is_active, 1) = 1
+                AND COALESCE(hc.is_active, 1) = 1
+                AND (
+                  LOWER(mc.name) LIKE LOWER(?)
+                  OR LOWER(COALESCE(mc.slug, '')) LIKE LOWER(?)
+                  OR LOWER(COALESCE(sc.name, '')) LIKE LOWER(?)
+                  OR LOWER(COALESCE(hc.name, '')) LIKE LOWER(?)
+                  OR EXISTS (
+                    SELECT 1
+                      FROM micro_category_meta mcm
+                     WHERE mcm.micro_categories = mc.id
+                       AND (
+                         LOWER(COALESCE(mcm.keywords, '')) LIKE LOWER(?)
+                         OR LOWER(COALESCE(mcm.meta_tags, '')) LIKE LOWER(?)
+                         OR LOWER(COALESCE(mcm.description, '')) LIKE LOWER(?)
+                       )
+                  )
+                )
+              ORDER BY match_rank ASC, COALESCE(mc.sort_order, 0) ASC, mc.name ASC
+              LIMIT ?`,
+            [
+              q,
+              prefixQuery,
+              containsQuery,
+              containsQuery,
+              slugQuery,
+              containsQuery,
+              containsQuery,
+              containsQuery,
+              containsQuery,
+              containsQuery,
+              limit,
+            ]
+          )
+        : Promise.resolve([]),
+      allowedTypes.has('sub')
+        ? mysqlQuery(
+            `SELECT sc.id, sc.name, sc.slug,
+                    hc.id AS head_id, hc.name AS head_name, hc.slug AS head_slug,
+                    CASE
+                      WHEN LOWER(sc.name) = LOWER(?) THEN 0
+                      WHEN LOWER(sc.name) LIKE LOWER(?) THEN 1
+                      WHEN LOWER(sc.name) LIKE LOWER(?) THEN 2
+                      ELSE 3
+                    END AS match_rank
+               FROM sub_categories sc
+               LEFT JOIN head_categories hc ON hc.id = sc.head_category_id
+              WHERE COALESCE(sc.is_active, 1) = 1
+                AND COALESCE(hc.is_active, 1) = 1
+                AND (
+                  LOWER(sc.name) LIKE LOWER(?)
+                  OR LOWER(COALESCE(sc.slug, '')) LIKE LOWER(?)
+                  OR LOWER(COALESCE(hc.name, '')) LIKE LOWER(?)
+                  OR LOWER(COALESCE(sc.keywords, '')) LIKE LOWER(?)
+                  OR LOWER(COALESCE(sc.meta_tags, '')) LIKE LOWER(?)
+                  OR LOWER(COALESCE(sc.description, '')) LIKE LOWER(?)
+                )
+              ORDER BY match_rank ASC, COALESCE(sc.sort_order, 0) ASC, sc.name ASC
+              LIMIT ?`,
+            [
+              q,
+              prefixQuery,
+              containsQuery,
+              containsQuery,
+              slugQuery,
+              containsQuery,
+              containsQuery,
+              containsQuery,
+              containsQuery,
+              limit,
+            ]
+          )
+        : Promise.resolve([]),
+    ]);
+
+    const suggestions = [
+      ...microRows.map((item) => ({
+        id: item.id,
+        name: item.name,
+        slug: item.slug,
+        path: [item.head_name, item.sub_name, item.name].filter(Boolean).join(' > '),
+        head_id: item.head_id,
+        sub_id: item.sub_id,
+        sub_slug: item.sub_slug,
+        head_slug: item.head_slug,
+        type: 'micro',
+        match_rank: Number(item.match_rank) || 0,
+      })),
+      ...subRows.map((item) => ({
+        id: item.id,
+        name: item.name,
+        slug: item.slug,
+        path: [item.head_name, item.name].filter(Boolean).join(' > '),
+        head_id: item.head_id,
+        sub_id: item.id,
+        sub_slug: item.slug,
+        head_slug: item.head_slug,
+        type: 'sub',
+        match_rank: Number(item.match_rank) || 0,
+      })),
+    ]
+      .sort((a, b) => {
+        if (a.match_rank !== b.match_rank) return a.match_rank - b.match_rank;
+        if (a.type !== b.type) return a.type === 'micro' ? -1 : 1;
+        return String(a.name || '').localeCompare(String(b.name || ''));
+      })
+      .slice(0, limit)
+      .map(({ match_rank, ...item }) => item);
+
+    return res.json({ success: true, suggestions });
+  } catch (error) {
+    logger.warn('[dir/category-suggestions] failed:', error?.message);
+    return res.status(500).json({
+      success: false,
+      error: 'CATEGORY_SUGGESTIONS_FAILED',
+      details: error?.message,
+    });
+  }
+});
+
 router.get('/autocomplete', cacheResponse('dir:autocomplete', 300), async (req, res) => {
   try {
     const q = safeQ(req.query.q || req.query.query || req.query.term);
