@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily IndianTradeMart MySQL backup at 02:30 IST
+
+[Timer]
+OnCalendar=*-*-* 21:00:00 UTC
+Persistent=true
+RandomizedDelaySec=10m
+Unit=indiantrademart-db-backup.service
+
+[Install]
+WantedBy=timers.target

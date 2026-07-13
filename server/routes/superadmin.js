@@ -31,7 +31,10 @@ import {
   searchVendors360,
   updateSearch360CaseStatus,
 } from '../lib/search360.js';
-import { getCategoryDemandAnalytics } from '../lib/categoryDemandAnalytics.js';
+import {
+  getCategoryDemandAnalytics,
+  getCategoryDemandDetails,
+} from '../lib/categoryDemandAnalytics.js';
 import { normalizePlanFeatures } from '../lib/vendorPlanCatalog.js';
 
 const router = express.Router();
@@ -1213,6 +1216,26 @@ router.get('/analytics/category-demand', async (req, res) => {
     return res.status(500).json({
       success: false,
       error: error?.message || 'Failed to load category demand analytics',
+    });
+  }
+});
+
+router.get('/analytics/category-demand/details', async (req, res) => {
+  try {
+    const data = await getCategoryDemandDetails({
+      level: req.query?.level,
+      days: req.query?.days,
+      categoryId: req.query?.categoryId,
+      vendorLimit: req.query?.vendorLimit,
+      demandLimit: req.query?.demandLimit,
+    });
+
+    return res.json({ success: true, data });
+  } catch (error) {
+    logger.error('[SuperAdmin] Category demand details failed:', error);
+    return res.status(error?.statusCode || 500).json({
+      success: false,
+      error: error?.message || 'Failed to load category demand details',
     });
   }
 });

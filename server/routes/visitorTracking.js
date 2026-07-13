@@ -5,6 +5,7 @@ import { logger } from '../utils/logger.js';
 import { publishBehavioralEvent } from '../lib/kafkaAnalytics.js';
 
 const router = express.Router();
+const MAX_BATCH_SIZE = 25;
 
 const ALLOWED_EVENT_TYPES = new Set([
   'PAGE_VIEW',
@@ -97,22 +98,16 @@ const normalizeMetadata = (value) => {
   return Object.keys(out).length ? out : null;
 };
 
-router.post('/events', async (req, res) => {
-  try {
-    const body = req.body || {};
-    const visitorId = asText(body.visitor_id || body.visitorId || '', 191);
-    const visitorSessionId = asText(body.visitor_session_id || body.visitorSessionId || '', 191);
+const buildEvent = (req, body = {}) => {
+  const visitorId = asText(body.visitor_id || body.visitorId || '', 191);
+  const visitorSessionId = asText(body.visitor_session_id || body.visitorSessionId || '', 191);
+  if (!visitorId && !visitorSessionId) return { error: 'visitor_id or visitor_session_id is required' };
 
-    if (!visitorId && !visitorSessionId) {
-      return res.status(400).json({ success: false, error: 'visitor_id or visitor_session_id is required' });
-    }
+  const pagePath = normalizePath(body);
+  if (isInternalPath(pagePath)) return { ignored: true };
 
-    const pagePath = normalizePath(body);
-    if (isInternalPath(pagePath)) {
-      return res.json({ success: true, ignored: true });
-    }
-
-    const event = {
+  return {
+    event: {
       id: randomUUID(),
       visitor_id: visitorId || null,
       visitor_session_id: visitorSessionId || null,
@@ -142,37 +137,77 @@ router.post('/events', async (req, res) => {
       user_agent: asText(body.user_agent || req.headers?.['user-agent'] || '', 1000) || null,
       metadata: normalizeMetadata(body.metadata),
       created_at: new Date().toISOString(),
-    };
+    },
+  };
+};
 
-    const { error } = await db.from('website_visitor_events').insert([event]);
-    if (error) {
-      return res.status(500).json({ success: false, error: error.message || 'Failed to save visitor event' });
-    }
+async function persistEvents(events = []) {
+  if (!events.length) return;
 
-    try {
-      await db.from('behavioral_event_queue').insert([
-        {
-          id: randomUUID(),
-          event_id: event.id,
-          visitor_id: event.visitor_id || event.visitor_session_id || null,
-          event_type: event.event_type,
-          payload: event,
-          status: 'PENDING',
-          attempts: 0,
-          created_at: event.created_at,
-        },
-      ]);
-    } catch (queueError) {
-      logger.warn('[VisitorTracking] Behavioral queue insert skipped:', queueError?.message || queueError);
-    }
+  const { error } = await db.from('website_visitor_events').insert(events);
+  if (error) throw new Error(error.message || 'Failed to save visitor events');
 
-    publishBehavioralEvent(event).catch((kafkaError) => {
-      logger.warn('[VisitorTracking] Kafka publish skipped:', kafkaError?.message || kafkaError);
-    });
+  try {
+    await db.from('behavioral_event_queue').insert(events.map((event) => ({
+      id: randomUUID(),
+      event_id: event.id,
+      visitor_id: event.visitor_id || event.visitor_session_id || null,
+      event_type: event.event_type,
+      payload: event,
+      status: 'PENDING',
+      attempts: 0,
+      created_at: event.created_at,
+    })));
+  } catch (queueError) {
+    logger.warn('[VisitorTracking] Behavioral queue batch insert skipped:', queueError?.message || queueError);
+  }
 
-    return res.status(201).json({ success: true, event_id: event.id });
+  void Promise.allSettled(events.map((event) => publishBehavioralEvent(event))).then((results) => {
+    const failed = results.filter((result) => result.status === 'rejected').length;
+    if (failed) logger.warn(`[VisitorTracking] Kafka publish skipped for ${failed} event(s)`);
+  });
+}
+
+router.post('/events', async (req, res) => {
+  try {
+    const parsed = buildEvent(req, req.body || {});
+    if (parsed.error) return res.status(400).json({ success: false, error: parsed.error });
+    if (parsed.ignored) return res.json({ success: true, ignored: true });
+
+    await persistEvents([parsed.event]);
+    return res.status(201).json({ success: true, event_id: parsed.event.id });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message || 'Failed to save visitor event' });
+  }
+});
+
+router.post('/events/batch', async (req, res) => {
+  try {
+    const rows = Array.isArray(req.body?.events) ? req.body.events : [];
+    if (!rows.length) return res.status(400).json({ success: false, error: 'events array is required' });
+    if (rows.length > MAX_BATCH_SIZE) {
+      return res.status(413).json({ success: false, error: `A maximum of ${MAX_BATCH_SIZE} events is allowed per batch` });
+    }
+
+    const accepted = [];
+    let ignored = 0;
+    let invalid = 0;
+    rows.forEach((body) => {
+      const parsed = buildEvent(req, body || {});
+      if (parsed.event) accepted.push(parsed.event);
+      else if (parsed.ignored) ignored += 1;
+      else invalid += 1;
+    });
+
+    if (accepted.length) await persistEvents(accepted);
+    return res.status(201).json({
+      success: true,
+      accepted: accepted.length,
+      ignored,
+      invalid,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message || 'Failed to save visitor event batch' });
   }
 });
 

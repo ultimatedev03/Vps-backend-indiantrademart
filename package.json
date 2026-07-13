@@ -18,6 +18,7 @@
     "search:reindex": "node server/scripts/reindexOpenSearchProducts.js",
     "analytics:behavioral": "node server/scripts/runBehavioralCommerceIntelligence.js",
     "analytics:kafka:consume": "node server/scripts/consumeBehavioralKafkaEvents.js",
+    "db:backup": "node server/scripts/backupMysql.js",
     "seo:export:all-urls": "node -e \"console.log('SEO URL ZIP export is disabled. Versioned static R2 sitemap snapshots are the canonical pipeline.')\"",
     "seo:sitemap:r2:publish": "node server/scripts/publishR2Sitemaps.js",
     "categories:import-keywords": "node server/scripts/importCategoryKeywords.js",

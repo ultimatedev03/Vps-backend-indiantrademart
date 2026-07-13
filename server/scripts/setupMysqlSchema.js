@@ -129,6 +129,7 @@ const missingIndexes = [
   { table: 'website_visitor_events', name: 'idx_website_visitor_events_search_created', columns: ['event_type', 'created_at'] },
   { table: 'website_visitor_events', name: 'idx_website_visitor_events_visitor_search', columns: ['visitor_id', 'created_at'] },
   { table: 'website_visitor_events', name: 'ft_website_visitor_events_search', columns: ['search_query', 'category', 'entity_name'], fulltext: true },
+  { table: 'behavioral_event_queue', name: 'idx_behavioral_event_queue_status_processed', columns: ['status', 'processed_at'] },
 ];
 
 const obsoleteIndexes = [

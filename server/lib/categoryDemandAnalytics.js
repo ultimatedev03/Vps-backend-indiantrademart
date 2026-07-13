@@ -73,6 +73,28 @@ function normalizeLimit(value) {
   return Math.min(5000, Math.floor(limit));
 }
 
+function normalizeDetailLimit(value, fallback = 100) {
+  const limit = Number(value);
+  if (!Number.isFinite(limit) || limit <= 0) return fallback;
+  return Math.min(200, Math.floor(limit));
+}
+
+function normalizeCategoryId(value) {
+  const categoryId = String(value || '').trim();
+  if (!categoryId || categoryId.length > 64) {
+    const error = new Error('A valid categoryId is required');
+    error.statusCode = 400;
+    throw error;
+  }
+  return categoryId;
+}
+
+const splitProductSamples = (value) => String(value || '')
+  .split(' || ')
+  .map((item) => item.trim())
+  .filter(Boolean)
+  .slice(0, 5);
+
 function buildSharedCtes({ cutoff, catalogSql }) {
   const proposalDateFilter = cutoff ? 'AND p.created_at >= ?' : '';
   const leadDateFilter = cutoff ? 'AND l.created_at >= ?' : '';
@@ -383,6 +405,277 @@ export async function getCategoryDemandAnalytics({ level, days, limit } = {}) {
     methodology: {
       supply: 'Distinct active vendors with active product listings or saved category preferences.',
       demand: 'Buyer proposals plus standalone leads; proposal-mirrored lead rows are excluded.',
+    },
+  };
+}
+
+export async function getCategoryDemandDetails({
+  level,
+  days,
+  categoryId,
+  vendorLimit,
+  demandLimit,
+} = {}) {
+  const normalizedLevel = normalizeCategoryAnalyticsLevel(level);
+  const normalizedDays = normalizeCategoryAnalyticsDays(days);
+  const normalizedCategoryId = normalizeCategoryId(categoryId);
+  const normalizedVendorLimit = normalizeDetailLimit(vendorLimit, 100);
+  const normalizedDemandLimit = normalizeDetailLimit(demandLimit, 100);
+  const config = LEVEL_CONFIG[normalizedLevel];
+  const assignmentColumn = config.assignmentColumn;
+  const cutoff = normalizedDays > 0
+    ? new Date(Date.now() - normalizedDays * 24 * 60 * 60 * 1000)
+    : null;
+  const shared = buildSharedCtes({ cutoff, catalogSql: config.catalogSql });
+
+  const categoryRows = await mysqlQuery(
+    `SELECT *
+       FROM (${config.catalogSql}) category_catalog
+      WHERE category_id = ?
+      LIMIT 1`,
+    [normalizedCategoryId]
+  );
+  const category = categoryRows?.[0];
+  if (!category) {
+    const error = new Error('Category not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const vendorSql = `
+    ${shared.sql},
+    vendor_membership AS (
+      SELECT
+        sa.vendor_id,
+        COUNT(DISTINCT sa.product_id) AS active_product_count,
+        MAX(sa.source_type = 'PRODUCT') AS has_listing,
+        MAX(sa.source_type = 'PREFERENCE') AS has_preference,
+        MAX(CASE WHEN sa.source_type = 'PRODUCT' THEN p.updated_at END) AS latest_product_at,
+        GROUP_CONCAT(
+          DISTINCT CASE WHEN sa.source_type = 'PRODUCT' THEN NULLIF(TRIM(p.name), '') END
+          ORDER BY p.updated_at DESC
+          SEPARATOR ' || '
+        ) AS product_samples
+      FROM supply_assignments sa
+      LEFT JOIN products p ON p.id = sa.product_id
+      WHERE sa.${assignmentColumn} = ?
+      GROUP BY sa.vendor_id
+    )
+    SELECT
+      v.id,
+      v.vendor_id AS display_vendor_id,
+      v.slug,
+      v.company_name,
+      v.owner_name,
+      v.email,
+      v.phone,
+      COALESCE(NULLIF(v.city, ''), city_ref.name) AS city,
+      COALESCE(NULLIF(v.state, ''), state_ref.name) AS state,
+      v.pincode,
+      v.kyc_status,
+      v.kyc_completed,
+      v.is_verified,
+      v.verification_badge,
+      v.profile_completion,
+      v.primary_business_type,
+      v.status,
+      v.account_status,
+      v.created_at,
+      vm.active_product_count,
+      vm.has_listing,
+      vm.has_preference,
+      vm.latest_product_at,
+      vm.product_samples,
+      COUNT(*) OVER() AS detail_total
+    FROM vendor_membership vm
+    INNER JOIN vendors v ON v.id = vm.vendor_id AND v.is_active = 1
+    LEFT JOIN cities city_ref ON city_ref.id = v.city_id
+    LEFT JOIN states state_ref ON state_ref.id = v.state_id
+    ORDER BY
+      vm.has_listing DESC,
+      vm.active_product_count DESC,
+      v.is_verified DESC,
+      v.updated_at DESC
+    LIMIT ?
+  `;
+
+  const demandSql = `
+    ${shared.sql}
+    SELECT
+      da.demand_id,
+      CASE WHEN p.id IS NOT NULL THEN 'PROPOSAL' ELSE 'LEAD' END AS source_type,
+      COALESCE(p.id, l.id) AS source_id,
+      da.buyer_key,
+      COALESCE(proposal_buyer.id, lead_buyer.id, lead_user_buyer.id, p.buyer_id, l.buyer_id) AS buyer_id,
+      COALESCE(proposal_buyer.full_name, lead_buyer.full_name, lead_user_buyer.full_name, l.buyer_name) AS buyer_name,
+      COALESCE(NULLIF(p.buyer_email, ''), proposal_buyer.email, NULLIF(l.buyer_email, ''), lead_buyer.email, lead_user_buyer.email) AS buyer_email,
+      COALESCE(proposal_buyer.phone, NULLIF(l.buyer_phone, ''), lead_buyer.phone, lead_user_buyer.phone) AS buyer_phone,
+      COALESCE(proposal_buyer.company_name, NULLIF(l.company_name, ''), lead_buyer.company_name, lead_user_buyer.company_name) AS company_name,
+      COALESCE(NULLIF(p.title, ''), NULLIF(l.title, '')) AS title,
+      COALESCE(NULLIF(p.product_name, ''), NULLIF(l.product_name, ''), NULLIF(l.product_interest, '')) AS product_name,
+      COALESCE(NULLIF(p.quantity, ''), NULLIF(l.quantity, '')) AS quantity,
+      COALESCE(CAST(p.budget AS CHAR), NULLIF(l.budget, '')) AS budget,
+      COALESCE(NULLIF(p.status, ''), NULLIF(l.status, '')) AS status,
+      COALESCE(NULLIF(p.location, ''), NULLIF(l.location, '')) AS location,
+      COALESCE(NULLIF(l.city, ''), proposal_buyer.city, lead_buyer.city, lead_user_buyer.city) AS city,
+      COALESCE(NULLIF(l.state, ''), proposal_buyer.state, lead_buyer.state, lead_user_buyer.state) AS state,
+      COALESCE(NULLIF(p.description, ''), NULLIF(l.description, ''), NULLIF(l.message, '')) AS description,
+      p.required_by_date,
+      da.created_at,
+      CASE
+        WHEN COALESCE(p.micro_category_id, l.micro_category_id) IS NOT NULL THEN 'MICRO_ID'
+        WHEN COALESCE(p.sub_category_id, l.sub_category_id) IS NOT NULL THEN 'SUB_ID'
+        WHEN COALESCE(p.head_category_id, l.head_category_id) IS NOT NULL THEN 'HEAD_ID'
+        WHEN COALESCE(NULLIF(p.category_slug, ''), NULLIF(l.category_slug, '')) IS NOT NULL THEN 'UNIQUE_SLUG'
+        ELSE 'UNMAPPED'
+      END AS category_mapping_source,
+      COUNT(*) OVER() AS detail_total
+    FROM demand_assignments da
+    LEFT JOIN proposals p ON da.demand_id = CONCAT('proposal:', p.id)
+    LEFT JOIN leads l ON da.demand_id = CONCAT('lead:', l.id)
+    LEFT JOIN buyers proposal_buyer ON proposal_buyer.id = p.buyer_id
+    LEFT JOIN buyers lead_buyer ON lead_buyer.id = l.buyer_id
+    LEFT JOIN buyers lead_user_buyer ON lead_user_buyer.user_id = l.buyer_user_id
+    WHERE da.${assignmentColumn} = ?
+    ORDER BY da.created_at DESC
+    LIMIT ?
+  `;
+
+  const mirroredSql = `
+    ${shared.sql}
+    SELECT COUNT(DISTINCT l.id) AS mirrored_leads_excluded
+    FROM demand_assignments da
+    INNER JOIN proposals p ON da.demand_id = CONCAT('proposal:', p.id)
+    INNER JOIN leads l ON l.proposal_id = p.id
+    WHERE da.${assignmentColumn} = ?
+  `;
+
+  const [rawVendors, rawDemand, mirroredRows] = await Promise.all([
+    mysqlQuery(vendorSql, [...shared.params, normalizedCategoryId, normalizedVendorLimit]),
+    mysqlQuery(demandSql, [...shared.params, normalizedCategoryId, normalizedDemandLimit]),
+    mysqlQuery(mirroredSql, [...shared.params, normalizedCategoryId]),
+  ]);
+
+  const vendorTotal = Number(rawVendors?.[0]?.detail_total || 0);
+  const requirementTotal = Number(rawDemand?.[0]?.detail_total || 0);
+  const vendors = (rawVendors || []).map(({ detail_total: _detailTotal, product_samples: productSamples, ...row }) => ({
+    ...row,
+    active_product_count: Number(row.active_product_count || 0),
+    has_listing: Boolean(row.has_listing),
+    has_preference: Boolean(row.has_preference),
+    product_samples: splitProductSamples(productSamples),
+    membership_source: row.has_listing && row.has_preference
+      ? 'LISTING_AND_PREFERENCE'
+      : row.has_listing
+        ? 'LISTING'
+        : 'PREFERENCE',
+  }));
+  const requirements = (rawDemand || []).map(({ detail_total: _detailTotal, ...row }) => ({
+    ...row,
+    has_buyer_identity: Boolean(row.buyer_id || row.buyer_key),
+    has_buyer_contact: Boolean(row.buyer_email || row.buyer_phone),
+  }));
+
+  const activityCutoffSql = cutoff ? 'AND e.created_at >= ?' : '';
+  const activityCutoffParams = cutoff ? [cutoff] : [];
+  const categorySearchText = String(category.category_name || '').trim();
+  const categorySlug = String(category.category_slug || '').trim();
+  const entityPathMatch = categorySlug ? `%${categorySlug}%` : `%${normalizedCategoryId}%`;
+  const activityPredicate = `(
+    LOWER(COALESCE(e.category, '')) = LOWER(?)
+    OR e.entity_id = ?
+    OR e.entity_id LIKE ?
+    OR MATCH(e.search_query, e.category, e.entity_name) AGAINST (? IN NATURAL LANGUAGE MODE)
+  )`;
+  const activityParams = [
+    ...activityCutoffParams,
+    categorySearchText,
+    normalizedCategoryId,
+    entityPathMatch,
+    categorySearchText,
+  ];
+  const activitySummarySql = `
+    SELECT
+      COUNT(*) AS total_events,
+      COUNT(DISTINCT COALESCE(e.visitor_id, e.visitor_session_id)) AS unique_visitors,
+      SUM(e.event_type = 'SEARCH') AS searches,
+      SUM(e.event_type = 'PRODUCT_VIEW') AS product_views,
+      SUM(e.event_type = 'VENDOR_VIEW') AS vendor_views,
+      SUM(e.event_type = 'CATEGORY_VIEW') AS category_views,
+      MAX(e.created_at) AS latest_activity_at
+    FROM website_visitor_events e
+    WHERE e.event_type IN ('SEARCH', 'PRODUCT_VIEW', 'VENDOR_VIEW', 'CATEGORY_VIEW')
+      ${activityCutoffSql}
+      AND ${activityPredicate}
+  `;
+  const topSearchesSql = `
+    SELECT
+      e.search_query,
+      COUNT(*) AS event_count,
+      COUNT(DISTINCT COALESCE(e.visitor_id, e.visitor_session_id)) AS unique_visitors,
+      MAX(e.created_at) AS latest_at
+    FROM website_visitor_events e
+    WHERE e.event_type = 'SEARCH'
+      AND e.search_query IS NOT NULL
+      AND e.search_query <> ''
+      ${activityCutoffSql}
+      AND ${activityPredicate}
+    GROUP BY e.search_query
+    ORDER BY event_count DESC, latest_at DESC
+    LIMIT 10
+  `;
+
+  const [activitySummaryRows, topSearchRows] = await Promise.all([
+    mysqlQuery(activitySummarySql, activityParams).catch(() => []),
+    mysqlQuery(topSearchesSql, activityParams).catch(() => []),
+  ]);
+  const activitySummary = activitySummaryRows?.[0] || {};
+  const preferenceOnly = vendors.filter((vendor) => vendor.has_preference && !vendor.has_listing).length;
+  const listingOnly = vendors.filter((vendor) => vendor.has_listing && !vendor.has_preference).length;
+  const bothSources = vendors.filter((vendor) => vendor.has_listing && vendor.has_preference).length;
+  const missingBuyerContact = requirements.filter((requirement) => !requirement.has_buyer_contact).length;
+  const anonymousRequirements = requirements.filter((requirement) => !requirement.has_buyer_identity).length;
+
+  return {
+    level: normalizedLevel,
+    days: normalizedDays,
+    generated_at: new Date().toISOString(),
+    category,
+    totals: {
+      vendors: vendorTotal,
+      requirements: requirementTotal,
+      returned_vendors: vendors.length,
+      returned_requirements: requirements.length,
+    },
+    reconciliation: {
+      has_supply_and_demand: vendorTotal > 0 && requirementTotal > 0,
+      mirrored_leads_excluded: Number(mirroredRows?.[0]?.mirrored_leads_excluded || 0),
+      preference_only_vendors: preferenceOnly,
+      listing_only_vendors: listingOnly,
+      listing_and_preference_vendors: bothSources,
+      requirements_without_contact: missingBuyerContact,
+      anonymous_requirements: anonymousRequirements,
+    },
+    vendors,
+    requirements,
+    activity: {
+      total_events: Number(activitySummary.total_events || 0),
+      unique_visitors: Number(activitySummary.unique_visitors || 0),
+      searches: Number(activitySummary.searches || 0),
+      product_views: Number(activitySummary.product_views || 0),
+      vendor_views: Number(activitySummary.vendor_views || 0),
+      category_views: Number(activitySummary.category_views || 0),
+      latest_activity_at: activitySummary.latest_activity_at || null,
+      top_searches: (topSearchRows || []).map((row) => ({
+        ...row,
+        event_count: Number(row.event_count || 0),
+        unique_visitors: Number(row.unique_visitors || 0),
+      })),
+    },
+    methodology: {
+      supply: 'Distinct active vendors with an active listing or saved category preference.',
+      demand: 'Non-cancelled buyer proposals plus standalone leads. Proposal-mirrored leads are excluded.',
+      activity: 'Public search, category, product, and vendor events associated with this category.',
     },
   };
 }

@@ -1,4 +1,5 @@
 import { db } from './dbClient.js';
+import { mysqlQuery } from './mysqlPool.js';
 
 const safeNum = (value) => {
   const numeric = Number(value);
@@ -25,25 +26,12 @@ const isMissingWebsiteVisitorEventsTable = (error) => {
   );
 };
 
-const countEvents = async (startIso, endIso, eventType = '') => {
-  let query = db
-    .from('website_visitor_events')
-    .select('*', { count: 'exact', head: true })
-    .gte('created_at', startIso)
-    .lte('created_at', endIso);
-
-  if (eventType) query = query.eq('event_type', eventType);
-
-  const { count, error } = await query;
-  if (error && isMissingWebsiteVisitorEventsTable(error)) return 0;
-  if (error) throw new Error(error.message || 'Failed to count website visitor activity');
-  return safeNum(count);
-};
-
-const getRecentEvents = async (limit, includeTechnical = false) => {
+const getRecentEvents = async (startIso, endIso, limit, includeTechnical = false) => {
   const { data, error } = await db
     .from('website_visitor_events')
     .select('*')
+    .gte('created_at', startIso)
+    .lte('created_at', endIso)
     .order('created_at', { ascending: false })
     .limit(limit);
 
@@ -57,24 +45,91 @@ const getRecentEvents = async (limit, includeTechnical = false) => {
   });
 };
 
-const getRecentUniqueVisitors = async (startIso, endIso) => {
-  const { data, error } = await db
-    .from('website_visitor_events')
-    .select('visitor_id, visitor_session_id, created_at')
-    .gte('created_at', startIso)
-    .lte('created_at', endIso)
-    .order('created_at', { ascending: false })
-    .limit(2000);
+const getVisitorInsights = async (startIso, endIso) => {
+  try {
+    const [summaryRows, searchRows, pageRows, eventRows] = await Promise.all([
+      mysqlQuery(
+        `SELECT COUNT(*) AS total_events,
+                SUM(event_type = 'PAGE_VIEW') AS page_views,
+                SUM(event_type = 'SEARCH') AS searches,
+                SUM(event_type = 'PRODUCT_VIEW') AS product_views,
+                SUM(event_type = 'VENDOR_VIEW') AS vendor_views,
+                COUNT(DISTINCT COALESCE(NULLIF(visitor_id, ''), NULLIF(visitor_session_id, ''))) AS unique_visitors
+           FROM website_visitor_events
+          WHERE created_at >= ? AND created_at <= ?`,
+        [startIso, endIso]
+      ),
+      mysqlQuery(
+        `SELECT MIN(search_query) AS search_query,
+                COUNT(*) AS event_count,
+                COUNT(DISTINCT COALESCE(NULLIF(visitor_id, ''), NULLIF(visitor_session_id, ''))) AS unique_visitors,
+                MAX(created_at) AS latest_at
+           FROM website_visitor_events
+          WHERE event_type = 'SEARCH'
+            AND created_at >= ? AND created_at <= ?
+            AND search_query IS NOT NULL AND TRIM(search_query) <> ''
+          GROUP BY LOWER(TRIM(search_query))
+          ORDER BY event_count DESC, latest_at DESC
+          LIMIT 12`,
+        [startIso, endIso]
+      ),
+      mysqlQuery(
+        `SELECT page_path,
+                MIN(NULLIF(page_title, '')) AS page_title,
+                COUNT(*) AS page_views,
+                COUNT(DISTINCT COALESCE(NULLIF(visitor_id, ''), NULLIF(visitor_session_id, ''))) AS unique_visitors,
+                MAX(created_at) AS latest_at
+           FROM website_visitor_events
+          WHERE event_type = 'PAGE_VIEW'
+            AND created_at >= ? AND created_at <= ?
+            AND page_path IS NOT NULL AND TRIM(page_path) <> ''
+          GROUP BY page_path
+          ORDER BY page_views DESC, latest_at DESC
+          LIMIT 12`,
+        [startIso, endIso]
+      ),
+      mysqlQuery(
+        `SELECT event_type, COUNT(*) AS event_count,
+                COUNT(DISTINCT COALESCE(NULLIF(visitor_id, ''), NULLIF(visitor_session_id, ''))) AS unique_visitors
+           FROM website_visitor_events
+          WHERE created_at >= ? AND created_at <= ?
+          GROUP BY event_type
+          ORDER BY event_count DESC`,
+        [startIso, endIso]
+      ),
+    ]);
 
-  if (error && isMissingWebsiteVisitorEventsTable(error)) return 0;
-  if (error) throw new Error(error.message || 'Failed to count unique visitors');
-
-  const keys = new Set();
-  (data || []).forEach((row) => {
-    const key = String(row?.visitor_id || row?.visitor_session_id || '').trim();
-    if (key) keys.add(key);
-  });
-  return keys.size;
+    return {
+      summary: {
+        total_events: safeNum(summaryRows?.[0]?.total_events),
+        page_views: safeNum(summaryRows?.[0]?.page_views),
+        searches: safeNum(summaryRows?.[0]?.searches),
+        product_views: safeNum(summaryRows?.[0]?.product_views),
+        vendor_views: safeNum(summaryRows?.[0]?.vendor_views),
+        unique_visitors: safeNum(summaryRows?.[0]?.unique_visitors),
+      },
+      topSearches: (searchRows || []).map((row) => ({
+        ...row,
+        event_count: safeNum(row.event_count),
+        unique_visitors: safeNum(row.unique_visitors),
+      })),
+      topPages: (pageRows || []).map((row) => ({
+        ...row,
+        page_views: safeNum(row.page_views),
+        unique_visitors: safeNum(row.unique_visitors),
+      })),
+      eventBreakdown: (eventRows || []).map((row) => ({
+        ...row,
+        event_count: safeNum(row.event_count),
+        unique_visitors: safeNum(row.unique_visitors),
+      })),
+    };
+  } catch (error) {
+    if (isMissingWebsiteVisitorEventsTable(error)) {
+      return { summary: {}, topSearches: [], topPages: [], eventBreakdown: [] };
+    }
+    throw error;
+  }
 };
 
 export async function getWebsiteVisitorActivity(options = {}) {
@@ -90,34 +145,24 @@ export async function getWebsiteVisitorActivity(options = {}) {
   const startIso = start.toISOString();
   const endIso = now.toISOString();
 
-  const [
-    totalEvents,
-    pageViews,
-    searches,
-    productViews,
-    vendorViews,
-    uniqueVisitors,
-    events,
-  ] = await Promise.all([
-    countEvents(startIso, endIso),
-    countEvents(startIso, endIso, 'PAGE_VIEW'),
-    countEvents(startIso, endIso, 'SEARCH'),
-    countEvents(startIso, endIso, 'PRODUCT_VIEW'),
-    countEvents(startIso, endIso, 'VENDOR_VIEW'),
-    getRecentUniqueVisitors(startIso, endIso),
-    getRecentEvents(limit, includeTechnical),
+  const [insights, events] = await Promise.all([
+    getVisitorInsights(startIso, endIso),
+    getRecentEvents(startIso, endIso, limit, includeTechnical),
   ]);
 
   return {
     stats: {
       days,
-      total_events: totalEvents,
-      page_views: pageViews,
-      searches,
-      product_views: productViews,
-      vendor_views: vendorViews,
-      unique_visitors: uniqueVisitors,
+      total_events: insights.summary?.total_events || 0,
+      page_views: insights.summary?.page_views || 0,
+      searches: insights.summary?.searches || 0,
+      product_views: insights.summary?.product_views || 0,
+      vendor_views: insights.summary?.vendor_views || 0,
+      unique_visitors: insights.summary?.unique_visitors || 0,
     },
     events,
+    top_searches: insights.topSearches,
+    top_pages: insights.topPages,
+    event_breakdown: insights.eventBreakdown,
   };
 }

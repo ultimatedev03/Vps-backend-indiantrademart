@@ -11,10 +11,12 @@
 import app from './app.js';
 import runtimeConfig from './lib/runtimeConfig.js';
 import { initializeSubscriptionCronJobs } from './lib/subscriptionCronJobs.js';
+import { initializeAnalyticsCronJobs } from './lib/analyticsCronJobs.js';
 import { ensureDevAdmin } from './lib/devBootstrap.js';
 
 // Initialize subscription monitoring cron jobs
 initializeSubscriptionCronJobs();
+initializeAnalyticsCronJobs();
 
 // Dev-only admin bootstrap (set DEV_ADMIN_EMAIL + DEV_ADMIN_PASSWORD)
 ensureDevAdmin().catch((err) => {

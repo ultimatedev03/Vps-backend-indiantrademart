@@ -1,0 +1,24 @@
+[Unit]
+Description=IndianTradeMart compressed MySQL backup
+After=network-online.target mysql.service mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/indiantrademart-backend
+Environment=NODE_ENV=production
+EnvironmentFile=-/opt/indiantrademart-backend/.env
+EnvironmentFile=-/opt/indiantrademart-backend/.env.local
+Environment=DB_BACKUP_DIR=/var/backups/indiantrademart/mysql
+ExecStart=/usr/bin/node /opt/indiantrademart-backend/server/scripts/backupMysql.js
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
