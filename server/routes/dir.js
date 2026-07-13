@@ -2172,7 +2172,7 @@ router.get('/category-suggestions', cacheResponse('dir:category-suggestions', 30
     const hasDirectMicroNameMatch = microRows.some((item) => Number(item.match_rank) < 3);
     if (allowedTypes.has('micro') && !hasDirectMicroNameMatch && microRows.length < limit) {
       const metadataRows = await mysqlQuery(
-        `SELECT DISTINCT mc.id, mc.name, mc.slug,
+        `SELECT DISTINCT mc.id, mc.name, mc.slug, COALESCE(mc.sort_order, 0) AS sort_order,
                 sc.id AS sub_id, sc.name AS sub_name, sc.slug AS sub_slug,
                 hc.id AS head_id, hc.name AS head_name, hc.slug AS head_slug,
                 3 AS match_rank
