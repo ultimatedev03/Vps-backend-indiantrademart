@@ -1,3 +1,4 @@
+import '../lib/runtimeConfig.js';
 import { createBehavioralEventConsumer, getBehavioralKafkaTopic, isKafkaConfigured } from '../lib/kafkaAnalytics.js';
 import { setupClickHouseBehavioralSchema, writeClickHouseEvents, isClickHouseConfigured } from '../lib/clickHouseAnalytics.js';
 
