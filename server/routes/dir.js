@@ -2087,7 +2087,7 @@ router.get('/category-suggestions', cacheResponse('dir:category-suggestions', 30
     const prefixQuery = `${q}%`;
     const slugQuery = `%${slugifySearch(q)}%`;
 
-    const [microRows, subRows] = await Promise.all([
+    const [directMicroRows, subRows] = await Promise.all([
       allowedTypes.has('micro')
         ? mysqlQuery(
             `SELECT mc.id, mc.name, mc.slug,
@@ -2105,23 +2105,13 @@ router.get('/category-suggestions', cacheResponse('dir:category-suggestions', 30
               WHERE COALESCE(mc.is_active, 1) = 1
                 AND COALESCE(sc.is_active, 1) = 1
                 AND COALESCE(hc.is_active, 1) = 1
-                AND (
-                  LOWER(mc.name) LIKE LOWER(?)
-                  OR LOWER(COALESCE(mc.slug, '')) LIKE LOWER(?)
-                  OR LOWER(COALESCE(sc.name, '')) LIKE LOWER(?)
-                  OR LOWER(COALESCE(hc.name, '')) LIKE LOWER(?)
-                  OR EXISTS (
-                    SELECT 1
-                      FROM micro_category_meta mcm
-                     WHERE mcm.micro_categories = mc.id
-                       AND (
-                         LOWER(COALESCE(mcm.keywords, '')) LIKE LOWER(?)
-                         OR LOWER(COALESCE(mcm.meta_tags, '')) LIKE LOWER(?)
-                         OR LOWER(COALESCE(mcm.description, '')) LIKE LOWER(?)
-                       )
-                  )
-                )
-              ORDER BY match_rank ASC, COALESCE(mc.sort_order, 0) ASC, mc.name ASC
+                 AND (
+                   LOWER(mc.name) LIKE LOWER(?)
+                   OR LOWER(COALESCE(mc.slug, '')) LIKE LOWER(?)
+                   OR LOWER(COALESCE(sc.name, '')) LIKE LOWER(?)
+                   OR LOWER(COALESCE(hc.name, '')) LIKE LOWER(?)
+                 )
+               ORDER BY match_rank ASC, COALESCE(mc.sort_order, 0) ASC, mc.name ASC
               LIMIT ?`,
             [
               q,
@@ -2129,9 +2119,6 @@ router.get('/category-suggestions', cacheResponse('dir:category-suggestions', 30
               containsQuery,
               containsQuery,
               slugQuery,
-              containsQuery,
-              containsQuery,
-              containsQuery,
               containsQuery,
               containsQuery,
               limit,
@@ -2177,6 +2164,40 @@ router.get('/category-suggestions', cacheResponse('dir:category-suggestions', 30
           )
         : Promise.resolve([]),
     ]);
+
+    // Metadata matching is intentionally a second query. A correlated EXISTS
+    // here made sparse/exact searches scan the metadata table once per micro
+    // category and could hold the typeahead request for tens of seconds.
+    let microRows = directMicroRows;
+    const hasDirectMicroNameMatch = microRows.some((item) => Number(item.match_rank) < 3);
+    if (allowedTypes.has('micro') && !hasDirectMicroNameMatch && microRows.length < limit) {
+      const metadataRows = await mysqlQuery(
+        `SELECT DISTINCT mc.id, mc.name, mc.slug,
+                sc.id AS sub_id, sc.name AS sub_name, sc.slug AS sub_slug,
+                hc.id AS head_id, hc.name AS head_name, hc.slug AS head_slug,
+                3 AS match_rank
+           FROM micro_category_meta mcm
+           JOIN micro_categories mc ON mc.id = mcm.micro_categories
+           LEFT JOIN sub_categories sc ON sc.id = mc.sub_category_id
+           LEFT JOIN head_categories hc ON hc.id = sc.head_category_id
+          WHERE COALESCE(mc.is_active, 1) = 1
+            AND COALESCE(sc.is_active, 1) = 1
+            AND COALESCE(hc.is_active, 1) = 1
+            AND (
+              LOWER(COALESCE(mcm.keywords, '')) LIKE LOWER(?)
+              OR LOWER(COALESCE(mcm.meta_tags, '')) LIKE LOWER(?)
+              OR LOWER(COALESCE(mcm.description, '')) LIKE LOWER(?)
+            )
+          ORDER BY COALESCE(mc.sort_order, 0) ASC, mc.name ASC
+          LIMIT ?`,
+        [containsQuery, containsQuery, containsQuery, limit]
+      );
+      const directIds = new Set(microRows.map((item) => String(item.id)));
+      microRows = [
+        ...microRows,
+        ...metadataRows.filter((item) => !directIds.has(String(item.id))),
+      ].slice(0, limit);
+    }
 
     const suggestions = [
       ...microRows.map((item) => ({
