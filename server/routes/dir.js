@@ -9,6 +9,7 @@ import { optionalAuth, requireAuth } from '../middleware/requireAuth.js';
 import { mysqlQuery } from '../lib/mysqlPool.js';
 import {
   autocompleteOpenSearchProducts,
+  featuredOpenSearchProducts,
   isOpenSearchCatalogEnabled,
   searchOpenSearchProducts,
 } from '../lib/openSearchCatalog.js';
@@ -3224,6 +3225,7 @@ router.get('/home-feed', cacheResponse('dir:home-feed', 300), async (_req, res) 
 
     const categories = categoryResult.error ? [] : categoryResult.data || [];
     const categoryIds = categories.map((category) => category.id).filter(Boolean);
+    const rotationBucket = Math.floor(Date.now() / (6 * 60 * 60 * 1000));
 
     const requests = [
       categoryIds.length
@@ -3253,6 +3255,10 @@ router.get('/home-feed', cacheResponse('dir:home-feed', 300), async (_req, res) 
       db.from('micro_categories').select('*', { count: 'exact', head: true }).eq('is_active', true),
       db.from('cities').select('*', { count: 'exact', head: true }).eq('is_active', true),
       db.from('leads').select('*', { count: 'exact', head: true }),
+      featuredOpenSearchProducts({ limit: 12, seed: rotationBucket }).catch((error) => {
+        logger.warn('[Directory] OpenSearch homepage products skipped', { error: error?.message });
+        return [];
+      }),
     ];
 
     const [
@@ -3266,6 +3272,7 @@ router.get('/home-feed', cacheResponse('dir:home-feed', 300), async (_req, res) 
       microCountResult,
       cityCountResult,
       requirementCountResult,
+      openSearchFeaturedProducts,
     ] = await Promise.all(requests);
 
     const subcategoryCounts = (subcategoryResult?.data || []).reduce((counts, row) => {
@@ -3288,7 +3295,6 @@ router.get('/home-feed', cacheResponse('dir:home-feed', 300), async (_req, res) 
       })
       .slice(0, 6);
 
-    const rotationBucket = Math.floor(Date.now() / (6 * 60 * 60 * 1000));
     const rotationScore = (value = '') => {
       const text = `${rotationBucket}:${String(value || '')}`;
       let hash = 2166136261;
@@ -3303,7 +3309,12 @@ router.get('/home-feed', cacheResponse('dir:home-feed', 300), async (_req, res) 
       rotationScore(left?.id || left?.slug) - rotationScore(right?.id || right?.slug)
     ));
     const seenVendors = new Set();
-    const featuredProducts = [];
+    const featuredProducts = [...openSearchFeaturedProducts];
+    openSearchFeaturedProducts.forEach((product) => {
+      const vendor = product?.vendors || {};
+      const vendorKey = String(product?.vendor_id || vendor?.id || vendor?.company_name || '').trim();
+      if (vendorKey) seenVendors.add(vendorKey);
+    });
     rotatedProducts.forEach((product) => {
       const vendor = product?.vendors || {};
       const vendorKey = String(

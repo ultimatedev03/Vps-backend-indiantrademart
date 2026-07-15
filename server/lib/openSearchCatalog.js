@@ -1033,6 +1033,36 @@ export async function searchOpenSearchProducts(options = {}) {
   };
 }
 
+export async function featuredOpenSearchProducts({ limit = 12, seed = Date.now() } = {}) {
+  if (!isOpenSearchCatalogEnabled()) return [];
+  const size = Math.min(Math.max(Number(limit) || 12, 1), 24);
+  const numericSeed = Math.abs(Math.trunc(Number(seed) || Date.now())) % 2147483647;
+  const result = await openSearchRequest(`/${encodeURIComponent(getOpenSearchIndex())}/_search`, {
+    method: 'POST',
+    body: {
+      size,
+      query: {
+        function_score: {
+          query: {
+            bool: {
+              filter: [
+                { term: { status: 'ACTIVE' } },
+                { term: { vendor_active: true } },
+                { exists: { field: 'vendor_id' } },
+              ],
+            },
+          },
+          random_score: { seed: numericSeed, field: '_seq_no' },
+          boost_mode: 'replace',
+        },
+      },
+      collapse: { field: 'vendor_id' },
+    },
+    timeoutMs: 6500,
+  });
+  return (result?.hits?.hits || []).map(productFromOpenSearchHit).filter(Boolean).slice(0, size);
+}
+
 export async function autocompleteOpenSearchProducts(q, { limit = 8 } = {}) {
   const queryText = String(q || '').trim();
   if (!isOpenSearchCatalogEnabled() || queryText.length < 2) return [];
