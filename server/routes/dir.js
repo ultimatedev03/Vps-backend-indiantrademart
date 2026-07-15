@@ -3127,7 +3127,7 @@ router.get('/home-feed', cacheResponse('dir:home-feed', 300), async (_req, res) 
       .eq('is_active', true)
       .order('sort_order', { ascending: true })
       .order('name', { ascending: true })
-      .limit(8);
+      .limit(100);
 
     if (categoryResult.error && isMissingColumnErr(categoryResult.error, 'sort_order')) {
       categoryResult = await db
@@ -3135,7 +3135,7 @@ router.get('/home-feed', cacheResponse('dir:home-feed', 300), async (_req, res) 
         .select('id, name, slug, image_url, description')
         .eq('is_active', true)
         .order('name', { ascending: true })
-        .limit(8);
+        .limit(100);
     }
 
     const categories = categoryResult.error ? [] : categoryResult.data || [];
