@@ -971,16 +971,20 @@ function productFromOpenSearchHit(hit = {}) {
 function autocompleteSuggestionFromSource(src = {}, hit = {}) {
   const name = src.name || hit.text || '';
   if (!name) return null;
+  const id = src.id || hit._id || slugifySearch(name);
+  const productSlug = src.slug || null;
   return {
-    id: src.id || hit._id || slugifySearch(name),
+    id,
     name,
     slug: src.micro_slug || src.category_slug || src.slug || slugifySearch(name),
-    product_slug: src.slug || null,
+    product_slug: productSlug,
     path: src.micro_name ? `Product in ${src.micro_name}` : (src.category || 'Product'),
+    context: src.micro_name ? `Product in ${src.micro_name}` : (src.category || 'Product'),
     head_id: src.head_category_id || null,
     sub_id: src.sub_category_id || null,
     sub_slug: src.sub_category_slug || null,
     head_slug: src.head_category_slug || null,
+    href: `/product/${productSlug || id}`,
     type: 'product',
     source: 'opensearch',
     score: Number(hit._score || hit._ranking_score || 0),
