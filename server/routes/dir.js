@@ -3118,6 +3118,141 @@ router.get('/categories/home-showcase', cacheResponse('dir:home-showcase', 900),
   }
 });
 
+// GET /api/dir/home-feed - cached public data for the homepage story sections.
+router.get('/home-feed', cacheResponse('dir:home-feed', 300), async (_req, res) => {
+  try {
+    let categoryResult = await db
+      .from('head_categories')
+      .select('id, name, slug, image_url, description')
+      .eq('is_active', true)
+      .order('sort_order', { ascending: true })
+      .order('name', { ascending: true })
+      .limit(8);
+
+    if (categoryResult.error && isMissingColumnErr(categoryResult.error, 'sort_order')) {
+      categoryResult = await db
+        .from('head_categories')
+        .select('id, name, slug, image_url, description')
+        .eq('is_active', true)
+        .order('name', { ascending: true })
+        .limit(8);
+    }
+
+    const categories = categoryResult.error ? [] : categoryResult.data || [];
+    const categoryIds = categories.map((category) => category.id).filter(Boolean);
+
+    const requests = [
+      categoryIds.length
+        ? db
+            .from('sub_categories')
+            .select('head_category_id')
+            .in('head_category_id', categoryIds)
+            .eq('is_active', true)
+        : Promise.resolve({ data: [], error: null }),
+      db
+        .from('products')
+        .select('*, vendors!inner(id, vendor_id, company_name, city, state, is_active, kyc_status, verification_badge, seller_rating)')
+        .eq('status', 'ACTIVE')
+        .eq('vendors.is_active', true)
+        .order('created_at', { ascending: false })
+        .limit(8),
+      db
+        .from('vendors')
+        .select('id, vendor_id, company_name, owner_name, city, state, avatar_url, kyc_status, verification_badge, seller_rating, trust_score, established_year, created_at')
+        .eq('is_active', true)
+        .order('created_at', { ascending: false })
+        .limit(24),
+      db.from('vendors').select('*', { count: 'exact', head: true }).eq('is_active', true),
+      db.from('products').select('*', { count: 'exact', head: true }).eq('status', 'ACTIVE'),
+      db.from('head_categories').select('*', { count: 'exact', head: true }).eq('is_active', true),
+      db.from('sub_categories').select('*', { count: 'exact', head: true }).eq('is_active', true),
+      db.from('micro_categories').select('*', { count: 'exact', head: true }).eq('is_active', true),
+      db.from('cities').select('*', { count: 'exact', head: true }).eq('is_active', true),
+      db.from('leads').select('*', { count: 'exact', head: true }),
+    ];
+
+    const [
+      subcategoryResult,
+      productResult,
+      vendorResult,
+      vendorCountResult,
+      productCountResult,
+      headCountResult,
+      subCountResult,
+      microCountResult,
+      cityCountResult,
+      requirementCountResult,
+    ] = await Promise.all(requests);
+
+    const subcategoryCounts = (subcategoryResult?.data || []).reduce((counts, row) => {
+      const key = String(row?.head_category_id || '');
+      if (key) counts[key] = (counts[key] || 0) + 1;
+      return counts;
+    }, {});
+
+    const isVerified = (vendor) => {
+      const kyc = String(vendor?.kyc_status || '').trim().toUpperCase();
+      const badge = vendor?.verification_badge;
+      return badge === true || badge === 1 || ['TRUE', 'YES', 'VERIFIED'].includes(String(badge || '').toUpperCase()) || ['APPROVED', 'VERIFIED'].includes(kyc);
+    };
+
+    const featuredVendors = (vendorResult?.data || [])
+      .sort((left, right) => {
+        const verifiedDelta = Number(isVerified(right)) - Number(isVerified(left));
+        if (verifiedDelta) return verifiedDelta;
+        return Number(right?.seller_rating || right?.trust_score || 0) - Number(left?.seller_rating || left?.trust_score || 0);
+      })
+      .slice(0, 6);
+
+    const countOrNull = (result) => (result?.error ? null : Number(result?.count || 0));
+    const categoryCounts = [headCountResult, subCountResult, microCountResult].map(countOrNull);
+    const totalCategories = categoryCounts.some((count) => count === null)
+      ? null
+      : categoryCounts.reduce((total, count) => total + count, 0);
+
+    const queryErrors = [
+      categoryResult,
+      subcategoryResult,
+      productResult,
+      vendorResult,
+      vendorCountResult,
+      productCountResult,
+      headCountResult,
+      subCountResult,
+      microCountResult,
+      cityCountResult,
+      requirementCountResult,
+    ]
+      .map((result) => result?.error?.message)
+      .filter(Boolean);
+
+    if (queryErrors.length) {
+      logger.warn('[Directory] Homepage feed returned partial data', { errors: queryErrors });
+    }
+
+    return res.json({
+      success: true,
+      generatedAt: new Date().toISOString(),
+      categories: categories.map((category) => ({
+        ...category,
+        subcategory_count: subcategoryCounts[String(category.id)] || 0,
+      })),
+      products: productResult?.error ? [] : productResult?.data || [],
+      vendors: vendorResult?.error ? [] : featuredVendors,
+      stats: {
+        suppliers: countOrNull(vendorCountResult),
+        products: countOrNull(productCountResult),
+        categories: totalCategories,
+        cities: countOrNull(cityCountResult),
+        requirements: countOrNull(requirementCountResult),
+      },
+    });
+  } catch (err) {
+    logger.error('[Directory] Homepage feed failed', err);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to load homepage data' });
+  }
+});
+
 router.get('/categories/children', cacheResponse('dir:categories-children', 1800), async (req, res) => {
   try {
     const { parentId, parentType } = req.query;
