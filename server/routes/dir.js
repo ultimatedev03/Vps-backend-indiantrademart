@@ -2249,13 +2249,42 @@ router.get('/autocomplete', cacheResponse('dir:autocomplete', 300), async (req, 
     const q = safeQ(req.query.q || req.query.query || req.query.term);
     if (q.length < 2) return res.json({ success: true, suggestions: [] });
 
+    const requestedScope = String(req.query.scope || 'all').trim().toLowerCase();
+    const scope = ['all', 'product', 'category', 'supplier', 'city'].includes(requestedScope)
+      ? requestedScope
+      : 'all';
+    const includeProducts = scope === 'all' || scope === 'product';
+    const includeCategories = scope === 'all' || scope === 'category';
+    const includeSuppliers = scope === 'all' || scope === 'supplier';
+    const includeCities = scope === 'all' || scope === 'city';
+
     const expandedTerms = expandSemanticTokens(q).slice(0, 8);
     const likeTerms = expandedTerms.length ? expandedTerms : [q];
     const buildLikeOr = (columnSql) => likeTerms.map(() => `LOWER(COALESCE(${columnSql}, '')) LIKE LOWER(?)`).join(' OR ');
     const likeParams = () => likeTerms.map((term) => `%${term}%`);
 
-    const [microRows, productRows, vendorRows, openSearchSuggestions] = await Promise.all([
-      mysqlQuery(
+    const [headRows, subRows, microRows, productRows, vendorRows, cityRows, openSearchSuggestions] = await Promise.all([
+      includeCategories ? mysqlQuery(
+        `SELECT hc.id, hc.name, hc.slug
+           FROM head_categories hc
+          WHERE COALESCE(hc.is_active, 1) = 1
+            AND (${buildLikeOr('hc.name')})
+          ORDER BY hc.name ASC
+          LIMIT 5`,
+        likeParams()
+      ) : Promise.resolve([]),
+      includeCategories ? mysqlQuery(
+        `SELECT sc.id, sc.name, sc.slug,
+                hc.id AS head_id, hc.name AS head_name, hc.slug AS head_slug
+           FROM sub_categories sc
+           LEFT JOIN head_categories hc ON hc.id = sc.head_category_id
+          WHERE COALESCE(sc.is_active, 1) = 1
+            AND (${buildLikeOr('sc.name')})
+          ORDER BY sc.name ASC
+          LIMIT 6`,
+        likeParams()
+      ) : Promise.resolve([]),
+      includeCategories ? mysqlQuery(
         `SELECT mc.id, mc.name, mc.slug,
                 sc.id AS sub_id, sc.name AS sub_name, sc.slug AS sub_slug,
                 hc.id AS head_id, hc.name AS head_name, hc.slug AS head_slug
@@ -2267,8 +2296,8 @@ router.get('/autocomplete', cacheResponse('dir:autocomplete', 300), async (req, 
           ORDER BY mc.sort_order ASC, mc.name ASC
           LIMIT 8`,
         likeParams()
-      ),
-      mysqlQuery(
+      ) : Promise.resolve([]),
+      includeProducts ? mysqlQuery(
         `SELECT p.id, p.name, p.slug, p.micro_category_id,
                 mc.name AS micro_name, mc.slug AS micro_slug,
                 sc.id AS sub_id, sc.slug AS sub_slug,
@@ -2284,8 +2313,8 @@ router.get('/autocomplete', cacheResponse('dir:autocomplete', 300), async (req, 
           ORDER BY p.created_at DESC
           LIMIT 8`,
         [...likeParams(), ...likeParams(), ...likeParams()]
-      ),
-      mysqlQuery(
+      ) : Promise.resolve([]),
+      includeSuppliers ? mysqlQuery(
         `SELECT id, company_name, slug, city, state
            FROM vendors
           WHERE COALESCE(is_active, 1) = 1
@@ -2293,14 +2322,50 @@ router.get('/autocomplete', cacheResponse('dir:autocomplete', 300), async (req, 
           ORDER BY created_at DESC
           LIMIT 4`,
         likeParams()
-      ),
-      autocompleteOpenSearchProducts(q, { limit: 8 }).catch((error) => {
+      ) : Promise.resolve([]),
+      includeCities ? mysqlQuery(
+        `SELECT c.id, c.name, c.slug, s.name AS state_name, s.slug AS state_slug
+           FROM cities c
+           LEFT JOIN states s ON s.id = c.state_id
+          WHERE COALESCE(c.is_active, 1) = 1
+            AND (${buildLikeOr('c.name')})
+          ORDER BY c.name ASC
+          LIMIT 8`,
+        likeParams()
+      ) : Promise.resolve([]),
+      includeProducts ? autocompleteOpenSearchProducts(q, { limit: 8 }).catch((error) => {
         logger.warn('[dir/autocomplete] OpenSearch suggestions skipped:', error?.message);
         return [];
-      }),
+      }) : Promise.resolve([]),
     ]);
 
     const suggestions = [...openSearchSuggestions];
+    headRows.forEach((item) => {
+      suggestions.push({
+        id: item.id,
+        name: item.name,
+        slug: item.slug,
+        path: 'Business category',
+        context: 'Business category',
+        href: `/directory/${item.slug}`,
+        type: 'head',
+      });
+    });
+
+    subRows.forEach((item) => {
+      suggestions.push({
+        id: item.id,
+        name: item.name,
+        slug: item.slug,
+        path: [item.head_name, item.name].filter(Boolean).join(' > '),
+        context: [item.head_name, item.name].filter(Boolean).join(' > '),
+        head_id: item.head_id,
+        head_slug: item.head_slug,
+        href: item.head_slug ? `/directory/${item.head_slug}/${item.slug}` : `/directory/${item.slug}`,
+        type: 'sub',
+      });
+    });
+
     microRows.forEach((item) => {
       suggestions.push({
         id: item.id,
@@ -2311,6 +2376,9 @@ router.get('/autocomplete', cacheResponse('dir:autocomplete', 300), async (req, 
         sub_id: item.sub_id,
         sub_slug: item.sub_slug,
         head_slug: item.head_slug,
+        href: item.head_slug && item.sub_slug
+          ? `/directory/${item.head_slug}/${item.sub_slug}/${item.slug}`
+          : `/directory/${item.slug}`,
         type: 'micro',
       });
     });
@@ -2326,6 +2394,7 @@ router.get('/autocomplete', cacheResponse('dir:autocomplete', 300), async (req, 
         sub_id: item.sub_id,
         sub_slug: item.sub_slug,
         head_slug: item.head_slug,
+        href: `/product/${item.slug || item.id}`,
         type: 'product',
       });
     });
@@ -2336,19 +2405,34 @@ router.get('/autocomplete', cacheResponse('dir:autocomplete', 300), async (req, 
         name: item.company_name,
         slug: item.slug,
         path: [item.city, item.state].filter(Boolean).join(', ') || 'Company',
+        context: [item.city, item.state].filter(Boolean).join(', ') || 'Verified supplier',
+        href: `/directory/vendor/${item.slug || item.id}`,
         type: 'vendor',
+      });
+    });
+
+    cityRows.forEach((item) => {
+      suggestions.push({
+        id: item.id,
+        name: item.name,
+        slug: item.slug,
+        path: item.state_name ? `${item.name}, ${item.state_name}` : item.name,
+        context: item.state_name ? `${item.name}, ${item.state_name}` : 'City',
+        state_slug: item.state_slug,
+        href: `/directory/city/${item.slug}`,
+        type: 'city',
       });
     });
 
     const seen = new Set();
     const unique = suggestions.filter((item) => {
-      const key = `${item.type}:${item.slug || item.id}`;
+      const key = `${item.type}:${item.product_slug || item.slug || item.id}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     });
 
-    res.json({ success: true, suggestions: unique.slice(0, 12) });
+    res.json({ success: true, scope, engine: isOpenSearchCatalogEnabled() ? 'opensearch+mysql' : 'mysql', suggestions: unique.slice(0, 12) });
   } catch (error) {
     logger.warn('[dir/autocomplete] failed:', error?.message);
     res.status(500).json({ success: false, error: 'AUTOCOMPLETE_FAILED', details: error?.message });
@@ -3155,7 +3239,7 @@ router.get('/home-feed', cacheResponse('dir:home-feed', 300), async (_req, res) 
         .eq('status', 'ACTIVE')
         .eq('vendors.is_active', true)
         .order('created_at', { ascending: false })
-        .limit(8),
+        .limit(48),
       db
         .from('vendors')
         .select('id, vendor_id, company_name, owner_name, city, state, avatar_url, kyc_status, verification_badge, seller_rating, trust_score, established_year, created_at')
@@ -3204,6 +3288,38 @@ router.get('/home-feed', cacheResponse('dir:home-feed', 300), async (_req, res) 
       })
       .slice(0, 6);
 
+    const rotationBucket = Math.floor(Date.now() / (6 * 60 * 60 * 1000));
+    const rotationScore = (value = '') => {
+      const text = `${rotationBucket}:${String(value || '')}`;
+      let hash = 2166136261;
+      for (let index = 0; index < text.length; index += 1) {
+        hash ^= text.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+      }
+      return hash >>> 0;
+    };
+    const productRows = productResult?.error ? [] : productResult?.data || [];
+    const rotatedProducts = [...productRows].sort((left, right) => (
+      rotationScore(left?.id || left?.slug) - rotationScore(right?.id || right?.slug)
+    ));
+    const seenVendors = new Set();
+    const featuredProducts = [];
+    rotatedProducts.forEach((product) => {
+      const vendor = product?.vendors || {};
+      const vendorKey = String(
+        product?.vendor_id || vendor?.id || vendor?.vendor_id || vendor?.company_name || ''
+      ).trim();
+      if (!vendorKey || seenVendors.has(vendorKey) || featuredProducts.length >= 12) return;
+      seenVendors.add(vendorKey);
+      featuredProducts.push(product);
+    });
+    if (featuredProducts.length < 6) {
+      rotatedProducts.forEach((product) => {
+        if (featuredProducts.length >= 12 || featuredProducts.some((item) => item?.id === product?.id)) return;
+        featuredProducts.push(product);
+      });
+    }
+
     const countOrNull = (result) => (result?.error ? null : Number(result?.count || 0));
     const categoryCounts = [headCountResult, subCountResult, microCountResult].map(countOrNull);
     const totalCategories = categoryCounts.some((count) => count === null)
@@ -3233,11 +3349,12 @@ router.get('/home-feed', cacheResponse('dir:home-feed', 300), async (_req, res) 
     return res.json({
       success: true,
       generatedAt: new Date().toISOString(),
+      rotationKey: rotationBucket,
       categories: categories.map((category) => ({
         ...category,
         subcategory_count: subcategoryCounts[String(category.id)] || 0,
       })),
-      products: productResult?.error ? [] : productResult?.data || [],
+      products: featuredProducts,
       vendors: vendorResult?.error ? [] : featuredVendors,
       stats: {
         suppliers: countOrNull(vendorCountResult),
