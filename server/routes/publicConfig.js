@@ -1,6 +1,7 @@
 import express from 'express';
 import { db } from '../lib/dbClient.js';
 import { mysqlQuery } from '../lib/mysqlPool.js';
+import { findPageSeoOverride } from '../services/pageSeoService.js';
 
 const router = express.Router();
 
@@ -123,6 +124,17 @@ router.get('/page-status', async (req, res) => {
       degraded: true,
       statuses: [],
     });
+  }
+});
+
+router.get('/page-seo', async (req, res) => {
+  try {
+    const path = String(req.query.path || '').trim();
+    const seo = path ? await findPageSeoOverride(path) : null;
+    res.json({ success: true, seo });
+  } catch (error) {
+    console.error('[publicConfig] page-seo fetch failed:', error);
+    res.status(200).json({ success: true, degraded: true, seo: null });
   }
 });
 

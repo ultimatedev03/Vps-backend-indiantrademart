@@ -2,6 +2,7 @@ import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import { mysqlQuery } from '../lib/mysqlPool.js';
+import { findPageSeoOverride } from '../services/pageSeoService.js';
 
 const router = express.Router();
 
@@ -111,8 +112,8 @@ function stripManagedHeadTags(html = '') {
     .replace(/<link\b[^>]*rel=["']canonical["'][^>]*>\s*/gi, '');
 }
 
-function renderSeoShell({ req, title, description, keywords = '', bodyHtml = '' }) {
-  const canonical = absoluteUrl(req);
+function renderSeoShell({ req, title, description, keywords = '', canonical: requestedCanonical = '', bodyHtml = '' }) {
+  const canonical = requestedCanonical || absoluteUrl(req);
   const safeTitle = escapeHtml(title || 'IndianTradeMart');
   const safeDescription = escapeHtml(description || 'Find verified suppliers, products, manufacturers and service providers on IndianTradeMart.');
   const safeKeywords = escapeHtml(keywords);
@@ -158,6 +159,28 @@ const sendSeoHtml = (req, res, payload) => {
   res.setHeader('X-Robots-Tag', 'index, follow');
   res.status(200).send(html);
 };
+
+router.use(async (req, res, next) => {
+  if (!String(req.path || '').startsWith('/directory/')) return next();
+  try {
+    const seo = await findPageSeoOverride(req.path);
+    if (!seo) return next();
+    return sendSeoHtml(req, res, {
+      title: seo.meta_title,
+      description: seo.meta_description,
+      keywords: seo.meta_keywords,
+      canonical: seo.canonical_url,
+      bodyHtml: `
+        <h1>${escapeHtml(seo.h1)}</h1>
+        <p>${escapeHtml(seo.meta_description)}</p>
+        <p>Browse verified manufacturers, suppliers, products and business services on Indian Trade Mart.</p>
+      `,
+    });
+  } catch (error) {
+    console.error('[seoPages] DB page override failed:', error?.message || error);
+    return next();
+  }
+});
 
 async function findProduct(slug) {
   const searchText = slugToSearchText(slug);
