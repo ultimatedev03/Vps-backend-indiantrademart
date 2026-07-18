@@ -54,6 +54,10 @@ router.get('/active', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
       return res.status(404).json({ success: false, error: 'Vendor profile not found' });
     }
 
+    const previewMode = ['1', 'true', 'yes'].includes(
+      String(req.query?.preview || '').trim().toLowerCase()
+    ) && Boolean(req.user?.impersonated_by);
+
     const rows = await mysqlQuery(
       `SELECT c.*
          FROM vendor_campaigns c
@@ -90,6 +94,7 @@ router.get('/active', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
 
     const campaigns = targeted
       .filter((campaign) => {
+        if (previewMode) return true;
         const limit = Number(campaign.max_impressions_per_vendor || 0);
         if (limit <= 0) return true;
         return (impressionsByCampaign.get(String(campaign.id)) || 0) < limit;
@@ -99,9 +104,10 @@ router.get('/active', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
         ...campaign,
         effective_status: getCampaignEffectiveStatus(campaign),
         impressions_for_vendor: impressionsByCampaign.get(String(campaign.id)) || 0,
+        preview_mode: previewMode,
       }));
 
-    return res.json({ success: true, vendor_id: vendor.id, campaigns });
+    return res.json({ success: true, vendor_id: vendor.id, preview_mode: previewMode, campaigns });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message || 'Failed to load campaigns' });
   }
