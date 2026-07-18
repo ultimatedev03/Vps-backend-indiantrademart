@@ -7,9 +7,11 @@
 import vendorProfileRouter from '../../routes/vendorProfile.js';
 import kycRouter from '../../routes/kyc.js';
 import referralRouter from '../../routes/referrals.js';
+import vendorCampaignsRouter from '../../routes/vendorCampaigns.js';
 
 export const vendorRoutes = Object.freeze([
   { path: '/api/vendors', router: vendorProfileRouter },
   { path: '/api/kyc', router: kycRouter },
   { path: '/api/referrals', router: referralRouter },
+  { path: '/api/vendor-campaigns', router: vendorCampaignsRouter },
 ]);

@@ -122,12 +122,23 @@ const isGlobalScope = (value) => {
 const equalsIgnoreCase = (a, b) =>
   normalizeScope(a).toLowerCase() === normalizeScope(b).toLowerCase();
 
-const isCouponVendorApplicable = (couponVendorScope, vendor) => {
-  if (isGlobalScope(couponVendorScope)) return true;
+const isCouponVendorApplicable = (coupon, vendor) => {
   if (!vendor) return false;
 
-  const scope = normalizeScope(couponVendorScope);
   const candidates = [vendor.id, vendor.vendor_id, vendor.email].filter(Boolean);
+  const metadata = asObject(coupon?.metadata);
+  const targetedVendorIds = Array.isArray(metadata.target_vendor_ids)
+    ? metadata.target_vendor_ids.map((id) => normalizeScope(id)).filter(Boolean)
+    : [];
+
+  if (String(metadata.target_type || '').toUpperCase() === 'SELECTED' || targetedVendorIds.length > 0) {
+    return candidates.some((candidate) =>
+      targetedVendorIds.some((targetId) => equalsIgnoreCase(targetId, candidate))
+    );
+  }
+
+  if (isGlobalScope(coupon?.vendor_id)) return true;
+  const scope = normalizeScope(coupon?.vendor_id);
   return candidates.some((candidate) => equalsIgnoreCase(scope, candidate));
 };
 
@@ -157,6 +168,15 @@ const asObject = (value) => {
     }
   }
   return typeof value === 'object' && !Array.isArray(value) ? value : {};
+};
+
+const getCouponStartsAtMs = (coupon = {}) => {
+  const metadata = asObject(coupon?.metadata);
+  const raw = metadata.campaign_starts_at || metadata.starts_at || null;
+  if (!raw) return null;
+  const parsed = parseCouponExpiryInput(raw);
+  const ts = parsed?.getTime() ?? null;
+  return Number.isFinite(ts) ? ts : null;
 };
 
 const getPlanExtraLeadPrice = (plan) => {
@@ -463,12 +483,15 @@ async function resolveOfferForPayment({
       .maybeSingle();
 
     if (cpn && !couponErr) {
+      const startsAtMs = getCouponStartsAtMs(cpn);
       const expiresAtMs = getCouponExpiresAtMs(cpn);
-      if (expiresAtMs !== null && expiresAtMs <= Date.now()) {
+      if (startsAtMs !== null && startsAtMs > Date.now()) {
+        couponFailureMessage = 'Coupon is not active yet';
+      } else if (expiresAtMs !== null && expiresAtMs <= Date.now()) {
         couponFailureMessage = 'Coupon expired';
       } else if (cpn.max_uses && cpn.max_uses > 0 && cpn.used_count >= cpn.max_uses) {
         couponFailureMessage = 'Coupon usage limit reached';
-      } else if (!isCouponVendorApplicable(cpn.vendor_id, vendor)) {
+      } else if (!isCouponVendorApplicable(cpn, vendor)) {
         couponFailureMessage = 'Coupon not valid for this vendor';
       } else if (!isCouponPlanApplicable(cpn.plan_id, plan)) {
         couponFailureMessage = 'Coupon not valid for this plan';

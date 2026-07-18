@@ -36,6 +36,7 @@ import {
   getCategoryDemandDetails,
 } from '../lib/categoryDemandAnalytics.js';
 import { normalizePlanFeatures } from '../lib/vendorPlanCatalog.js';
+import superadminVendorCampaignsRouter from './superadminVendorCampaigns.js';
 
 const router = express.Router();
 
@@ -854,6 +855,7 @@ router.post('/impersonation/open', async (req, res) => {
 
 // All routes below require superadmin.
 router.use(requireSuperAdmin);
+router.use('/vendor-campaigns', superadminVendorCampaignsRouter);
 
 function getTargetDisplayName(targetType, row = {}) {
   if (targetType === 'VENDOR') {

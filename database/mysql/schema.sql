@@ -1453,6 +1453,53 @@ CREATE TABLE IF NOT EXISTS `vendor_plan_coupons` (
   KEY `idx_vendor_plan_coupons_created_at` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS `vendor_campaigns` (
+  `id` CHAR(36) NOT NULL,
+  `name` VARCHAR(191) NOT NULL,
+  `campaign_type` VARCHAR(32) NOT NULL DEFAULT 'ANNOUNCEMENT',
+  `title` VARCHAR(191) NOT NULL,
+  `message` TEXT NOT NULL,
+  `style_variant` VARCHAR(32) NOT NULL DEFAULT 'INFO',
+  `cta_label` VARCHAR(80) NULL,
+  `cta_url` VARCHAR(500) NULL,
+  `target_type` VARCHAR(32) NOT NULL DEFAULT 'ALL',
+  `target_vendor_ids` JSON NULL,
+  `coupon_id` CHAR(36) NULL,
+  `coupon_code` VARCHAR(191) NULL,
+  `discount_type` VARCHAR(20) NULL,
+  `discount_value` DECIMAL(16,2) NULL,
+  `plan_id` CHAR(36) NULL,
+  `max_uses` INT NULL,
+  `starts_at` DATETIME NOT NULL,
+  `ends_at` DATETIME NOT NULL,
+  `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+  `priority` INT NOT NULL DEFAULT 50,
+  `dismissible` TINYINT(1) NOT NULL DEFAULT 1,
+  `max_impressions_per_vendor` INT NOT NULL DEFAULT 1,
+  `created_by` CHAR(36) NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` DATETIME NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_vendor_campaigns_delivery` (`is_active`, `starts_at`, `ends_at`, `priority`),
+  KEY `idx_vendor_campaigns_coupon_id` (`coupon_id`),
+  KEY `idx_vendor_campaigns_created_at` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `vendor_campaign_events` (
+  `id` CHAR(36) NOT NULL,
+  `campaign_id` CHAR(36) NOT NULL,
+  `vendor_id` CHAR(36) NOT NULL,
+  `event_type` VARCHAR(32) NOT NULL,
+  `session_key` VARCHAR(100) NOT NULL,
+  `metadata` JSON NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_vendor_campaign_event_session` (`campaign_id`, `vendor_id`, `event_type`, `session_key`),
+  KEY `idx_vendor_campaign_events_campaign` (`campaign_id`, `created_at`),
+  KEY `idx_vendor_campaign_events_vendor` (`vendor_id`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `vendor_plan_slots` (
   `id` CHAR(36) NOT NULL,
   `subscription_id` CHAR(36) NULL,
