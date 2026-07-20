@@ -9,6 +9,7 @@ import { sendEmail } from '../lib/emailService.js';
 import { writeAuditLog } from '../lib/audit.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 import { consumeLeadForVendorWithCompat } from '../lib/leadConsumptionCompat.js';
+import { findMonthlyTrialUsage } from '../lib/monthlyTrialUsage.js';
 import {
   applyReferralRewardAfterPayment,
   getReferralSettings,
@@ -207,45 +208,12 @@ const MONTHLY_TRIAL_ALREADY_USED_CODE = 'MONTHLY_TRIAL_ALREADY_USED';
 const MONTHLY_TRIAL_ALREADY_USED_MESSAGE =
   'The one-time monthly trial has already been used. Startup, Certified and Booster can now be purchased only with yearly billing.';
 
-async function findMonthlyTrialUsage(vendorId) {
-  const { data: subscriptionRows, error: subscriptionError } = await db
-    .from('vendor_plan_subscriptions')
-    .select('id, plan_id, billing_cycle, status, start_date, end_date, created_at')
-    .eq('vendor_id', vendorId)
-    .eq('billing_cycle', 'MONTHLY')
-    .order('created_at', { ascending: true })
-    .limit(1);
-
-  if (subscriptionError) {
-    throw new Error(subscriptionError.message || 'Failed to validate monthly trial history');
-  }
-
-  if (subscriptionRows?.[0]) {
-    return { source: 'SUBSCRIPTION', ...subscriptionRows[0] };
-  }
-
-  const { data: paymentRows, error: paymentError } = await db
-    .from('vendor_payments')
-    .select('id, plan_id, subscription_id, billing_cycle, status, payment_date, created_at')
-    .eq('vendor_id', vendorId)
-    .eq('billing_cycle', 'MONTHLY')
-    .in('status', ['COMPLETED', 'SUCCESS', 'PAID'])
-    .order('created_at', { ascending: true })
-    .limit(1);
-
-  if (paymentError) {
-    throw new Error(paymentError.message || 'Failed to validate monthly payment history');
-  }
-
-  return paymentRows?.[0] ? { source: 'PAYMENT', ...paymentRows[0] } : null;
-}
-
 async function validateMonthlyTrialEligibility(vendorId, billingQuote) {
   if (String(billingQuote?.billing_cycle || '').toUpperCase() !== 'MONTHLY') {
     return { eligible: true, usage: null };
   }
 
-  const usage = await findMonthlyTrialUsage(vendorId);
+  const usage = await findMonthlyTrialUsage(db, vendorId);
   return { eligible: !usage, usage };
 }
 
@@ -256,7 +224,7 @@ router.get('/monthly-trial-eligibility/:vendor_id', async (req, res) => {
       return res.status(400).json({ error: 'Missing vendor_id' });
     }
 
-    const usage = await findMonthlyTrialUsage(vendorId);
+    const usage = await findMonthlyTrialUsage(db, vendorId);
     return res.json({
       success: true,
       data: {
@@ -382,7 +350,7 @@ async function getActiveVendorSubscription(vendorId) {
     .eq('vendor_id', vendorId)
     .eq('status', 'ACTIVE')
     .order('end_date', { ascending: false, nullsFirst: false })
-    .order('created_at', { ascending: false })
+    .order('start_date', { ascending: false })
     .limit(10);
 
   if (error) {
