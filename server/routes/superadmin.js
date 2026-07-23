@@ -1,7 +1,8 @@
 import { logger } from '../utils/logger.js';
 import express from 'express';
+import { randomUUID } from 'node:crypto';
 import { db } from '../lib/dbClient.js';
-import { mysqlQuery } from '../lib/mysqlPool.js';
+import { mysqlQuery, withMysqlConnection } from '../lib/mysqlPool.js';
 import { notifyUser } from '../lib/notify.js';
 import { writeAuditLog } from '../lib/audit.js';
 import {
@@ -805,6 +806,183 @@ async function loadVendorLeadStats(vendorIds = []) {
   return statsByVendor;
 }
 
+async function loadVendorCurrentPlans(vendorIds = []) {
+  const ids = Array.from(new Set((vendorIds || []).map((id) => String(id || '').trim()).filter(Boolean)));
+  const plansByVendor = new Map();
+  if (!ids.length) return plansByVendor;
+
+  const placeholders = ids.map(() => '?').join(',');
+  const rows = await mysqlQuery(
+    `SELECT s.id AS subscription_id, s.vendor_id, s.plan_id, s.status, s.start_date, s.end_date,
+            s.plan_duration_days, s.sales_code,
+            p.name AS plan_name, p.price AS plan_price, p.duration_days, p.is_active AS plan_is_active
+       FROM vendor_plan_subscriptions s
+       LEFT JOIN vendor_plans p ON p.id = s.plan_id
+      WHERE s.vendor_id IN (${placeholders})
+        AND UPPER(COALESCE(s.status, '')) = 'ACTIVE'
+        AND (s.end_date IS NULL OR s.end_date >= NOW())
+      ORDER BY s.start_date DESC, s.end_date DESC, s.id DESC`,
+    ids
+  ).catch((error) => {
+    logger.warn('[SuperAdmin] Current vendor plan lookup failed:', error?.message || error);
+    return [];
+  });
+
+  for (const row of rows || []) {
+    const vendorId = String(row?.vendor_id || '').trim();
+    if (!vendorId || plansByVendor.has(vendorId)) continue;
+    plansByVendor.set(vendorId, {
+      id: row.subscription_id,
+      subscription_id: row.subscription_id,
+      vendor_id: vendorId,
+      plan_id: row.plan_id,
+      name: row.plan_name || 'Unnamed plan',
+      plan_name: row.plan_name || 'Unnamed plan',
+      price: Number(row.plan_price || 0),
+      plan_price: Number(row.plan_price || 0),
+      status: row.status || 'ACTIVE',
+      start_date: row.start_date || null,
+      end_date: row.end_date || null,
+      duration_days: Number(row.duration_days || row.plan_duration_days || 0),
+      plan_duration_days: Number(row.plan_duration_days || row.duration_days || 0),
+      sales_code: row.sales_code || null,
+      plan_is_active: normalizeBooleanInput(row.plan_is_active, false),
+    });
+  }
+
+  return plansByVendor;
+}
+
+async function activateVendorPlan({
+  vendorId,
+  planId,
+  durationDays: requestedDurationDays,
+}) {
+  return withMysqlConnection(async (connection) => {
+    await connection.beginTransaction();
+    try {
+      const [vendorRows] = await connection.query(
+        `SELECT id, user_id, vendor_id, company_name, owner_name, email, phone
+           FROM vendors
+          WHERE id = ?
+          LIMIT 1
+          FOR UPDATE`,
+        [vendorId]
+      );
+      const vendor = vendorRows?.[0] || null;
+      if (!vendor) {
+        const error = new Error('Vendor not found');
+        error.statusCode = 404;
+        throw error;
+      }
+
+      const [planRows] = await connection.query(
+        `SELECT id, name, price, daily_limit, weekly_limit, yearly_limit,
+                duration_days, is_active, features
+           FROM vendor_plans
+          WHERE id = ?
+          LIMIT 1
+          FOR UPDATE`,
+        [planId]
+      );
+      const plan = planRows?.[0] || null;
+      if (!plan) {
+        const error = new Error('Subscription plan not found');
+        error.statusCode = 404;
+        throw error;
+      }
+
+      const durationDays = Math.min(
+        3660,
+        toPositiveInteger(requestedDurationDays, toPositiveInteger(plan.duration_days, 365))
+      );
+      const startDate = new Date();
+      const endDate = new Date(startDate.getTime() + durationDays * 24 * 60 * 60 * 1000);
+
+      const [previousSubscriptions] = await connection.query(
+        `SELECT id, plan_id, start_date, end_date, status
+           FROM vendor_plan_subscriptions
+          WHERE vendor_id = ?
+            AND UPPER(COALESCE(status, '')) = 'ACTIVE'
+          FOR UPDATE`,
+        [vendorId]
+      );
+
+      await connection.query(
+        `UPDATE vendor_plan_subscriptions
+            SET status = 'INACTIVE'
+          WHERE vendor_id = ?
+            AND UPPER(COALESCE(status, '')) = 'ACTIVE'`,
+        [vendorId]
+      );
+
+      const subscriptionId = randomUUID();
+      await connection.query(
+        `INSERT INTO vendor_plan_subscriptions
+          (id, vendor_id, plan_id, start_date, end_date, status, plan_duration_days,
+           auto_renewal_enabled, renewal_notification_sent)
+         VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, 0, 0)`,
+        [subscriptionId, vendorId, planId, startDate, endDate, durationDays]
+      );
+
+      await connection.query(
+        `INSERT INTO vendor_lead_quota
+          (id, vendor_id, plan_id, daily_used, daily_limit, weekly_used, weekly_limit,
+           yearly_used, yearly_limit, last_reset_date, updated_at)
+         VALUES (?, ?, ?, 0, ?, 0, ?, 0, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           plan_id = VALUES(plan_id),
+           daily_used = 0,
+           daily_limit = VALUES(daily_limit),
+           weekly_used = 0,
+           weekly_limit = VALUES(weekly_limit),
+           yearly_used = 0,
+           yearly_limit = VALUES(yearly_limit),
+           last_reset_date = VALUES(last_reset_date),
+           updated_at = VALUES(updated_at)`,
+        [
+          randomUUID(),
+          vendorId,
+          planId,
+          toNonNegativeInteger(plan.daily_limit, 0),
+          toNonNegativeInteger(plan.weekly_limit, 0),
+          toNonNegativeInteger(plan.yearly_limit, 0),
+          startDate,
+          startDate,
+        ]
+      );
+
+      await connection.commit();
+
+      return {
+        vendor,
+        plan,
+        previousSubscriptions: previousSubscriptions || [],
+        subscription: {
+          id: subscriptionId,
+          subscription_id: subscriptionId,
+          vendor_id: vendorId,
+          plan_id: planId,
+          name: plan.name || 'Unnamed plan',
+          plan_name: plan.name || 'Unnamed plan',
+          price: Number(plan.price || 0),
+          plan_price: Number(plan.price || 0),
+          status: 'ACTIVE',
+          start_date: startDate.toISOString(),
+          end_date: endDate.toISOString(),
+          duration_days: durationDays,
+          plan_duration_days: durationDays,
+          sales_code: null,
+          plan_is_active: normalizeBooleanInput(plan.is_active, false),
+        },
+      };
+    } catch (error) {
+      await connection.rollback().catch(() => {});
+      throw error;
+    }
+  });
+}
+
 // -----------------------
 // Auth
 // -----------------------
@@ -1523,9 +1701,14 @@ router.get('/vendors', async (req, res) => {
       return res.status(500).json({ success: false, error: error.message });
     }
 
-    const statsByVendor = await loadVendorLeadStats((data || []).map((vendor) => vendor?.id));
+    const vendorIds = (data || []).map((vendor) => vendor?.id);
+    const [statsByVendor, plansByVendor] = await Promise.all([
+      loadVendorLeadStats(vendorIds),
+      loadVendorCurrentPlans(vendorIds),
+    ]);
     const vendors = (data || []).map((vendor) => ({
       ...vendor,
+      current_plan: plansByVendor.get(vendor?.id) || null,
       lead_stats: statsByVendor.get(vendor?.id) || {
         direct_total: 0,
         direct_opened: 0,
@@ -1602,6 +1785,96 @@ router.put('/vendors/:vendorId/all-india-visibility', async (req, res) => {
     return res.json({ success: true, vendor: data });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.post('/vendors/:vendorId/plan-activation', async (req, res) => {
+  try {
+    const vendorId = compactText(req.params.vendorId);
+    const planId = compactText(req.body?.plan_id || req.body?.planId);
+    const notes = compactText(req.body?.notes).slice(0, 2000);
+    const requestedDurationDays = Number(req.body?.duration_days ?? req.body?.durationDays);
+
+    if (!vendorId || !planId) {
+      return res.status(400).json({
+        success: false,
+        error: 'vendorId and plan_id are required',
+      });
+    }
+    if (
+      req.body?.duration_days !== undefined &&
+      (!Number.isFinite(requestedDurationDays) || requestedDurationDays < 1 || requestedDurationDays > 3660)
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: 'duration_days must be between 1 and 3660',
+      });
+    }
+
+    const result = await activateVendorPlan({
+      vendorId,
+      planId,
+      durationDays: requestedDurationDays,
+    });
+
+    try {
+      await writeAuditLog({
+        req,
+        actor: req.actor,
+        action: 'SUPERADMIN_VENDOR_PLAN_ACTIVATED',
+        entityType: 'vendor_plan_subscriptions',
+        entityId: result.subscription.id,
+        details: {
+          vendor_id: vendorId,
+          vendor_code: result.vendor.vendor_id || null,
+          company_name: result.vendor.company_name || null,
+          plan_id: planId,
+          plan_name: result.plan.name || null,
+          duration_days: result.subscription.duration_days,
+          previous_subscription_ids: result.previousSubscriptions.map((row) => row.id).filter(Boolean),
+          previous_plan_ids: result.previousSubscriptions.map((row) => row.plan_id).filter(Boolean),
+          activated_inactive_plan: !normalizeBooleanInput(result.plan.is_active, false),
+          payment_recorded: false,
+          notes: notes || null,
+        },
+      });
+    } catch (auditError) {
+      logger.error('[SuperAdmin] Plan activation audit failed:', auditError?.message || auditError);
+    }
+
+    try {
+      await notifyUser({
+        user_id: result.vendor.user_id || null,
+        email: result.vendor.email || null,
+        role: 'VENDOR',
+        full_name: result.vendor.owner_name || result.vendor.company_name || null,
+        type: 'PLAN_ACTIVATED',
+        title: `${result.plan.name || 'Subscription'} activated`,
+        message: `Your ${result.plan.name || 'subscription'} plan is active until ${new Date(
+          result.subscription.end_date
+        ).toLocaleDateString('en-IN')}.`,
+        link: '/vendor/subscriptions',
+      });
+    } catch (notificationError) {
+      logger.warn(
+        '[SuperAdmin] Plan activation notification failed:',
+        notificationError?.message || notificationError
+      );
+    }
+
+    return res.status(201).json({
+      success: true,
+      vendor: result.vendor,
+      plan: result.plan,
+      subscription: result.subscription,
+      current_plan: result.subscription,
+      payment_recorded: false,
+    });
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      success: false,
+      error: error?.message || 'Failed to activate vendor plan',
+    });
   }
 });
 
