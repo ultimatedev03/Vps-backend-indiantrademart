@@ -21,6 +21,10 @@ import {
   searchVendors360,
   updateSearch360CaseStatus,
 } from "../lib/search360.js";
+import {
+  normalizeProductPrice,
+  ProductPriceValidationError,
+} from "../lib/productPrice.js";
 
 const router = express.Router();
 
@@ -1770,10 +1774,14 @@ router.post("/buyers/:buyerId/activate", async (req, res) => {
 router.put("/products/:productId", async (req, res) => {
   try {
     const { productId } = req.params;
+    const updates = { ...(req.body || {}) };
+    if (Object.prototype.hasOwnProperty.call(updates, "price")) {
+      updates.price = normalizeProductPrice(updates.price);
+    }
 
     const { data, error } = await db
       .from("products")
-      .update(req.body)
+      .update(updates)
       .eq("id", productId)
       .select()
       .maybeSingle();
@@ -1787,12 +1795,13 @@ router.put("/products/:productId", async (req, res) => {
       action: "PRODUCT_UPDATE",
       entityType: "products",
       entityId: productId,
-      details: { payload: req.body },
+      details: { payload: updates },
     });
 
     return res.json({ success: true, product: data });
   } catch (e) {
-    return res.status(500).json({ success: false, error: e.message });
+    const status = e instanceof ProductPriceValidationError ? 400 : 500;
+    return res.status(status).json({ success: false, error: e.message });
   }
 });
 

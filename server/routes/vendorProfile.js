@@ -19,6 +19,7 @@ import {
   buildVendorCertificateMeta,
   generateVendorCertificatePDF,
 } from '../lib/vendorCertificate.js';
+import { normalizeProductPrice } from '../lib/productPrice.js';
 
 const router = express.Router();
 
@@ -295,6 +296,10 @@ const sanitizeVendorProductPayload = (payload = {}, { partial = false } = {}) =>
       cleaned[key] = String(cleaned[key] || '').trim();
     }
   });
+
+  if (Object.prototype.hasOwnProperty.call(cleaned, 'price')) {
+    cleaned.price = normalizeProductPrice(cleaned.price);
+  }
 
   ['head_category_id', 'sub_category_id', 'micro_category_id'].forEach((key) => {
     if (Object.prototype.hasOwnProperty.call(cleaned, key)) {

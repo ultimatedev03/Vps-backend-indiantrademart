@@ -22,6 +22,10 @@ import {
   upsertPublicUser,
 } from '../lib/auth.js';
 import { sendTemporaryPasswordEmail, sendWelcomeEmail } from '../lib/emailService.js';
+import {
+  normalizeProductPrice,
+  ProductPriceValidationError,
+} from '../lib/productPrice.js';
 import { logger } from '../utils/logger.js';
 
 const router = express.Router();
@@ -90,6 +94,9 @@ function sanitizeProductPayload(payload = {}) {
   delete next.created_by;
   delete next.created_by_user_id;
   delete next.created_by_email;
+  if (Object.prototype.hasOwnProperty.call(next, 'price')) {
+    next.price = normalizeProductPrice(next.price);
+  }
   return next;
 }
 
@@ -613,7 +620,8 @@ router.post('/products', requireAuth(), async (req, res) => {
     invalidateDirCache();
     return res.status(201).json({ success: true, product: data });
   } catch (e) {
-    return res.status(500).json({ success: false, error: e.message });
+    const status = e instanceof ProductPriceValidationError ? 400 : 500;
+    return res.status(status).json({ success: false, error: e.message });
   }
 });
 
@@ -628,7 +636,8 @@ router.put('/products/:productId', requireAuth(), async (req, res) => {
     invalidateDirCache();
     return res.json({ success: true, product: { id: req.params.productId, ...updatePayload } });
   } catch (e) {
-    return res.status(500).json({ success: false, error: e.message });
+    const status = e instanceof ProductPriceValidationError ? 400 : 500;
+    return res.status(status).json({ success: false, error: e.message });
   }
 });
 
