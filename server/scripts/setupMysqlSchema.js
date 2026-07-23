@@ -42,6 +42,8 @@ const mysqlMissingColumns = [
   { table: 'head_categories', column: 'keywords', definition: 'TEXT NULL' },
   { table: 'sub_categories', column: 'meta_tags', definition: 'TEXT NULL' },
   { table: 'sub_categories', column: 'keywords', definition: 'TEXT NULL' },
+  { table: 'page_seo_overrides', column: 'schema_types', definition: 'TEXT NULL' },
+  { table: 'page_seo_overrides', column: 'schema_json', definition: 'LONGTEXT NULL' },
   { table: 'sales_vendor_engagements', column: 'lead_id', definition: 'CHAR(36) NULL' },
   { table: 'sales_vendor_engagements', column: 'plan_id', definition: 'CHAR(36) NULL' },
   { table: 'sales_vendor_engagements', column: 'sales_code', definition: 'VARCHAR(191) NULL' },

@@ -740,6 +740,8 @@ CREATE TABLE IF NOT EXISTS `page_seo_overrides` (
   `canonical_url` TEXT NOT NULL,
   `meta_keywords` TEXT NULL,
   `schema_kind` VARCHAR(64) NOT NULL DEFAULT 'web-page',
+  `schema_types` TEXT NULL,
+  `schema_json` LONGTEXT NULL,
   `date_modified` DATE NULL,
   `is_active` TINYINT(1) NOT NULL DEFAULT 1,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

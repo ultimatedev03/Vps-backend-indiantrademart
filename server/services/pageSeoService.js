@@ -24,6 +24,8 @@ export async function findPageSeoOverride(value) {
             canonical_url,
             meta_keywords,
             schema_kind,
+            schema_types,
+            schema_json,
             date_modified,
             updated_at
        FROM page_seo_overrides

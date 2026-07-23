@@ -109,15 +109,72 @@ function stripManagedHeadTags(html = '') {
   return String(html)
     .replace(/<title\b[^>]*>[\s\S]*?<\/title>/i, '')
     .replace(/<meta\b[^>]*(?:name|property)=["'](?:description|keywords|robots|googlebot|og:title|og:description|og:url|twitter:title|twitter:description)["'][^>]*>\s*/gi, '')
-    .replace(/<link\b[^>]*rel=["']canonical["'][^>]*>\s*/gi, '');
+    .replace(/<link\b[^>]*rel=["']canonical["'][^>]*>\s*/gi, '')
+    .replace(/<script\s+data-page-seo=["']true["'][^>]*>[\s\S]*?<\/script>\s*/gi, '')
+    .replace(/<script\s+data-page-seo-record=["']true["'][^>]*>[\s\S]*?<\/script>\s*/gi, '');
 }
 
-function renderSeoShell({ req, title, description, keywords = '', canonical: requestedCanonical = '', bodyHtml = '' }) {
+const parseSchemaDocument = (value) => {
+  if (!value) return null;
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (Array.isArray(parsed)) return { '@context': 'https://schema.org', '@graph': parsed };
+    return parsed;
+  } catch {
+    return null;
+  }
+};
+
+const getSchemaFaqItems = (schema) => {
+  const graph = Array.isArray(schema?.['@graph']) ? schema['@graph'] : [schema].filter(Boolean);
+  const faqNode = graph.find((node) => node?.['@type'] === 'FAQPage');
+  return (Array.isArray(faqNode?.mainEntity) ? faqNode.mainEntity : [])
+    .map((item) => ({
+      question: cleanText(item?.name),
+      answer: cleanText(item?.acceptedAnswer?.text),
+    }))
+    .filter((item) => item.question && item.answer);
+};
+
+const renderFaqFallback = (schema) => {
+  const items = getSchemaFaqItems(schema);
+  if (!items.length) return '';
+  return `
+    <section aria-labelledby="seo-faq-heading" style="margin-top:32px">
+      <h2 id="seo-faq-heading">Frequently asked questions</h2>
+      ${items.map((item) => `
+        <article>
+          <h3>${escapeHtml(item.question)}</h3>
+          <p>${escapeHtml(item.answer)}</p>
+        </article>
+      `).join('')}
+    </section>
+  `;
+};
+
+function renderSeoShell({
+  req,
+  title,
+  description,
+  keywords = '',
+  canonical: requestedCanonical = '',
+  schema = null,
+  seoRecord = null,
+  bodyHtml = '',
+}) {
   const canonical = requestedCanonical || absoluteUrl(req);
   const safeTitle = escapeHtml(title || 'IndianTradeMart');
   const safeDescription = escapeHtml(description || 'Find verified suppliers, products, manufacturers and service providers on IndianTradeMart.');
   const safeKeywords = escapeHtml(keywords);
   const safeCanonical = escapeHtml(canonical);
+  const schemaDocument = parseSchemaDocument(schema);
+  const schemaPayload = schemaDocument
+    ? JSON.stringify(schemaDocument).replace(/</g, '\\u003c')
+    : '';
+  const recordPayload = seoRecord
+    ? JSON.stringify(seoRecord).replace(/</g, '\\u003c')
+    : '';
   const seoHead = [
     `<title>${safeTitle}</title>`,
     `<meta name="description" content="${safeDescription}">`,
@@ -131,9 +188,15 @@ function renderSeoShell({ req, title, description, keywords = '', canonical: req
     '<meta property="og:type" content="website">',
     `<meta name="twitter:title" content="${safeTitle}">`,
     `<meta name="twitter:description" content="${safeDescription}">`,
+    schemaPayload
+      ? `<script data-page-seo="true" type="application/ld+json">${schemaPayload}</script>`
+      : '',
+    recordPayload
+      ? `<script data-page-seo-record="true" type="application/json">${recordPayload}</script>`
+      : '',
   ].filter(Boolean).join('\n    ');
 
-  const fallbackHtml = `<main data-seo-fallback="true" style="font-family:Arial,sans-serif;max-width:1040px;margin:0 auto;padding:32px 20px;line-height:1.65;color:#111827">${bodyHtml}</main>`;
+  const fallbackHtml = `<main data-seo-fallback="true" style="font-family:Arial,sans-serif;max-width:1040px;margin:0 auto;padding:32px 20px;line-height:1.65;color:#111827">${bodyHtml}${renderFaqFallback(schemaDocument)}</main>`;
   let html = stripManagedHeadTags(loadIndexTemplate());
   html = html.includes('</head>') ? html.replace('</head>', `    ${seoHead}\n</head>`) : `${seoHead}${html}`;
   const hydratedRoot = /<div\s+id=["']root["'][^>]*>[\s\S]*<\/div>(?=\s*(?:<script\b[^>]*>[\s\S]*?<\/script>\s*)*<\/body>)/i;
@@ -170,6 +233,8 @@ router.use(async (req, res, next) => {
       description: seo.meta_description,
       keywords: seo.meta_keywords,
       canonical: seo.canonical_url,
+      schema: seo.schema_json,
+      seoRecord: seo,
       bodyHtml: `
         <h1>${escapeHtml(seo.h1)}</h1>
         <p>${escapeHtml(seo.meta_description)}</p>
