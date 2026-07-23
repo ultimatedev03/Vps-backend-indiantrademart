@@ -4,6 +4,7 @@ export const VENDOR_CAMPAIGN_TYPES = new Set(['ANNOUNCEMENT', 'DISCOUNT', 'COUPO
 export const VENDOR_CAMPAIGN_TARGETS = new Set(['ALL', 'SELECTED']);
 export const VENDOR_CAMPAIGN_VARIANTS = new Set(['INFO', 'SUCCESS', 'WARNING', 'PREMIUM']);
 export const VENDOR_CAMPAIGN_EVENTS = new Set(['IMPRESSION', 'CLICK', 'DISMISS', 'COPY_CODE']);
+export const VENDOR_CAMPAIGN_PLACEMENTS = new Set(['VENDOR_PORTAL', 'HOMEPAGE']);
 
 let ensureTablesPromise = null;
 
@@ -31,6 +32,9 @@ export const parseJsonObject = (value) => {
 
 export const normalizeCampaignRow = (row = {}) => ({
   ...row,
+  placement: VENDOR_CAMPAIGN_PLACEMENTS.has(String(row.placement || '').trim().toUpperCase())
+    ? String(row.placement).trim().toUpperCase()
+    : 'VENDOR_PORTAL',
   target_vendor_ids: parseJsonArray(row.target_vendor_ids)
     .map((id) => String(id || '').trim())
     .filter(Boolean),
@@ -90,6 +94,7 @@ export async function ensureVendorCampaignTables() {
         id CHAR(36) NOT NULL,
         name VARCHAR(191) NOT NULL,
         campaign_type VARCHAR(32) NOT NULL DEFAULT 'ANNOUNCEMENT',
+        placement VARCHAR(32) NOT NULL DEFAULT 'VENDOR_PORTAL',
         title VARCHAR(191) NOT NULL,
         message TEXT NOT NULL,
         style_variant VARCHAR(32) NOT NULL DEFAULT 'INFO',
@@ -120,6 +125,39 @@ export async function ensureVendorCampaignTables() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
 
+    const campaignColumns = await mysqlQuery(`
+      SELECT COLUMN_NAME
+        FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'vendor_campaigns'
+    `);
+    const campaignColumnNames = new Set(
+      campaignColumns.map((column) => String(column.COLUMN_NAME || column.column_name || '').toLowerCase())
+    );
+    if (!campaignColumnNames.has('placement')) {
+      await mysqlQuery(`
+        ALTER TABLE vendor_campaigns
+        ADD COLUMN placement VARCHAR(32) NOT NULL DEFAULT 'VENDOR_PORTAL' AFTER campaign_type
+      `);
+    }
+
+    const campaignIndexes = await mysqlQuery(`
+      SELECT DISTINCT INDEX_NAME
+        FROM information_schema.STATISTICS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'vendor_campaigns'
+    `);
+    const campaignIndexNames = new Set(
+      campaignIndexes.map((index) => String(index.INDEX_NAME || index.index_name || '').toLowerCase())
+    );
+    if (!campaignIndexNames.has('idx_vendor_campaigns_placement_delivery')) {
+      await mysqlQuery(`
+        ALTER TABLE vendor_campaigns
+        ADD KEY idx_vendor_campaigns_placement_delivery
+          (placement, is_active, starts_at, ends_at, priority)
+      `);
+    }
+
     await mysqlQuery(`
       CREATE TABLE IF NOT EXISTS vendor_campaign_events (
         id CHAR(36) NOT NULL,
@@ -133,6 +171,23 @@ export async function ensureVendorCampaignTables() {
         UNIQUE KEY uq_vendor_campaign_event_session (campaign_id, vendor_id, event_type, session_key),
         KEY idx_vendor_campaign_events_campaign (campaign_id, created_at),
         KEY idx_vendor_campaign_events_vendor (vendor_id, created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+
+    await mysqlQuery(`
+      CREATE TABLE IF NOT EXISTS homepage_campaign_events (
+        id CHAR(36) NOT NULL,
+        campaign_id CHAR(36) NOT NULL,
+        visitor_id VARCHAR(80) NOT NULL,
+        event_type VARCHAR(32) NOT NULL,
+        session_key VARCHAR(100) NOT NULL,
+        metadata JSON NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uq_homepage_campaign_event_session
+          (campaign_id, visitor_id, event_type, session_key),
+        KEY idx_homepage_campaign_events_campaign (campaign_id, created_at),
+        KEY idx_homepage_campaign_events_visitor (visitor_id, created_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
   })().catch((error) => {

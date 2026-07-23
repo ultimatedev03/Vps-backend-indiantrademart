@@ -15,6 +15,32 @@ import {
 const router = express.Router();
 
 const text = (value, max = 500) => String(value || '').trim().slice(0, max);
+const PUBLIC_VISITOR_ID_RE = /^[A-Za-z0-9_-]{16,80}$/;
+
+const toPublicCampaign = (campaign = {}) => ({
+  id: campaign.id,
+  placement: campaign.placement,
+  campaign_type: campaign.campaign_type,
+  title: campaign.title,
+  message: campaign.message,
+  style_variant: campaign.style_variant,
+  cta_label: campaign.cta_label,
+  cta_url: campaign.cta_url,
+  coupon_code: campaign.coupon_code,
+  discount_type: campaign.discount_type,
+  discount_value: campaign.discount_value,
+  starts_at: campaign.starts_at,
+  ends_at: campaign.ends_at,
+  priority: campaign.priority,
+  dismissible: campaign.dismissible,
+  max_impressions_per_vendor: campaign.max_impressions_per_vendor,
+  effective_status: getCampaignEffectiveStatus(campaign),
+});
+
+const normalizePublicEventMetadata = (metadata = {}) => ({
+  path: text(metadata?.path, 500),
+  destination: text(metadata?.destination, 500),
+});
 
 async function resolveVendorForCampaigns(user = {}) {
   const userId = text(user.id, 80);
@@ -46,6 +72,116 @@ async function resolveVendorForCampaigns(user = {}) {
   return null;
 }
 
+router.get('/homepage/active', async (req, res) => {
+  try {
+    await ensureVendorCampaignTables();
+    const visitorId = text(req.query?.visitor_id, 80);
+    if (!PUBLIC_VISITOR_ID_RE.test(visitorId)) {
+      return res.status(400).json({ success: false, error: 'A valid homepage visitor ID is required' });
+    }
+
+    const rows = await mysqlQuery(
+      `SELECT c.*
+         FROM vendor_campaigns c
+        WHERE c.deleted_at IS NULL
+          AND c.placement = 'HOMEPAGE'
+          AND c.is_active = 1
+          AND c.starts_at <= UTC_TIMESTAMP()
+          AND c.ends_at > UTC_TIMESTAMP()
+        ORDER BY c.priority DESC, c.starts_at DESC, c.created_at DESC
+        LIMIT 50`
+    );
+    const campaigns = rows.map(normalizeCampaignRow);
+    if (!campaigns.length) {
+      return res.json({ success: true, campaigns: [] });
+    }
+
+    const campaignIds = campaigns.map((campaign) => campaign.id);
+    const placeholders = campaignIds.map(() => '?').join(', ');
+    const impressionRows = await mysqlQuery(
+      `SELECT campaign_id, COUNT(*) AS impressions
+         FROM homepage_campaign_events
+        WHERE visitor_id = ?
+          AND event_type = 'IMPRESSION'
+          AND campaign_id IN (${placeholders})
+        GROUP BY campaign_id`,
+      [visitorId, ...campaignIds]
+    );
+    const impressionsByCampaign = new Map(
+      impressionRows.map((row) => [String(row.campaign_id), Number(row.impressions || 0)])
+    );
+
+    const deliverable = campaigns
+      .filter((campaign) => {
+        const limit = Number(campaign.max_impressions_per_vendor || 0);
+        if (limit <= 0) return true;
+        return (impressionsByCampaign.get(String(campaign.id)) || 0) < limit;
+      })
+      .slice(0, 10)
+      .map(toPublicCampaign);
+
+    return res.json({ success: true, campaigns: deliverable });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message || 'Failed to load homepage campaigns' });
+  }
+});
+
+router.post('/homepage/:campaignId/events', async (req, res) => {
+  try {
+    await ensureVendorCampaignTables();
+    const campaignId = text(req.params.campaignId, 80);
+    const visitorId = text(req.body?.visitor_id, 80);
+    const eventType = text(req.body?.event_type, 32).toUpperCase();
+    const sessionKey = text(req.body?.session_key, 100);
+    if (
+      !campaignId ||
+      !PUBLIC_VISITOR_ID_RE.test(visitorId) ||
+      !VENDOR_CAMPAIGN_EVENTS.has(eventType) ||
+      !sessionKey
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: 'Campaign, visitor, event type, and session are required',
+      });
+    }
+
+    const rows = await mysqlQuery(
+      `SELECT *
+         FROM vendor_campaigns
+        WHERE id = ?
+          AND placement = 'HOMEPAGE'
+          AND deleted_at IS NULL
+        LIMIT 1`,
+      [campaignId]
+    );
+    const campaign = rows[0] ? normalizeCampaignRow(rows[0]) : null;
+    if (!campaign) {
+      return res.status(404).json({ success: false, error: 'Homepage campaign not found' });
+    }
+    if (getCampaignEffectiveStatus(campaign) !== 'ACTIVE') {
+      return res.status(409).json({ success: false, error: 'Homepage campaign is not active' });
+    }
+
+    await mysqlQuery(
+      `INSERT IGNORE INTO homepage_campaign_events
+        (id, campaign_id, visitor_id, event_type, session_key, metadata, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, UTC_TIMESTAMP())`,
+      [
+        randomUUID(),
+        campaign.id,
+        visitorId,
+        eventType,
+        sessionKey,
+        JSON.stringify(normalizePublicEventMetadata(req.body?.metadata)),
+      ]
+    );
+
+    return res.json({ success: true });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message || 'Failed to record homepage campaign event' });
+  }
+});
+
 router.get('/active', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
   try {
     await ensureVendorCampaignTables();
@@ -62,6 +198,7 @@ router.get('/active', requireAuth({ roles: ['VENDOR'] }), async (req, res) => {
       `SELECT c.*
          FROM vendor_campaigns c
         WHERE c.deleted_at IS NULL
+          AND c.placement = 'VENDOR_PORTAL'
           AND c.is_active = 1
           AND c.starts_at <= UTC_TIMESTAMP()
           AND c.ends_at > UTC_TIMESTAMP()
@@ -136,7 +273,11 @@ router.post('/:campaignId/events', requireAuth({ roles: ['VENDOR'] }), async (re
       [campaignId]
     );
     const campaign = campaigns[0] ? normalizeCampaignRow(campaigns[0]) : null;
-    if (!campaign || !isCampaignTargetedToVendor(campaign, vendor)) {
+    if (
+      !campaign ||
+      campaign.placement !== 'VENDOR_PORTAL' ||
+      !isCampaignTargetedToVendor(campaign, vendor)
+    ) {
       return res.status(404).json({ success: false, error: 'Campaign not found' });
     }
 

@@ -52,6 +52,7 @@ test('campaign effective status follows activity and schedule', () => {
 
 test('normalizeCampaignRow converts JSON and numeric database values', () => {
   const normalized = normalizeCampaignRow({
+    placement: 'homepage',
     target_vendor_ids: '["vendor-1", "", "vendor-2"]',
     is_active: 1,
     dismissible: 0,
@@ -60,10 +61,16 @@ test('normalizeCampaignRow converts JSON and numeric database values', () => {
     impressions: '8',
   });
 
+  assert.equal(normalized.placement, 'HOMEPAGE');
   assert.deepEqual(normalized.target_vendor_ids, ['vendor-1', 'vendor-2']);
   assert.equal(normalized.is_active, true);
   assert.equal(normalized.dismissible, false);
   assert.equal(normalized.priority, 75);
   assert.equal(normalized.discount_value, 12.5);
   assert.equal(normalized.impressions, 8);
+});
+
+test('normalizeCampaignRow keeps legacy campaigns on the vendor portal', () => {
+  assert.equal(normalizeCampaignRow({}).placement, 'VENDOR_PORTAL');
+  assert.equal(normalizeCampaignRow({ placement: 'unknown' }).placement, 'VENDOR_PORTAL');
 });

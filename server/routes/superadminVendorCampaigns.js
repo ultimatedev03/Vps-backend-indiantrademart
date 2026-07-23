@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import { mysqlQuery, withMysqlConnection } from '../lib/mysqlPool.js';
 import { writeAuditLog } from '../lib/audit.js';
 import {
+  VENDOR_CAMPAIGN_PLACEMENTS,
   VENDOR_CAMPAIGN_TARGETS,
   VENDOR_CAMPAIGN_TYPES,
   VENDOR_CAMPAIGN_VARIANTS,
@@ -63,7 +64,9 @@ const normalizeCtaUrl = (value) => {
 
 function normalizeCampaignPayload(body = {}) {
   const campaignType = cleanText(body.campaign_type, 32).toUpperCase();
-  const targetType = cleanText(body.target_type || 'ALL', 32).toUpperCase();
+  const placement = cleanText(body.placement || 'VENDOR_PORTAL', 32).toUpperCase();
+  const requestedTargetType = cleanText(body.target_type || 'ALL', 32).toUpperCase();
+  const targetType = placement === 'HOMEPAGE' ? 'ALL' : requestedTargetType;
   const styleVariant = cleanText(body.style_variant || 'INFO', 32).toUpperCase();
   const title = cleanText(body.title, 191);
   const message = cleanText(body.message, 4000);
@@ -74,6 +77,9 @@ function normalizeCampaignPayload(body = {}) {
 
   if (!VENDOR_CAMPAIGN_TYPES.has(campaignType)) {
     throw new CampaignInputError('Campaign type must be Announcement, Discount, or Coupon');
+  }
+  if (!VENDOR_CAMPAIGN_PLACEMENTS.has(placement)) {
+    throw new CampaignInputError('Campaign placement must be Vendor portal or Homepage');
   }
   if (!VENDOR_CAMPAIGN_TARGETS.has(targetType)) {
     throw new CampaignInputError('Target must be all vendors or selected vendors');
@@ -112,6 +118,7 @@ function normalizeCampaignPayload(body = {}) {
   const normalized = {
     name: cleanText(body.name || title, 191),
     campaign_type: campaignType,
+    placement,
     title,
     message,
     style_variant: styleVariant,
@@ -164,7 +171,7 @@ function normalizeCampaignPayload(body = {}) {
 }
 
 async function assertTargetVendors(connection, campaign) {
-  if (campaign.target_type !== 'SELECTED') return;
+  if (campaign.placement !== 'VENDOR_PORTAL' || campaign.target_type !== 'SELECTED') return;
   const placeholders = campaign.target_vendor_ids.map(() => '?').join(', ');
   const [rows] = await connection.query(
     `SELECT id FROM vendors WHERE id IN (${placeholders})`,
@@ -180,6 +187,7 @@ const couponMetadata = (campaignId, campaign) => JSON.stringify({
   campaign_id: campaignId,
   campaign_starts_at: campaign.starts_at,
   campaign_ends_at: campaign.ends_at,
+  placement: campaign.placement,
   target_type: campaign.target_type,
   target_vendor_ids: campaign.target_vendor_ids,
 });
@@ -298,11 +306,21 @@ router.get('/', async (_req, res) => {
     await ensureVendorCampaignTables();
     const rows = await mysqlQuery(`
       SELECT c.*, COALESCE(cp.used_count, 0) AS coupon_used_count,
-             COALESCE(es.impressions, 0) AS impressions,
-             COALESCE(es.clicks, 0) AS clicks,
-             COALESCE(es.dismissals, 0) AS dismissals,
-             COALESCE(es.code_copies, 0) AS code_copies,
-             COALESCE(es.unique_vendors_reached, 0) AS unique_vendors_reached
+             CASE WHEN c.placement = 'HOMEPAGE'
+               THEN COALESCE(hes.impressions, 0) ELSE COALESCE(ves.impressions, 0)
+             END AS impressions,
+             CASE WHEN c.placement = 'HOMEPAGE'
+               THEN COALESCE(hes.clicks, 0) ELSE COALESCE(ves.clicks, 0)
+             END AS clicks,
+             CASE WHEN c.placement = 'HOMEPAGE'
+               THEN COALESCE(hes.dismissals, 0) ELSE COALESCE(ves.dismissals, 0)
+             END AS dismissals,
+             CASE WHEN c.placement = 'HOMEPAGE'
+               THEN COALESCE(hes.code_copies, 0) ELSE COALESCE(ves.code_copies, 0)
+             END AS code_copies,
+             CASE WHEN c.placement = 'HOMEPAGE'
+               THEN COALESCE(hes.unique_visitors_reached, 0) ELSE COALESCE(ves.unique_vendors_reached, 0)
+             END AS unique_vendors_reached
         FROM vendor_campaigns c
         LEFT JOIN vendor_plan_coupons cp ON cp.id = c.coupon_id
         LEFT JOIN (
@@ -310,11 +328,21 @@ router.get('/', async (_req, res) => {
                  SUM(event_type = 'IMPRESSION') AS impressions,
                  SUM(event_type = 'CLICK') AS clicks,
                  SUM(event_type = 'DISMISS') AS dismissals,
+                  SUM(event_type = 'COPY_CODE') AS code_copies,
+                  COUNT(DISTINCT CASE WHEN event_type = 'IMPRESSION' THEN vendor_id END) AS unique_vendors_reached
+             FROM vendor_campaign_events
+            GROUP BY campaign_id
+        ) ves ON ves.campaign_id = c.id
+        LEFT JOIN (
+          SELECT campaign_id,
+                 SUM(event_type = 'IMPRESSION') AS impressions,
+                 SUM(event_type = 'CLICK') AS clicks,
+                 SUM(event_type = 'DISMISS') AS dismissals,
                  SUM(event_type = 'COPY_CODE') AS code_copies,
-                 COUNT(DISTINCT CASE WHEN event_type = 'IMPRESSION' THEN vendor_id END) AS unique_vendors_reached
-            FROM vendor_campaign_events
+                 COUNT(DISTINCT CASE WHEN event_type = 'IMPRESSION' THEN visitor_id END) AS unique_visitors_reached
+            FROM homepage_campaign_events
            GROUP BY campaign_id
-        ) es ON es.campaign_id = c.id
+        ) hes ON hes.campaign_id = c.id
        WHERE c.deleted_at IS NULL
        ORDER BY c.created_at DESC
        LIMIT 500
@@ -383,15 +411,16 @@ router.post('/', async (req, res) => {
         });
         await connection.query(
           `INSERT INTO vendor_campaigns
-            (id, name, campaign_type, title, message, style_variant, cta_label, cta_url,
+            (id, name, campaign_type, placement, title, message, style_variant, cta_label, cta_url,
              target_type, target_vendor_ids, coupon_id, coupon_code, discount_type, discount_value,
              plan_id, max_uses, starts_at, ends_at, is_active, priority, dismissible,
              max_impressions_per_vendor, created_by, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP())`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP())`,
           [
             campaignId,
             campaign.name,
             campaign.campaign_type,
+            campaign.placement,
             campaign.title,
             campaign.message,
             campaign.style_variant,
@@ -429,6 +458,7 @@ router.post('/', async (req, res) => {
       entityId: campaignId,
       details: {
         campaign_type: campaign.campaign_type,
+        placement: campaign.placement,
         target_type: campaign.target_type,
         target_count: campaign.target_vendor_ids.length,
         coupon_code: campaign.coupon_code,
@@ -467,7 +497,7 @@ router.put('/:campaignId', async (req, res) => {
         });
         await connection.query(
           `UPDATE vendor_campaigns
-              SET name = ?, campaign_type = ?, title = ?, message = ?, style_variant = ?,
+              SET name = ?, campaign_type = ?, placement = ?, title = ?, message = ?, style_variant = ?,
                   cta_label = ?, cta_url = ?, target_type = ?, target_vendor_ids = ?,
                   coupon_id = ?, coupon_code = ?, discount_type = ?, discount_value = ?, plan_id = ?,
                   max_uses = ?, starts_at = ?, ends_at = ?, is_active = ?, priority = ?, dismissible = ?,
@@ -476,6 +506,7 @@ router.put('/:campaignId', async (req, res) => {
           [
             campaign.name,
             campaign.campaign_type,
+            campaign.placement,
             campaign.title,
             campaign.message,
             campaign.style_variant,
@@ -511,7 +542,11 @@ router.put('/:campaignId', async (req, res) => {
       action: 'VENDOR_CAMPAIGN_UPDATED',
       entityType: 'vendor_campaigns',
       entityId: campaignId,
-      details: { campaign_type: campaign.campaign_type, target_type: campaign.target_type },
+      details: {
+        campaign_type: campaign.campaign_type,
+        placement: campaign.placement,
+        target_type: campaign.target_type,
+      },
     });
     return res.json({ success: true, campaign: await readCampaign(campaignId) });
   } catch (error) {
