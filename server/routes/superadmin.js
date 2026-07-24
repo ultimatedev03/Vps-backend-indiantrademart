@@ -37,6 +37,10 @@ import {
   getCategoryDemandDetails,
 } from '../lib/categoryDemandAnalytics.js';
 import { normalizePlanFeatures } from '../lib/vendorPlanCatalog.js';
+import {
+  applyBulkVendorPlanActivation,
+  previewBulkVendorPlanActivation,
+} from '../lib/bulkVendorPlanActivation.js';
 import superadminVendorCampaignsRouter from './superadminVendorCampaigns.js';
 
 const router = express.Router();
@@ -1916,6 +1920,124 @@ router.delete('/vendors/:vendorId', async (req, res) => {
 // -----------------------
 // Subscription plan catalog
 // -----------------------
+router.post('/plans/bulk-activation/preview', async (req, res) => {
+  try {
+    const preview = await previewBulkVendorPlanActivation({
+      scope: req.body?.scope,
+      source_plan_id: req.body?.source_plan_id || req.body?.sourcePlanId,
+      target_plan_id: req.body?.target_plan_id || req.body?.targetPlanId,
+      duration_days: req.body?.duration_days ?? req.body?.durationDays,
+      sample_limit: req.body?.sample_limit ?? req.body?.sampleLimit,
+    });
+
+    await writeAuditLog({
+      req,
+      actor: req.actor,
+      action: 'SUPERADMIN_BULK_PLAN_PREVIEWED',
+      entityType: 'vendor_plan_subscriptions',
+      details: {
+        scope: preview.scope,
+        source_plan_id: preview.source_plan.id,
+        source_plan_name: preview.source_plan.name || null,
+        target_plan_id: preview.target_plan.id,
+        target_plan_name: preview.target_plan.name || null,
+        duration_days: preview.duration_days,
+        eligible_count: preview.eligible_count,
+        unchanged_source_history_count: preview.unchanged_source_history_count,
+        selection_hash: preview.selection_hash,
+      },
+    });
+
+    return res.json({
+      success: true,
+      preview: {
+        scope: preview.scope,
+        source_plan: preview.source_plan,
+        target_plan: preview.target_plan,
+        duration_days: preview.duration_days,
+        eligible_count: preview.eligible_count,
+        source_history_count: preview.source_history_count,
+        unchanged_source_history_count: preview.unchanged_source_history_count,
+        selection_hash: preview.selection_hash,
+        sample: preview.sample,
+      },
+    });
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      success: false,
+      error: error?.message || 'Failed to preview bulk plan activation',
+    });
+  }
+});
+
+router.post('/plans/bulk-activation/apply', async (req, res) => {
+  try {
+    const notes = compactText(req.body?.notes).slice(0, 2000);
+    const result = await applyBulkVendorPlanActivation({
+      scope: req.body?.scope,
+      source_plan_id: req.body?.source_plan_id || req.body?.sourcePlanId,
+      target_plan_id: req.body?.target_plan_id || req.body?.targetPlanId,
+      duration_days: req.body?.duration_days ?? req.body?.durationDays,
+      preview_hash: req.body?.preview_hash || req.body?.previewHash,
+      confirmation: req.body?.confirmation,
+    });
+
+    try {
+      await writeAuditLog({
+        req,
+        actor: req.actor,
+        action: 'SUPERADMIN_BULK_VENDOR_PLANS_ACTIVATED',
+        entityType: 'vendor_plan_subscriptions',
+        details: {
+          scope: result.scope,
+          source_plan_id: result.source_plan.id,
+          source_plan_name: result.source_plan.name || null,
+          target_plan_id: result.target_plan.id,
+          target_plan_name: result.target_plan.name || null,
+          duration_days: result.duration_days,
+          activated_count: result.activated_count,
+          notified_count: result.notified_count,
+          started_at: result.started_at,
+          ends_at: result.ends_at,
+          selection_hash: result.selection_hash,
+          subscription_ids: result.subscription_ids.slice(0, 100),
+          vendor_ids: result.candidates
+            .slice(0, 100)
+            .map((candidate) => candidate.vendor_record_id),
+          audit_sample_truncated:
+            result.activated_count > 100 || result.subscription_ids.length > 100,
+          payment_recorded: false,
+          notes: notes || null,
+        },
+      });
+    } catch (auditError) {
+      logger.error('[SuperAdmin] Bulk plan activation audit failed:', auditError?.message || auditError);
+    }
+
+    return res.status(201).json({
+      success: true,
+      result: {
+        scope: result.scope,
+        source_plan: result.source_plan,
+        target_plan: result.target_plan,
+        duration_days: result.duration_days,
+        activated_count: result.activated_count,
+        notified_count: result.notified_count,
+        started_at: result.started_at,
+        ends_at: result.ends_at,
+        selection_hash: result.selection_hash,
+        sample: result.candidates.slice(0, 20),
+        payment_recorded: false,
+      },
+    });
+  } catch (error) {
+    return res.status(error?.statusCode || 500).json({
+      success: false,
+      error: error?.message || 'Failed to apply bulk plan activation',
+    });
+  }
+});
+
 router.get('/plans', async (req, res) => {
   try {
     const includeInactive = req.query?.include_inactive !== 'false';
